@@ -388,39 +388,44 @@ bool MirvInput::GetCamResetView(void)
 	return result;
 }
 
+// Movement (forward/left/up) scales with both the cam speed and the slow factor.
+// Rotation/FOV from the MOUSE is deliberately NOT scaled by cam speed, so look
+// sensitivity stays constant as you change movement speed (only keyboard
+// arrow-key rotation scales with speed). Everything still scales with the slow
+// factor so Shift gives uniform fine control.
 double MirvInput::GetCamDForward(void)
 {
-	return m_CamSpeed * (m_CamForward -m_CamForwardI +m_MouseInput.GetForward());
+	return m_SlowFactor * m_CamSpeed * (m_CamForward -m_CamForwardI +m_MouseInput.GetForward());
 }
 
 double MirvInput::GetCamDLeft(void)
 {
-	return m_CamSpeed * (m_CamLeft -m_CamLeftI +m_MouseInput.GetLeft());
+	return m_SlowFactor * m_CamSpeed * (m_CamLeft -m_CamLeftI +m_MouseInput.GetLeft());
 }
 
 double MirvInput::GetCamDUp(void)
 {
-	return m_CamSpeed * (m_CamUp -m_CamUpI +m_MouseInput.GetUp());
+	return m_SlowFactor * m_CamSpeed * (m_CamUp -m_CamUpI +m_MouseInput.GetUp());
 }
 
 double MirvInput::GetCamDPitch(void)
 {
-	return m_CamSpeed * (m_CamPitch -m_CamPitchI +m_MouseInput.GetPitch());
+	return m_SlowFactor * (m_CamSpeed * (m_CamPitch -m_CamPitchI) +m_MouseInput.GetPitch());
 }
 
 double MirvInput::GetCamDYaw(void)
 {
-	return m_CamSpeed * (m_CamYaw -m_CamYawI +m_MouseInput.GetYaw());
+	return m_SlowFactor * (m_CamSpeed * (m_CamYaw -m_CamYawI) +m_MouseInput.GetYaw());
 }
 
 double MirvInput::GetCamDRoll(void)
 {
-	return m_CamSpeed * (m_CamRoll -m_CamRollI);
+	return m_SlowFactor * m_CamSpeed * (m_CamRoll -m_CamRollI);
 }
 
 double MirvInput::GetCamDFov(void)
 {
-	return m_CamSpeed * (m_CamFov -m_CamFovI +m_MouseInput.GetFov());
+	return m_SlowFactor * (m_CamSpeed * (m_CamFov -m_CamFovI) +m_MouseInput.GetFov());
 }
 
 bool MirvInput::GetCameraControlMode(void)
@@ -729,11 +734,11 @@ bool MirvInput::Supply_KeyEvent(KeyState keyState, WPARAM wParam, LPARAM lParam)
 		case VK_NUMPAD6:
 			m_CamLeftI = KS_DOWN == keyState ? m_KeyboardSens * m_KeyboardRightSpeed : 0.0;
 			return true;
-		case 0x52: // R key
+		// R / F (letter keys) removed as free-cam up/down per filmmaker UI cleanup;
+		// vertical movement stays on the numpad so F is free for marker editing.
 		case VK_NUMPAD9:
 			m_CamUp = KS_DOWN == keyState ? m_KeyboardSens * m_KeyboardUpSpeed : 0.0;
 			return true;
-		case 0x46: // F key
 		case VK_NUMPAD3:
 			m_CamUpI = KS_DOWN == keyState ? m_KeyboardSens * m_KeyboardDownSpeed : 0.0;
 			return true;

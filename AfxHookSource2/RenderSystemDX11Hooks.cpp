@@ -12,6 +12,8 @@
 #include "RenderCommands.h"
 #include "StreamSettings.h"
 
+#include "Filmmaker/Filmmaker.h"
+
 #include "../shared/AfxDetours.h"
 #include "../shared/binutils.h"
 #include "../shared/ImageBufferThreadSafe.h"
@@ -1877,6 +1879,8 @@ HRESULT WINAPI New_D3D11CreateDevice(
 
 void Before_Present() {
     g_bInOwnDraw = true;
+
+    Filmmaker::RunFrame();
 
     g_CampathDrawer.OnRenderThread_Present();
 

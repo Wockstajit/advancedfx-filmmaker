@@ -1,0 +1,124 @@
+#include "CamMarkers.h"
+
+#include "../Platform/JsonBuilder.h"
+#include "../Platform/JsonParser.h"
+#include "../Platform/TextEncoding.h"
+#include "../../../shared/AfxConsole.h"
+
+#include <fstream>
+#include <iterator>
+
+namespace Filmmaker {
+
+void CamMarkers::SetSelected(int i) {
+	if (m_markers.empty()) { m_selected = -1; return; }
+	if (i < 0) i = 0;
+	if (i >= (int)m_markers.size()) i = (int)m_markers.size() - 1;
+	m_selected = i;
+}
+
+int CamMarkers::Add(const CamMarker& m) {
+	m_markers.push_back(m);
+	m_selected = (int)m_markers.size() - 1;
+	return m_selected;
+}
+
+bool CamMarkers::DeleteIndex(int i) {
+	if (i < 0 || i >= (int)m_markers.size())
+		return false;
+	m_markers.erase(m_markers.begin() + i);
+	if (m_markers.empty())
+		m_selected = -1;
+	else if (m_selected >= (int)m_markers.size())
+		m_selected = (int)m_markers.size() - 1;
+	return true;
+}
+
+void CamMarkers::DeleteAll() {
+	m_markers.clear();
+	m_selected = -1;
+}
+
+bool CamMarkers::Save(const std::wstring& path, const PathSettings& st, int selected) const {
+	JsonBuilder jb;
+	jb.BeginObject();
+	jb.IntField("version", 2); // 2 adds per-marker "ease"; older loaders ignore it
+	jb.IntField("speedMode", st.speedMode);
+	jb.IntField("timing", st.timing);
+	jb.IntField("interp", st.interp);
+	jb.DoubleField("constSpeed", st.constSpeed);
+	jb.IntField("autoSnap", st.autoSnap ? 1 : 0);
+	jb.IntField("selected", selected);
+	jb.Key("markers");
+	jb.BeginArray();
+	for (const CamMarker& m : m_markers) {
+		jb.BeginObject();
+		jb.DoubleField("x", m.x); jb.DoubleField("y", m.y); jb.DoubleField("z", m.z);
+		jb.DoubleField("pitch", m.pitch); jb.DoubleField("yaw", m.yaw); jb.DoubleField("roll", m.roll);
+		jb.DoubleField("fov", m.fov);
+		jb.IntField("tick", m.tick);
+		jb.DoubleField("time", m.time);
+		jb.DoubleField("speedmul", m.speedMul);
+		jb.IntField("ease", (int)m.ease);
+		jb.EndObject();
+	}
+	jb.EndArray();
+	jb.EndObject();
+
+	std::ofstream f(path.c_str(), std::ios::binary | std::ios::trunc);
+	if (!f) {
+		advancedfx::Warning("[campath] could not write %s\n", WideToUtf8(path).c_str());
+		return false;
+	}
+	const std::string& s = jb.Str();
+	f.write(s.data(), (std::streamsize)s.size());
+	return true;
+}
+
+bool CamMarkers::Load(const std::wstring& path, PathSettings& st, int& selected) {
+	std::ifstream f(path.c_str(), std::ios::binary);
+	if (!f)
+		return false; // no sidecar yet
+
+	std::string text((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+	JsonValue root;
+	if (!JsonParse(text, root) || root.type != JsonValue::Type::Object) {
+		advancedfx::Warning("[campath] bad sidecar %s\n", WideToUtf8(path).c_str());
+		return false;
+	}
+
+	if (const JsonValue* v = root.Find("speedMode")) st.speedMode = v->AsInt(0);
+	if (const JsonValue* v = root.Find("timing")) st.timing = v->AsInt(0);
+	if (const JsonValue* v = root.Find("interp")) st.interp = v->AsInt(0);
+	if (const JsonValue* v = root.Find("constSpeed")) st.constSpeed = (float)v->AsNumber(1.0);
+	if (const JsonValue* v = root.Find("autoSnap")) st.autoSnap = (v->AsInt(0) != 0);
+	int sel = -1; if (const JsonValue* v = root.Find("selected")) sel = v->AsInt(-1);
+
+	m_markers.clear();
+	if (const JsonValue* arr = root.Find("markers")) {
+		if (arr->type == JsonValue::Type::Array) {
+			for (const JsonValue& mo : arr->arr) {
+				if (mo.type != JsonValue::Type::Object) continue;
+				auto num = [&](const char* k, double d) -> double {
+					const JsonValue* x = mo.Find(k); return x ? x->AsNumber(d) : d;
+				};
+				CamMarker m;
+				m.x = num("x", 0); m.y = num("y", 0); m.z = num("z", 0);
+				m.pitch = num("pitch", 0); m.yaw = num("yaw", 0); m.roll = num("roll", 0);
+				m.fov = num("fov", 90);
+				const JsonValue* tk = mo.Find("tick"); m.tick = tk ? tk->AsInt(0) : 0;
+				m.time = num("time", 0);
+				m.speedMul = (float)num("speedmul", 1.0);
+				const JsonValue* ev = mo.Find("ease"); m.ease = (Ease)(ev ? ev->AsInt(0) : 0);
+				m_markers.push_back(m);
+			}
+		}
+	}
+
+	if (sel >= (int)m_markers.size()) sel = (int)m_markers.size() - 1;
+	m_selected = m_markers.empty() ? -1 : (sel < 0 ? 0 : sel);
+	selected = m_selected;
+	return true;
+}
+
+} // namespace Filmmaker

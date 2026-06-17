@@ -1,0 +1,51 @@
+#pragma once
+
+// Plain data describing a single demo file and (when available) its scoreboard.
+
+#include <string>
+#include <vector>
+#include <cstdint>
+
+namespace Filmmaker {
+
+// One player's result for a single scored round (the round-performance timeline).
+struct RoundStat {
+	int kills = 0;
+	int headshots = 0;
+	int died = 0; // 0/1
+	int won = 0;  // 0/1 - did this player's team win the round
+	int side = 0; // 0 = CT, 1 = T (this player's side that round)
+	int mvp = 0;  // 0/1
+};
+
+// One player row, reconstructed from the <demo>.dem.info match sidecar.
+// Names are not present in that file, so they are shown as "[unknown]"
+// (this is exactly why CS2's own Downloaded page shows [unknown] too).
+struct ScoreboardPlayer {
+	uint32_t accountId = 0; // Steam account id (steamID3); 0 = unknown
+	std::string name = "[unknown]";
+	int kills = 0;
+	int assists = 0;
+	int deaths = 0;
+	int score = 0;
+	int mvps = 0;
+	int teamIndex = 0; // 0 = first team group, 1 = second team group
+	std::vector<RoundStat> perRound; // empty until a full demofile parse has run
+};
+
+struct DemoEntry {
+	std::wstring path;        // full path on disk
+	std::string fileName;     // file name only (UTF-8), for display
+	std::string folder;       // containing folder (UTF-8), for display
+	std::string map;          // map name from the .dem header (may be empty)
+	int durationSeconds = 0;  // playback length from the .dem header (0 = unknown)
+	int64_t dateModified = 0; // file last-write time, unix seconds
+
+	bool hasScoreboard = false;
+	bool hasRounds = false; // a full parse produced the per-round timeline
+	int teamScore0 = 0;
+	int teamScore1 = 0;
+	std::vector<ScoreboardPlayer> players;
+};
+
+} // namespace Filmmaker

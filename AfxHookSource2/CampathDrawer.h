@@ -44,6 +44,14 @@ public:
 	float GetDrawKeyframeIndex() { return m_DrawKeyframIndex; }
 	void SetDrawKeyframeIndex(float value) { m_DrawKeyframIndex = value; }
 
+	// Camera-marker styling (set by Filmmaker::CameraPath). When enabled, keyframes
+	// are painted in the global Freeze (blue) / Live (gold) colour with a glow, and
+	// the aimed-at marker (highlight) is drawn white. Plain members read on the
+	// drawing thread; a benign one-frame-stale race at worst (visual only).
+	void MarkerStyle_set(bool enabled, bool freeze, int highlight) {
+		m_MarkerStyle = enabled; m_MarkerFreeze = freeze; m_MarkerHighlight = highlight;
+	}
+
 	void BeginDevice(ID3D11Device * device);
 	void EndDevice();
 	void Reset();
@@ -131,6 +139,10 @@ private:
 			return m_CurrentValue;
 		}
 
+		bool GetMarkerStyle() const { return m_MarkerStyle; }
+		bool GetMarkerFreeze() const { return m_MarkerFreeze; }
+		int GetMarkerHighlight() const { return m_MarkerHighlight; }
+
 	private:
 		double m_CurTime;
 		bool m_InCampath;
@@ -146,6 +158,10 @@ private:
 		float m_DrawKeyFrameIndex;
 		bool m_DrawKeyframeAxis;
 		bool m_DrawKeyframeCam;
+
+		bool m_MarkerStyle;
+		bool m_MarkerFreeze;
+		int m_MarkerHighlight;
 
 		CamPathValue m_CurrentValue;
 	};
@@ -243,6 +259,10 @@ private:
 	bool m_DrawKeyframeAxis = false;
 	bool m_DrawKeyframeCam = true;
 
+	bool m_MarkerStyle = false;
+	bool m_MarkerFreeze = false;
+	int m_MarkerHighlight = -1;
+
 	ID3D11Device * m_Device = nullptr;
 	ID3D11DeviceContext * m_DeviceContext = nullptr;
 	ID3D11DeviceContext * m_ImmediateContext = nullptr;
@@ -256,6 +276,7 @@ private:
 	ID3D11RasterizerState * m_RasterizerStateDigits = nullptr;
 	ID3D11RasterizerState * m_RasterizerStateLines = nullptr;
 	ID3D11BlendState * m_BlendState = nullptr;
+	ID3D11BlendState * m_BlendStateAdditive = nullptr; // additive blend for the marker glow
 	ID3D11InputLayout * m_InputLayoutDigits = nullptr;
 	ID3D11InputLayout * m_InputLayoutLines = nullptr;
 
@@ -318,7 +339,7 @@ private:
 	static void RamerDouglasPeucker(TempPoint * start, TempPoint * end, double epsilon);
 	static double ShortestDistanceToSegment(TempPoint * pt, TempPoint * start, TempPoint * end);
 
-	void DrawCamera(const CamPathValue & cpv, DWORD colour, int screenWidth, int screenHeight);
+	void DrawCamera(const CamPathValue & cpv, DWORD colour, int screenWidth, int screenHeight, double sizeScale = 1.0);
 
 	void OnPostRenderAllTools_DrawingThread(CDynamicProperties * dynamicPorperties, CLessDynamicProperties * lessDynamicProperties);
 

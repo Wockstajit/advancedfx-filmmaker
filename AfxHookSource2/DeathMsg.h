@@ -5,6 +5,22 @@
 void HookDeathMsg(HMODULE clientDll);
 void HookPanorama(HMODULE panoramaDll);
 
+// Exposes the resolved Panorama UI engine instance pointer (a u_char**), or
+// nullptr if not yet resolved. Used by the filmmaker Panorama bridge so it does
+// not have to re-derive the engine address.
+unsigned char** AfxHookSource2_GetPanoramaUiEngine();
+
+// Exposes the resolved CUIEngine::RunScript function pointer (or nullptr).
+void* AfxHookSource2_GetPanoramaRunScript();
+
+// Exposes the in-game HUD root panel (CUIPanel*), valid while a map/demo is
+// loaded; nullptr in the main menu. Usable as a RunScript context panel.
+unsigned char* AfxHookSource2_GetPanoramaHudPanel();
+
+// Exposes the main-menu root panel (CUIPanel*), valid on the home screen (where
+// the top navbar lives); may be nullptr very early. Usable as a RunScript context.
+unsigned char* AfxHookSource2_GetPanoramaMainMenuPanel();
+
 struct currentGameCamera {
 	double origin[3];
 	double angles[3];

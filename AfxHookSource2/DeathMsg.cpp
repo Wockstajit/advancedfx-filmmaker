@@ -396,6 +396,7 @@ struct myPanoramaWrapper {
 	short spawnTimeSymbol = -1;
 	u_char** pUIEngine = nullptr;
 	u_char** pHudPanel = nullptr;
+	u_char** pMainMenuPanel = nullptr;
 
 	struct ColorEntry {
 		u_char* pointer;
@@ -679,6 +680,10 @@ struct myPanoramaWrapper {
 	*/
 
 } g_myPanoramaWrapper;
+
+unsigned char** AfxHookSource2_GetPanoramaUiEngine() {
+	return g_myPanoramaWrapper.pUIEngine;
+}
 
 CON_COMMAND(__mirv_panorama_print_children, "") {
 	const auto arg0 = args->ArgV(0);
@@ -1345,12 +1350,51 @@ LAB_1809a7de1
 	std::memcpy(&g_HudPanel_offset, (void*)(g_HudPanel_addr), sizeof(g_HudPanel_offset));
 	g_myPanoramaWrapper.pHudPanel = (u_char**)(g_HudPanel_addr + g_HudPanel_offset + 4);
 
+	// Main-menu root panel global (CPanel2D**). Unlike the HUD panel this stays
+	// valid on the home screen, so the top-navbar "Demos" button can attach there
+	// (the HUD lives in a separate Panorama window with no main-menu navbar).
+	// Osiris MainMenuPanelPointer (Windows): "EC ? 48 8B 05 ? ? ? ? 48 8D 15 ? ? ? ? 48", +5 then rip-relative.
+	// Non-fatal: if this build's pattern differs we just lose the navbar button
+	// (bridge falls back to the HUD panel + the mirv_filmmaker ui console command)
+	// rather than breaking the rest of the Panorama integration.
+	if (size_t g_MainMenuPanel_addr = getAddress(clientDll, "EC ?? 48 8B 05 ?? ?? ?? ?? 48 8D 15 ?? ?? ?? ?? 48"); g_MainMenuPanel_addr != 0) {
+		g_MainMenuPanel_addr += 5;
+		uint32_t g_MainMenuPanel_offset;
+		std::memcpy(&g_MainMenuPanel_offset, (void*)(g_MainMenuPanel_addr), sizeof(g_MainMenuPanel_offset));
+		g_myPanoramaWrapper.pMainMenuPanel = (u_char**)(g_MainMenuPanel_addr + g_MainMenuPanel_offset + 4);
+	} else {
+		advancedfx::Warning("AfxHookSource2: filmmaker main-menu panel pattern not found; navbar button disabled (use 'mirv_filmmaker ui').\n");
+	}
+
 	uint32_t g_CUIEngine_offset;
 	std::memcpy(&g_CUIEngine_offset, (void*)(g_CUIEngine_addr), sizeof(g_CUIEngine_offset));
 	g_myPanoramaWrapper.pUIEngine = (u_char**)(g_CUIEngine_addr + g_CUIEngine_offset + 4);
 
 	return true;
 };
+
+// CUIEngine::RunScript(uiEngine, contextPanel, source, originFile, line).
+// Resolved directly from its prologue in panorama.dll.
+typedef void(__fastcall* Panorama_RunScript_t)(void* uiEngine, void* contextPanel, const char* source, const char* originFile, uint64_t line);
+Panorama_RunScript_t g_Panorama_RunScript = nullptr;
+
+void* AfxHookSource2_GetPanoramaRunScript() {
+	return (void*)g_Panorama_RunScript;
+}
+
+unsigned char* AfxHookSource2_GetPanoramaHudPanel() {
+	auto p = g_myPanoramaWrapper.pHudPanel;
+	if (!p) return nullptr;
+	return ((unsigned char***)p)[0][1];
+}
+
+unsigned char* AfxHookSource2_GetPanoramaMainMenuPanel() {
+	auto p = g_myPanoramaWrapper.pMainMenuPanel;
+	if (!p) return nullptr;
+	auto clientPanel = ((unsigned char**)p)[0]; // *p -> CPanel2D* (null until the menu exists)
+	if (!clientPanel) return nullptr;
+	return ((unsigned char**)clientPanel)[1]; // CPanel2D->uiPanel at +0x8 -> CUIPanel*
+}
 
 bool getPanoramaAddrs(HMODULE panoramaDll) {
 
@@ -1426,8 +1470,18 @@ bool getPanoramaAddrs(HMODULE panoramaDll) {
 		auto addr = getAddress(panoramaDll, "E8 ?? ?? ?? ?? 48 8D 05 ?? ?? ?? ?? 48 89 45 ?? EB");
 		if (addr) {
 			g_CPanelStyleSetStyleProperty = (g_CPanelStyleSetStyleProperty_t)(addr + 5 + *(int32_t*)(addr + 1));
-		} else 
-			ErrorBox(MkErrStr(__FILE__, __LINE__));	
+		} else
+			ErrorBox(MkErrStr(__FILE__, __LINE__));
+	}
+
+	{
+		// CUIEngine::RunScript prologue. Pattern from current Osiris
+		// (PanoramaUiEnginePatternsWindows.h), verified as a unique match in
+		// panorama.dll for this CS2 build. The match address is the function.
+		g_Panorama_RunScript = (Panorama_RunScript_t)getAddress(panoramaDll,
+			"48 89 5C 24 ?? 4C 89 4C 24 ?? 48 89 54 24 ?? 55 56 57 41 54 41 55 41 56 41 57 48 8D");
+		if (nullptr == g_Panorama_RunScript)
+			ErrorBox(MkErrStr(__FILE__, __LINE__));
 	}
 
 	return true;

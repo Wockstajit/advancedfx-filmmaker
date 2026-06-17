@@ -93,6 +93,7 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
     ${AFX_OPENEXR_LINK_LIBRARIES}
     afx_hook_source2
 	dxguid.lib
+	ole32.lib # filmmaker folder picker (IFileOpenDialog / CoCreateInstance)
     bcrypt.lib # corrosion fails to detect this
     $<$<CONFIG:Debug>:msvcrtd.lib> # corrision messes this up in latest rust version
 )
@@ -272,7 +273,70 @@ target_sources(${PROJECT_NAME} PRIVATE
 
     WrpConsole.cpp
     WrpConsole.h
+
+    # --- Filmmaker demo-browser feature (self-contained module) ---
+    Filmmaker/Filmmaker.cpp
+    Filmmaker/Filmmaker.h
+    Filmmaker/FilmmakerCommand.cpp
+
+    Filmmaker/Config/DemoFolderStore.cpp
+    Filmmaker/Config/DemoFolderStore.h
+
+    Filmmaker/Demo/DemoEntry.h
+    Filmmaker/Demo/DemoHeaderReader.cpp
+    Filmmaker/Demo/DemoHeaderReader.h
+    Filmmaker/Demo/DemoInfoReader.cpp
+    Filmmaker/Demo/DemoInfoReader.h
+    Filmmaker/Demo/DemoInfoHelper.cpp
+    Filmmaker/Demo/DemoInfoHelper.h
+    Filmmaker/Demo/DemoLibrary.cpp
+    Filmmaker/Demo/DemoLibrary.h
+    Filmmaker/Demo/DemoScanner.cpp
+    Filmmaker/Demo/DemoScanner.h
+
+    Filmmaker/Panorama/FilmmakerGuiJs.h
+    Filmmaker/Panorama/FilmmakerMenu.cpp
+    Filmmaker/Panorama/FilmmakerMenu.h
+    Filmmaker/Panorama/PanoramaBridge.cpp
+    Filmmaker/Panorama/PanoramaBridge.h
+    Filmmaker/Panorama/MovieHud.cpp
+    Filmmaker/Panorama/MovieHud.h
+    Filmmaker/Panorama/MovieHudJs.h
+    Filmmaker/Panorama/MarkerHud.cpp
+    Filmmaker/Panorama/MarkerHud.h
+    Filmmaker/Panorama/MarkerHudJs.h
+    Filmmaker/Panorama/CameraTimelineHud.cpp
+    Filmmaker/Panorama/CameraTimelineHud.h
+    Filmmaker/Panorama/CameraTimelineJs.h
+    Filmmaker/Panorama/DemoBarButtons.cpp
+    Filmmaker/Panorama/DemoBarButtons.h
+    Filmmaker/Panorama/DemoBarButtonsJs.h
+
+    Filmmaker/Movie/CameraBridge.h
+    Filmmaker/Movie/CamMarkers.cpp
+    Filmmaker/Movie/CamMarkers.h
+    Filmmaker/Movie/CamPathEval.cpp
+    Filmmaker/Movie/CamPathEval.h
+    Filmmaker/Movie/CamPlayback.cpp
+    Filmmaker/Movie/CamPlayback.h
+    Filmmaker/Movie/CameraPath.cpp
+    Filmmaker/Movie/CameraPath.h
+    Filmmaker/Movie/MovieMode.cpp
+    Filmmaker/Movie/MovieMode.h
+
+    Filmmaker/Platform/FolderPicker.cpp
+    Filmmaker/Platform/FolderPicker.h
+    Filmmaker/Platform/JsonBuilder.cpp
+    Filmmaker/Platform/JsonBuilder.h
+    Filmmaker/Platform/JsonParser.cpp
+    Filmmaker/Platform/JsonParser.h
+    Filmmaker/Platform/ProtobufWire.cpp
+    Filmmaker/Platform/ProtobufWire.h
+    Filmmaker/Platform/TextEncoding.cpp
+    Filmmaker/Platform/TextEncoding.h
 )
+
+source_group("AfxHookSource2/Filmmaker" REGULAR_EXPRESSION "/AfxHookSource2/Filmmaker/")
 
 # This is far form proper, but it will do for now:
 source_group("deps/release/Detours" REGULAR_EXPRESSION "/deps/release/Detours/")

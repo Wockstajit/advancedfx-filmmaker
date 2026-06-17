@@ -29,6 +29,14 @@ const FLOAT c_CameraPixelWidth = 4.0f;
 
 const FLOAT c_CameraTrajectoryPixelWidth = 8.0f;
 
+// Constant-screen-size markers: the camera gizmo + axis cross are scaled by their
+// distance from the viewer so they keep a consistent on-screen size near or far. A
+// world-space gizmo drawn with fixed-pixel lines turns into a fat blob when you fly
+// away (the shape shrinks but the lines don't); this keeps the proportion fixed.
+const double c_MarkerScreenRefDist = 300.0; // distance (units) at which scale == 1.0
+const double c_MarkerScreenMinScale = 0.35; // clamp so very near markers aren't tiny
+const double c_MarkerScreenMaxScale = 6.0;  // clamp so very far markers aren't huge
+
 /// <summary>Epsilon for point reduction in world units (inch).</summary>
 /// <remarks>Must be at least 0.0.</remarks>
 const double c_CameraTrajectoryEpsilon = 1.0f;
@@ -388,6 +396,35 @@ void CCampathDrawer::BeginDevice(ID3D11Device * device)
 		m_Device->CreateBlendState(&blendDesc, &m_BlendState);
 	}
 
+	// Additive blend for the marker GLOW: src*srcAlpha + dst, so stacked translucent
+	// halo passes accumulate into a soft bright bloom instead of one flat fat line.
+	{
+		D3D11_BLEND_DESC blendDesc {
+			FALSE, // AlphaToCoverageEnable
+			FALSE, // IndependentBlendEnable
+			{
+				{
+					TRUE, // BlendEnable
+					D3D11_BLEND_SRC_ALPHA, // SrcBlend
+					D3D11_BLEND_ONE, // DstBlend (additive)
+					D3D11_BLEND_OP_ADD, // BlendOp
+					D3D11_BLEND_SRC_ALPHA, // SrcBlendAlpha
+					D3D11_BLEND_ONE, // DestBlendAlpha
+					D3D11_BLEND_OP_ADD, // BlendOpAlpha
+					D3D11_COLOR_WRITE_ENABLE_ALL // RenderTargetWriteMask
+				}
+				, { FALSE, D3D11_BLEND_ONE, D3D11_BLEND_ZERO, D3D11_BLEND_OP_ADD, D3D11_BLEND_ONE, D3D11_BLEND_ZERO, D3D11_BLEND_OP_ADD, D3D11_COLOR_WRITE_ENABLE_ALL}
+				, { FALSE, D3D11_BLEND_ONE, D3D11_BLEND_ZERO, D3D11_BLEND_OP_ADD, D3D11_BLEND_ONE, D3D11_BLEND_ZERO, D3D11_BLEND_OP_ADD, D3D11_COLOR_WRITE_ENABLE_ALL}
+				, { FALSE, D3D11_BLEND_ONE, D3D11_BLEND_ZERO, D3D11_BLEND_OP_ADD, D3D11_BLEND_ONE, D3D11_BLEND_ZERO, D3D11_BLEND_OP_ADD, D3D11_COLOR_WRITE_ENABLE_ALL}
+				, { FALSE, D3D11_BLEND_ONE, D3D11_BLEND_ZERO, D3D11_BLEND_OP_ADD, D3D11_BLEND_ONE, D3D11_BLEND_ZERO, D3D11_BLEND_OP_ADD, D3D11_COLOR_WRITE_ENABLE_ALL}
+				, { FALSE, D3D11_BLEND_ONE, D3D11_BLEND_ZERO, D3D11_BLEND_OP_ADD, D3D11_BLEND_ONE, D3D11_BLEND_ZERO, D3D11_BLEND_OP_ADD, D3D11_COLOR_WRITE_ENABLE_ALL}
+				, { FALSE, D3D11_BLEND_ONE, D3D11_BLEND_ZERO, D3D11_BLEND_OP_ADD, D3D11_BLEND_ONE, D3D11_BLEND_ZERO, D3D11_BLEND_OP_ADD, D3D11_COLOR_WRITE_ENABLE_ALL}
+				, { FALSE, D3D11_BLEND_ONE, D3D11_BLEND_ZERO, D3D11_BLEND_OP_ADD, D3D11_BLEND_ONE, D3D11_BLEND_ZERO, D3D11_BLEND_OP_ADD, D3D11_COLOR_WRITE_ENABLE_ALL}
+			}
+		};
+		m_Device->CreateBlendState(&blendDesc, &m_BlendStateAdditive);
+	}
+
 	// Digits Texture:
 	{
 		void * pImageData = malloc(sizeof(unsigned char*)*4*256*128);
@@ -543,6 +580,10 @@ void CCampathDrawer::EndDevice()
 	if(m_BlendState) {
 		m_BlendState->Release();
 		m_BlendState = nullptr;
+	}
+	if(m_BlendStateAdditive) {
+		m_BlendStateAdditive->Release();
+		m_BlendStateAdditive = nullptr;
 	}
 
 	if (m_DrawTextureShader) {
@@ -703,6 +744,10 @@ CCampathDrawer::CDynamicProperties::CDynamicProperties(CCampathDrawer * drawer) 
 	m_DrawKeyFrameIndex = drawer->m_DrawKeyframIndex;
 	m_DrawKeyframeAxis = drawer->m_DrawKeyframeAxis;
 	m_DrawKeyframeCam = drawer->m_DrawKeyframeCam;
+
+	m_MarkerStyle = drawer->m_MarkerStyle;
+	m_MarkerFreeze = drawer->m_MarkerFreeze;
+	m_MarkerHighlight = drawer->m_MarkerHighlight;
 
 	if(g_CamPath.CanEval() && 2 <= g_CamPath.GetSize()) {
 		m_CurrentValue = g_CamPath.Eval(m_CurTime);
@@ -952,6 +997,18 @@ void CCampathDrawer::OnPostRenderAllTools_DrawingThread(CDynamicProperties * dyn
 		bool campathEnabled = dynamicPorperties->GetCampathEnabled();
 		bool cameraMightBeSelected = false;
 
+		// Camera-marker styling: paint markers in the global Freeze (blue) / Live
+		// (gold) colour, with the aimed-at marker white. Overrides the default
+		// time-proximity colouring used by plain mirv_campath.
+		bool markerStyle = dynamicPorperties->GetMarkerStyle();
+		bool markerFreeze = dynamicPorperties->GetMarkerFreeze();
+		int markerHighlight = dynamicPorperties->GetMarkerHighlight();
+		const DWORD markerCore = markerFreeze ? D3DCOLOR_RGBA(60, 150, 255, 255) : D3DCOLOR_RGBA(255, 205, 40, 255);
+		const DWORD markerHalo = markerFreeze ? D3DCOLOR_RGBA(60, 150, 255, 80) : D3DCOLOR_RGBA(255, 205, 40, 70);
+		const DWORD markerTraj = markerFreeze ? D3DCOLOR_RGBA(80, 160, 255, 150) : D3DCOLOR_RGBA(255, 200, 40, 150);
+		const DWORD markerHiCore = D3DCOLOR_RGBA(255, 255, 255, 255);
+		const DWORD markerHiHalo = D3DCOLOR_RGBA(255, 255, 255, 120);
+
 		// Draw keyframes index:
 		float drawKeyFrameIndex = dynamicPorperties->GetDrawKeyframeIndex();
 		if (drawKeyFrameIndex) {
@@ -1128,6 +1185,11 @@ void CCampathDrawer::OnPostRenderAllTools_DrawingThread(CDynamicProperties * dyn
 					DWORD colour;
 
 					// determine colour:
+					if(markerStyle)
+					{
+						colour = markerTraj; // uniform Freeze/Live path colour
+					}
+					else
 					if(deltaTime < 1.0)
 					{
 						double t = (deltaTime -0.0)/1.0;
@@ -1173,6 +1235,52 @@ void CCampathDrawer::OnPostRenderAllTools_DrawingThread(CDynamicProperties * dyn
 
 		// Draw keyframes:
 		{
+			// Camera-marker glow: several ADDITIVE passes (wide+dim halo down to a
+			// bright core), coloured by Freeze/Live with the aimed-at marker white.
+			if (markerStyle)
+			{
+				bool axis = dynamicPorperties->GetDrawKeyframeAxis();
+				bool cam = dynamicPorperties->GetDrawKeyframeCam();
+				int sw = dynamicPorperties->GetScreenWidth();
+				int sh = dynamicPorperties->GetScreenHeight();
+				// REAL glow: stacked ADDITIVE passes, wide+dim -> narrow+bright. Light
+					// accumulates so the centre blooms while the edges fall off softly.
+					m_DeviceContext->OMSetBlendState(m_BlendStateAdditive ? m_BlendStateAdditive : m_BlendState, NULL, 0xffffffff);
+					struct GlowPass { float widthMul; unsigned char alpha; };
+					static const GlowPass kGlow[] = { {7.0f,22},{4.5f,34},{2.8f,52},{1.7f,90},{1.0f,255} };
+					for (int pass = 0; pass < (int)(sizeof(kGlow)/sizeof(kGlow[0])); ++pass)
+				{
+					this->SetLineWidth(c_CampathCrossPixelWidth * kGlow[pass].widthMul);
+					int kf = 0;
+					for (auto it = lessDynamicProperties->GetKeyframesBegin(); it != lessDynamicProperties->GetKeyframesEnd(); ++it, ++kf)
+					{
+						CamPathValue cpv = it->GetValue();
+						bool hi = (kf == markerHighlight);
+						DWORD colour = D3DCOLOR_RGBA(
+							hi ? 255 : (markerFreeze ? 60 : 255),
+							hi ? 255 : (markerFreeze ? 150 : 205),
+							hi ? 255 : (markerFreeze ? 255 : 40),
+							kGlow[pass].alpha);
+						// Constant ON-SCREEN size: scale the gizmo by its distance from the
+						// viewer so far markers stay readable instead of swelling into a blob.
+						double dgx = cpv.X - planeOrigin.X, dgy = cpv.Y - planeOrigin.Y, dgz = cpv.Z - planeOrigin.Z;
+						double gscale = sqrt(dgx * dgx + dgy * dgy + dgz * dgz) / c_MarkerScreenRefDist;
+						if (gscale < c_MarkerScreenMinScale) gscale = c_MarkerScreenMinScale;
+						else if (gscale > c_MarkerScreenMaxScale) gscale = c_MarkerScreenMaxScale;
+						double gcross = c_CampathCrossRadius * gscale;
+						if (axis)
+						{
+							AutoSingleLine(Vector3(cpv.X - gcross, cpv.Y, cpv.Z), colour, Vector3(cpv.X + gcross, cpv.Y, cpv.Z), colour);
+							AutoSingleLine(Vector3(cpv.X, cpv.Y - gcross, cpv.Z), colour, Vector3(cpv.X, cpv.Y + gcross, cpv.Z), colour);
+							AutoSingleLine(Vector3(cpv.X, cpv.Y, cpv.Z - gcross), colour, Vector3(cpv.X, cpv.Y, cpv.Z + gcross), colour);
+						}
+						if (cam) DrawCamera(cpv, colour, sw, sh, gscale);
+					}
+					AutoSingleLineFlush();
+				}
+			}
+			else
+			{
 			this->SetLineWidth(c_CampathCrossPixelWidth);
 
 			bool lpSelected = false;
@@ -1260,10 +1368,20 @@ void CCampathDrawer::OnPostRenderAllTools_DrawingThread(CDynamicProperties * dyn
 			}
 
 			AutoSingleLineFlush();
+			} // end else (!markerStyle)
 		}
 
+		// Restore the standard alpha blend after the marker glow (which used additive).
+		m_DeviceContext->OMSetBlendState(m_BlendState, NULL, 0xffffffff);
+
 		// Draw wireframe camera:
-		if(dynamicPorperties->GetInCampath() && lessDynamicProperties->GetCampathCanEval())
+		// NOTE: this "current position" gizmo samples g_CamPath at the engine clock
+		// (curtime, in seconds). The Filmmaker marker system keys g_CamPath by CHORD
+		// LENGTH (world units), not time, so feeding curtime here lands a meaningless
+		// distance along the path and the gizmo drifts with the demo clock. Skip it
+		// while the marker workflow owns the path (markerStyle); plain mirv_campath
+		// (markerStyle == false, time-keyed) still gets its live camera.
+		if(!markerStyle && dynamicPorperties->GetInCampath() && lessDynamicProperties->GetCampathCanEval())
 		{
 			DWORD colourCam = dynamicPorperties->GetCampathEnabled()
 				? D3DCOLOR_RGBA(
@@ -1298,7 +1416,7 @@ void CCampathDrawer::OnPostRenderAllTools_DrawingThread(CDynamicProperties * dyn
 	}
 }
 
-void CCampathDrawer::DrawCamera(const CamPathValue & cpv, DWORD colour, int screenWidth, int screenHeight)
+void CCampathDrawer::DrawCamera(const CamPathValue & cpv, DWORD colour, int screenWidth, int screenHeight, double sizeScale)
 {
 	// limit to values as RenderView hook:
 	double fov = min(179, max(1, cpv.Fov));
@@ -1312,17 +1430,18 @@ void CCampathDrawer::DrawCamera(const CamPathValue & cpv, DWORD colour, int scre
 	Vector3 vUp(up);
 	Vector3 vRight(right);
 
-	double a = sin(fov * M_PI / 360.0) * c_CameraRadius;
+	double radius = c_CameraRadius * sizeScale; // scaled for constant on-screen size
+	double a = sin(fov * M_PI / 360.0) * radius;
 	double b = a;
 
 	double aspectRatio = screenWidth ? (double)screenHeight / (double)screenWidth : 1.0;
 
 	b *= aspectRatio;
 
-	Vector3 vLU = vCp + (double)c_CameraRadius * vForward - a * vRight + b * vUp;
-	Vector3 vRU = vCp + (double)c_CameraRadius * vForward + a * vRight + b * vUp;
-	Vector3 vLD = vCp + (double)c_CameraRadius * vForward - a * vRight - b * vUp;
-	Vector3 vRD = vCp + (double)c_CameraRadius * vForward + a * vRight - b * vUp;
+	Vector3 vLU = vCp + radius * vForward - a * vRight + b * vUp;
+	Vector3 vRU = vCp + radius * vForward + a * vRight + b * vUp;
+	Vector3 vLD = vCp + radius * vForward - a * vRight - b * vUp;
+	Vector3 vRD = vCp + radius * vForward + a * vRight - b * vUp;
 	Vector3 vMU = vLU + (vRU - vLU) / 2;
 	Vector3 vMUU = vMU + 0.5 * b * vUp;
 

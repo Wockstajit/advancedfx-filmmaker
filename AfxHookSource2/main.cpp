@@ -14,6 +14,8 @@
 #include "ViewModel.h"
 #include "Globals.h"
 #include "DeathMsg.h"
+#include "Filmmaker/Filmmaker.h"
+#include "Filmmaker/Movie/CameraBridge.h"
 #include "ReplaceName.h"
 #include "SchemaSystem.h"
 #include "SceneSystem.h"
@@ -315,7 +317,13 @@ public:
 
 private:
 	virtual bool GetSuspendMirvInput() override {
-		return g_pGameUIService && g_pGameUIService->Con_IsVisible();
+		// Suspend free-cam mouse-look (and let the OS cursor show) when the console
+		// is up OR the camera-marker edit menu / camera timeline panel is open, so
+		// their Panorama buttons are clickable. Free cam stays enabled; the camera
+		// just holds its pose.
+		return (g_pGameUIService && g_pGameUIService->Con_IsVisible())
+			|| Filmmaker::MarkerMenu_WantsCursor()
+			|| Filmmaker::CameraTimeline_WantsCursor();
 	}
 
 	virtual void GetLastCameraData(double & x, double & y, double & z, double & rX, double & rY, double & rZ, double & fov) override {
@@ -361,6 +369,60 @@ float GetLastCameraFov() {
 	return (float)g_MirvInputEx.LastCameraFov;
 }
 
+// --- Movie director <-> camera-input bridge (declared in Filmmaker/Movie/CameraBridge.h) ---
+// Defined here because g_MirvInputEx (the camera-input owner) lives in main.cpp.
+namespace Filmmaker {
+	bool  CameraBridge_GetFreeCamEnabled() { return g_MirvInputEx.m_MirvInput->GetCameraControlMode(); }
+	void  CameraBridge_SetFreeCamEnabled(bool enable) { g_MirvInputEx.m_MirvInput->SetCameraControlMode(enable); }
+	float CameraBridge_GetFreeCamSpeed() { return (float)g_MirvInputEx.m_MirvInput->GetCamSpeed(); }
+	void  CameraBridge_AdjustFreeCamSpeed(int dir) {
+		if (dir > 0) g_MirvInputEx.m_MirvInput->IncreaseCamSpeed();
+		else if (dir < 0) g_MirvInputEx.m_MirvInput->DecreaseCamSpeed();
+	}
+	void  CameraBridge_SetFreeCamSlow(bool slow) {
+		// Held while Shift is down: apply a transient slow factor to the free
+		// camera for precise framing. Uses MirvInput's dedicated slow factor
+		// (applied per-frame to movement + rotation), so it takes effect
+		// immediately even for already-held keys and never fights Shift+Scroll
+		// speed changes.
+		constexpr double kSlowFactor = 0.25;
+		g_MirvInputEx.m_MirvInput->SetSlowFactor(slow ? kSlowFactor : 1.0);
+	}
+	// LastCameraFov is the FOV AFTER the camera override (free cam / campath),
+	// so it reflects live FOV changes. GameCameraFov is the raw pre-override
+	// value and would never move while the user adjusts free-cam FOV.
+	float CameraBridge_GetGameCameraFov() { return (float)g_MirvInputEx.LastCameraFov; }
+
+	void CameraBridge_GetCurrentCamera(double outOrigin[3], double outAngles[3], double& outFov) {
+		outOrigin[0] = g_MirvInputEx.LastCameraOrigin[0];
+		outOrigin[1] = g_MirvInputEx.LastCameraOrigin[1];
+		outOrigin[2] = g_MirvInputEx.LastCameraOrigin[2];
+		outAngles[0] = g_MirvInputEx.LastCameraAngles[0]; // pitch
+		outAngles[1] = g_MirvInputEx.LastCameraAngles[1]; // yaw
+		outAngles[2] = g_MirvInputEx.LastCameraAngles[2]; // roll
+		outFov = g_MirvInputEx.LastCameraFov;
+	}
+
+	void CameraBridge_SetCameraPose(double x, double y, double z,
+		double pitch, double yaw, double roll, double fov) {
+		MirvInput* mi = g_MirvInputEx.m_MirvInput;
+		mi->SetTx((float)x); mi->SetTy((float)y); mi->SetTz((float)z);
+		mi->SetRx((float)pitch); mi->SetRy((float)yaw); mi->SetRz((float)roll);
+		mi->SetFov((float)fov);
+	}
+
+	void CameraBridge_SetPathDrawEnabled(bool enable) { g_CampathDrawer.Draw_set(enable); }
+
+	void CameraBridge_SetMarkerStyle(bool enabled, bool freeze, int highlightIndex) {
+		g_CampathDrawer.MarkerStyle_set(enabled, freeze, highlightIndex);
+		if (enabled) {
+			g_CampathDrawer.SetDrawKeyframeCam(true);
+			if (g_CampathDrawer.GetDrawKeyframeIndex() <= 0.0f)
+				g_CampathDrawer.SetDrawKeyframeIndex(18.0f);
+		}
+	}
+}
+
 CON_COMMAND(mirv_input, "Input mode configuration.")
 {
 	g_MirvInputEx.m_MirvInput->ConCommand(args);
@@ -389,24 +451,49 @@ LRESULT CALLBACK new_Afx_WindowProc(
 			return 0;
 		break;
 	case WM_KEYDOWN:
+		// Movie director keys (X-ray, cursor) get first refusal; they defer (return
+		// false) for keys/contexts they don't own (e.g. X stays roll in free cam).
+		if(Filmmaker::MovieInput_OnKey((int)wParam, true))
+			return 0;
 		if(g_MirvInputEx.m_MirvInput->Supply_KeyEvent(MirvInput::KS_DOWN, wParam, lParam))
 			return 0;
 		break;
 	case WM_KEYUP:
+		if(Filmmaker::MovieInput_OnKey((int)wParam, false))
+			return 0;
 		if(g_MirvInputEx.m_MirvInput->Supply_KeyEvent(MirvInput::KS_UP,wParam, lParam))
 			return 0;
 		break;
-	case WM_LBUTTONDBLCLK:
+	case WM_MOUSEWHEEL:
+		// Plain scroll = camera-mode cycle; in free cam, Shift+scroll = cam speed
+		// (handled by the director); otherwise defer to MirvInput (FOV).
+		if(Filmmaker::MovieInput_OnMouseWheel(GET_WHEEL_DELTA_WPARAM(wParam), (GetKeyState(VK_SHIFT) & 0x8000) != 0))
+			return 0;
+		if (g_MirvInputEx.m_MirvInput->Supply_MouseEvent(uMsg, wParam, lParam))
+			return 0;
+		break;
 	case WM_LBUTTONDOWN:
+		if(Filmmaker::MovieInput_OnMouseButton(0, true)) return 0;
+		if (g_MirvInputEx.m_MirvInput->Supply_MouseEvent(uMsg, wParam, lParam)) return 0;
+		break;
 	case WM_LBUTTONUP:
+		if(Filmmaker::MovieInput_OnMouseButton(0, false)) return 0;
+		if (g_MirvInputEx.m_MirvInput->Supply_MouseEvent(uMsg, wParam, lParam)) return 0;
+		break;
+	case WM_RBUTTONDOWN:
+		if(Filmmaker::MovieInput_OnMouseButton(1, true)) return 0;
+		if (g_MirvInputEx.m_MirvInput->Supply_MouseEvent(uMsg, wParam, lParam)) return 0;
+		break;
+	case WM_RBUTTONUP:
+		if(Filmmaker::MovieInput_OnMouseButton(1, false)) return 0;
+		if (g_MirvInputEx.m_MirvInput->Supply_MouseEvent(uMsg, wParam, lParam)) return 0;
+		break;
+	case WM_LBUTTONDBLCLK:
 	case WM_MBUTTONDBLCLK:
 	case WM_MBUTTONDOWN:
 	case WM_MBUTTONUP:
 	case WM_RBUTTONDBLCLK:
-	case WM_RBUTTONDOWN:
-	case WM_RBUTTONUP:
 	case WM_MOUSEMOVE:
-	case WM_MOUSEWHEEL:
 		if (g_MirvInputEx.m_MirvInput->Supply_MouseEvent(uMsg, wParam, lParam))
 			return 0;
 		break;
@@ -636,6 +723,26 @@ bool CS2_Client_CSetupView_Trampoline_IsPlayingDemo(void *ThisCViewSetup) {
 	float curTime = g_MirvTime.curtime_get(); //TODO: + m_PausedTime
 	float absTime = g_MirvTime.absoluteframetime_get();
 
+	// Wall-clock frame delta for free-cam input. The engine's absoluteframetime
+	// (absTime) collapses to ~0 while the demo is PAUSED, which would zero out
+	// every WASD/mouse/FOV delta in MirvInput::Override() and freeze the free
+	// camera. We instead drive the camera input from a real-time clock so it
+	// keeps moving while paused. This is ONLY the camera-input time base; it does
+	// not touch demo ticks/playback. Clamped so a hitch/alt-tab/long pause cannot
+	// produce a huge camera jump. Only affects free cam (Override no-ops otherwise).
+	float camDeltaT;
+	{
+		static LARGE_INTEGER s_qpcFreq = {};
+		static LARGE_INTEGER s_qpcLast = {};
+		if (s_qpcFreq.QuadPart == 0) QueryPerformanceFrequency(&s_qpcFreq);
+		LARGE_INTEGER qpcNow; QueryPerformanceCounter(&qpcNow);
+		if (s_qpcLast.QuadPart == 0) s_qpcLast = qpcNow;
+		double dtSec = (double)(qpcNow.QuadPart - s_qpcLast.QuadPart) / (double)s_qpcFreq.QuadPart;
+		s_qpcLast = qpcNow;
+		if (dtSec < 0.0) dtSec = 0.0; else if (dtSec > 0.1) dtSec = 0.1;
+		camDeltaT = (float)dtSec;
+	}
+
 	int *pWidth = (int*)((unsigned char *)ThisCViewSetup + 0x434);
 	int *pHeight = (int*)((unsigned char *)ThisCViewSetup + 0x43C);
 
@@ -717,7 +824,7 @@ bool CS2_Client_CSetupView_Trampoline_IsPlayingDemo(void *ThisCViewSetup) {
 
 	if(MirvFovOverride(Fov)) originOrAnglesOverriden = true;
 
-	if(g_MirvInputEx.m_MirvInput->Override(g_MirvInputEx.LastFrameTime, Tx,Ty,Tz,Rx,Ry,Rz,Fov)) originOrAnglesOverriden = true;
+	if(g_MirvInputEx.m_MirvInput->Override(camDeltaT, Tx,Ty,Tz,Rx,Ry,Rz,Fov)) originOrAnglesOverriden = true;
 
 	if(g_b_on_c_view_render_setup_view) {
 		AfxHookSourceRsView currentView = {Tx,Ty,Tz,Rx,Ry,Rz,Fov};
@@ -1503,6 +1610,7 @@ void  new_CS2_Client_FrameStageNotify(void* This, SOURCESDK::CS2::ClientFrameSta
 	switch(curStage) {
 	case SOURCESDK::CS2::FRAME_RENDER_PASS:
 		g_CommandSystem.OnExecuteCommands();
+		Filmmaker::RunMainThreadFrame(); // Panorama UI work on the main thread
 		break;
 	}
 

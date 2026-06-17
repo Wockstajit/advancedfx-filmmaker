@@ -63,6 +63,17 @@ public:
 	bool GetCameraControlMode(void);
 	void SetCameraControlMode(bool enable);
 
+	// Current free-cam speed multiplier (read for the movie director HUD).
+	double GetCamSpeed(void) const { return m_CamSpeed; }
+
+	// Public speed-step wrappers (one shift+scroll notch) for the movie director.
+	void IncreaseCamSpeed(void) { DoCamSpeedIncrease(); }
+	void DecreaseCamSpeed(void) { DoCamSpeedDecrease(); }
+
+	// Slow/fine-movement multiplier (movie director Shift-hold). 1.0 = normal.
+	double GetSlowFactor(void) const { return m_SlowFactor; }
+	void SetSlowFactor(double value) { m_SlowFactor = value; }
+
 	bool IsActive() {
 		return m_Focus && !m_Dependencies->GetSuspendMirvInput() && m_CameraControlMode;
 	}
@@ -312,6 +323,10 @@ private:
 	double m_CamRollI;
 	double m_CamSpeed;
 	double m_CamSpeedBasis = 2.0f;
+	// Transient multiplier for "slow/fine" movement (held while Shift is down in
+	// free cam). Independent of m_CamSpeed so it doesn't fight Shift+Scroll speed
+	// changes. Applied in GetCamD* to movement and rotation alike.
+	double m_SlowFactor = 1.0;
 
 	struct MouseInput {
 		double Forward = 0;
