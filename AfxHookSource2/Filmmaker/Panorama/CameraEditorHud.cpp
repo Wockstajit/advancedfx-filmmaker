@@ -56,7 +56,11 @@ double r2(double v) {
 bool PlayingDemo() {
 	if (g_pEngineToClient) {
 		if (auto pDemo = g_pEngineToClient->GetDemoFile())
-			return pDemo->IsPlayingDemo();
+			// A PAUSED demo is still an active demo: IsPlayingDemo() flips to false the
+			// moment the demo is paused (e.g. SPACE). Gating the editor on it alone made
+			// the whole workspace force-exit (OnExit) on every pause, which also dropped
+			// the input gating and let scroll/click/ESC leak to the game. Keep paused = up.
+			return pDemo->IsPlayingDemo() || pDemo->IsDemoPaused();
 	}
 	return false;
 }

@@ -176,7 +176,9 @@ bool MovieMode::OnKey(int vkey, bool down) {
 	}
 
 	// ESC closes the marker edit menu (and is consumed so CS2's pause menu doesn't
-	// pop). Only acts while the menu is open; otherwise ESC passes through normally.
+	// pop). Only acts while the menu is open; otherwise ESC passes through normally so
+	// CS2's pause menu opens as usual -- the camera editor/timeline stays visible behind
+	// it (the HUD no longer tears down while paused), which is the intended behaviour.
 	if (vkey == kVK_ESC) {
 		if (CameraPathRef().MenuOpen()) {
 			if (down) EnqueueCmd("mirv_filmmaker marker close");

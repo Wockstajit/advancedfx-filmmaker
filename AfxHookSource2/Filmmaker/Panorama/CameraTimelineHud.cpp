@@ -49,7 +49,10 @@ double r3(double v) { double s = (v < 0) ? -1.0 : 1.0; return s * (long long)(v 
 bool PlayingDemo() {
 	if (g_pEngineToClient) {
 		if (auto pDemo = g_pEngineToClient->GetDemoFile())
-			return pDemo->IsPlayingDemo();
+			// A PAUSED demo is still an active demo: IsPlayingDemo() flips to false the
+			// moment the demo is paused (e.g. SPACE), so gating the HUD on it alone tore
+			// the timeline down on every pause. Treat paused as active so the UI stays up.
+			return pDemo->IsPlayingDemo() || pDemo->IsDemoPaused();
 	}
 	return false;
 }
