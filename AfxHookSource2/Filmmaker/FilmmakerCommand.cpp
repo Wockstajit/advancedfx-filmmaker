@@ -61,7 +61,7 @@ void PrintHelp(const char* cmd) {
 	);
 	advancedfx::Message(
 		"Camera markers / dolly path (in free cam):\n"
-		"   K = place, L = delete aimed, F = edit aimed. Camera-path playback is disabled pending rewrite.\n"
+		"   K = place, L = delete aimed, F = edit aimed.\n"
 		"%s marker [...] - full marker/path control (run for sub-help).\n"
 		"%s camtl [...] - camera TIMELINE + curve editor (scrub, keys, easing; run for sub-help).\n"
 		"%s editor [on|off|toggle] - dedicated CAMERA EDITOR workspace (preview + inspector + timeline).\n"
@@ -76,8 +76,11 @@ bool RegularCursorToggleAllowed() {
 	return mode == Mode::ThirdPerson || mode == Mode::FreeCam;
 }
 
-void PlaybackDisabledNotice() {
-	advancedfx::Message("mirv_filmmaker: camera path playback is disabled pending rewrite.\n");
+void PlayCameraTimeline(Filmmaker::CameraPath& cp) {
+	if (Filmmaker::CameraEditor_Active())
+		cp.PlayFromEditor();
+	else
+		cp.PlayFromTimeline();
 }
 
 void DoUiStatus() {
@@ -138,7 +141,8 @@ void DoMarker(int argc, advancedfx::ICommandArgs* args, const char* cmd) {
 	if (argc < 3) {
 		advancedfx::Message(
 			"%s marker place - add a marker at the current camera pose (also K).\n"
-			"%s marker preview|arm|play|previewplay - disabled pending camera-path playback rewrite.\n"
+			"%s marker preview|arm - jump to first marker and arm playback.\n"
+			"%s marker play|previewplay - play the armed path.\n"
 			"%s marker previewstop - stop playback (X).\n"
 			"%s marker delete <i> | deleteall confirm - remove markers (L = aimed).\n"
 			"%s marker select <i> | next | prev - select (menu arrows teleport).\n"
@@ -152,7 +156,7 @@ void DoMarker(int argc, advancedfx::ICommandArgs* args, const char* cmd) {
 			"%s marker constspeed <0.2..1.0> | cycle - global Constant-mode speed.\n"
 			"%s marker autosnap on|off|toggle - snap viewer to a marker when selected.\n"
 			"%s marker list | save | load.\n",
-			cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd);
+			cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd);
 		return;
 	}
 
@@ -160,7 +164,8 @@ void DoMarker(int argc, advancedfx::ICommandArgs* args, const char* cmd) {
 	const char* a3 = (argc >= 4) ? args->ArgV(3) : "";
 
 	if (0 == _stricmp(a, "place")) cp.PlaceMarker();
-	else if (0 == _stricmp(a, "preview") || 0 == _stricmp(a, "arm") || 0 == _stricmp(a, "play") || 0 == _stricmp(a, "previewplay")) PlaybackDisabledNotice();
+	else if (0 == _stricmp(a, "preview") || 0 == _stricmp(a, "arm")) cp.ArmPreview();
+	else if (0 == _stricmp(a, "play") || 0 == _stricmp(a, "previewplay")) cp.StartPreviewPlay();
 	else if (0 == _stricmp(a, "previewstop") || 0 == _stricmp(a, "stop")) cp.StopPreview();
 	else if (0 == _stricmp(a, "hudtoggle")) advancedfx::Message("mirv_filmmaker: camera path HUD toggle is disabled.\n");
 	else if (0 == _stricmp(a, "repositionplace")) cp.PlaceReposition();
@@ -234,7 +239,10 @@ void DoCamTimeline(int argc, advancedfx::ICommandArgs* args, const char* cmd) {
 			"%s camtl open|close|toggle - show/hide the camera timeline panel.\n"
 			"%s camtl view timeline|curve - switch view (no arg = toggle).\n"
 			"%s camtl scrub <tick> - tick-perfect scrub to <tick> (paused).\n"
-			"%s camtl play|pause|playtest - disabled pending camera-path playback rewrite.\n"
+			"%s camtl play - editor: seek to playhead and play; timeline: play from first marker.\n"
+			"%s camtl playtest - seek to the current editor tick and play immediately.\n"
+			"%s camtl playpath - play demo normally; Live dolly engages inside marker range.\n"
+			"%s camtl pause - pause camera-path playback at the current tick.\n"
 			"%s camtl stop - stop any lingering path playback and scrub.\n"
 			"%s camtl addkey | delkey <i> | movekey <i> <tick>.\n"
 			"%s camtl setval <i> <ch 0..6> <v> - 0=x 1=y 2=z 3=pitch 4=yaw 5=tilt 6=fov.\n"
@@ -244,7 +252,7 @@ void DoCamTimeline(int argc, advancedfx::ICommandArgs* args, const char* cmd) {
 			"%s camtl cursor on|off|toggle - regular UI-mouse mode (third-person/freecam; forced on while editor is open).\n"
 			"%s camtl clear - remove ALL keyframes.\n"
 			"%s camtl eval <panorama js>.\n",
-			cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd);
+			cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd);
 		return;
 	}
 
@@ -289,9 +297,11 @@ void DoCamTimeline(int argc, advancedfx::ICommandArgs* args, const char* cmd) {
 	else if (0 == _stricmp(a, "selectdelta")) {
 		cp.SelectEditorDelta((argc >= 4) ? atoi(a3) : 1);
 	}
-	// Camera-path playback is disabled pending rewrite. Keep the commands present as
-	// no-ops so old UI/console calls cannot start the broken playback path.
-	else if (0 == _stricmp(a, "play") || 0 == _stricmp(a, "pause") || 0 == _stricmp(a, "playtest")) PlaybackDisabledNotice();
+	else if (0 == _stricmp(a, "play")) PlayCameraTimeline(cp);
+	else if (0 == _stricmp(a, "playtest")) cp.PlayFromEditor();
+	else if (0 == _stricmp(a, "playtimeline")) cp.PlayFromTimeline();
+	else if (0 == _stricmp(a, "playpath")) cp.PlayPath();
+	else if (0 == _stricmp(a, "pause")) cp.PausePreview();
 	else if (0 == _stricmp(a, "stop")) { cp.StopPreview(); cp.StopScrub(); }
 	else if (0 == _stricmp(a, "addkey")) cp.PlaceMarker();
 	else if (0 == _stricmp(a, "delkey")) {

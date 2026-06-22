@@ -220,7 +220,6 @@ R"TLJS(
     var playBtn = btn(trow, '▶', function () {
       cmd('mirv_filmmaker camtl play');
     }, S.accent);
-    playBtn.visible = false; // camera-path playback disabled pending rewrite
     btn(trow, '⏮', function () { gotoKey(-1); }, S.value);
     btn(trow, '⏭', function () { gotoKey(1); }, S.value);
     btn(trow, '◀ 1', function () { if (st) cmd('mirv_filmmaker camtl scrub ' + (activeTick() - 1)); }, S.value);

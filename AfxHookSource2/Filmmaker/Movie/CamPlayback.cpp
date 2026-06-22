@@ -145,6 +145,10 @@ bool CamPlayback::TickPlay(const CamMarkers& mk, const CamPathEval& eval, const 
 				m_engageApplied = true;
 				m_poseSmoothInit = false;
 			}
+			advancedfx::Message(
+				"[campath][gate] demoNow=%.3f first=%.3f last=%.3f wantEngage=%d freecam=%d\n",
+				demoNow, tFirst, tLast, wantEngage ? 1 : 0,
+				CameraBridge_GetFreeCamEnabled() ? 1 : 0);
 			if (!wantEngage) {
 				m_playSeg = 0;
 				return false; // waiting for the path to start (not the end)

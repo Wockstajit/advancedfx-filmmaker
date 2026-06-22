@@ -166,11 +166,13 @@ bool MovieMode::OnKey(int vkey, bool down) {
 		}
 		if (vkey == kVK_LEFT || vkey == kVK_RIGHT) return true; // don't scrub the demo
 	} else if (cpMode == CPMode::PreviewArmed) {
-		// Legacy armed state only: playback is disabled pending rewrite. X/Esc cancels.
+		// Armed camera-path preview: Space starts the dolly, X/Esc cancels.
+		if (vkey == kVK_SPACE) { if (down) EnqueueCmd("mirv_filmmaker marker play"); return true; }
 		if (vkey == kVK_X || vkey == kVK_ESC) { if (down) EnqueueCmd("mirv_filmmaker marker previewstop"); return true; }
 		if (vkey == kVK_LEFT || vkey == kVK_RIGHT) return true;
 	} else if (cpMode == CPMode::PreviewPlaying) {
-		// Legacy playback state only: playback entry points are disabled pending rewrite.
+		// Keep pause/stop routed through CameraPath so demo playback and pose pushing stay in sync.
+		if (vkey == kVK_SPACE) { if (down) EnqueueCmd("mirv_filmmaker camtl pause"); return true; }
 		if (vkey == kVK_X || vkey == kVK_ESC) { if (down) EnqueueCmd("mirv_filmmaker marker previewstop"); return true; }
 		if (vkey == kVK_LEFT || vkey == kVK_RIGHT) return true;
 	}
@@ -190,6 +192,11 @@ bool MovieMode::OnKey(int vkey, bool down) {
 	if (vkey == kVK_F8) {
 		if (down)
 			MovieHudRef().Toggle(); // show/hide the help/status panel
+		return true;
+	}
+
+	if (vkey == kVK_SPACE && CameraEditor_Active() && cpMode == CPMode::Editing) {
+		if (down) EnqueueCmd("mirv_filmmaker camtl playtest");
 		return true;
 	}
 
