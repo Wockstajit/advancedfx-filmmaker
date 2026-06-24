@@ -9,15 +9,21 @@
 //     inspector + a bottom timeline + a dimmed letterbox make the open area read as a
 //     viewport -- note the preview is a CROP of the full-screen frame, not a scaled
 //     copy, since Panorama only composites overlays on top of the full game render);
-//   * hosts the existing camera TIMELINE / curve editor (CameraTimelineHud) docked at
-//     the bottom and the BO2 marker settings, all driven by the same
-//     "mirv_filmmaker camtl ... / marker ..." console commands;
+//   * docks a BOTTOM panel under the preview whose mode is selectable (BottomMode):
+//       - CameraTimeline (default): the custom camera timeline (CameraTimelineHud) overlay;
+//       - Graph: the experimental graph curve editor overlay;
+//       - Native: kept only for the `editor curveeditor native` console command -- shows no
+//         overlay (just the bottom tab bar). The native CS2 demo bar is HIDDEN the whole time
+//         the editor is open, so it can never bleed through behind the overlays.
+//     A persistent BOTTOM tab bar (drawn by CameraEditorJs where CS2's old CAM EDITOR / MOUSE
+//     buttons sat) flips between Camera Timeline and Graph; all are driven by the same
+//     "mirv_filmmaker editor curveeditor ..." console commands;
 //   * surfaces selected-camera settings (FOV, roll, interpolation, segment speed,
 //     easing, freeze/live, speed mode) as Slider / stepper / cycle controls that issue
 //     those same commands;
-//   * hides the gameplay HUD (radar/health/ammo/scoreboard/native demo bar) for a
-//     clean workspace -- the actual hide is centralised in CameraTimelineHud's JS via
-//     the "hosted" state flag, so a single script owns native-HUD visibility.
+//   * hides the rest of the gameplay HUD (radar/health/ammo/scoreboard) AND the native demo
+//     bar for a clean workspace -- the actual hide is centralised in CameraTimelineHud's JS
+//     via the "hosted" state flag, so a single script owns native-HUD visibility.
 //
 // Mirrors the proven MovieHud / CameraTimelineHud bridge pattern: a PanoramaBridge
 // pinned to the in-game HUD panel, a panel built ONCE from embedded JS, and a small
@@ -51,11 +57,36 @@ public:
 	void ToggleScale() { m_scaleEnabled = !m_scaleEnabled; }
 	bool ScaleEnabled() const { return m_scaleEnabled; }
 
-	// Bottom curve-editor selection: false = the (default) graph editor, true = the old camera
-	// timeline. The "≡ Timeline" / "≡ Graph" buttons flip this; RunFrame shows the chosen one.
-	void SetUseTimeline(bool v) { m_useTimeline = v; }
-	void ToggleUseTimeline() { m_useTimeline = !m_useTimeline; }
-	bool UseTimeline() const { return m_useTimeline; }
+	enum class BottomMode { Native = 0, CameraTimeline = 1, Graph = 2 };
+
+	// Bottom editor selection. Native = CS2's own demo timeline stays visible; CameraTimeline
+	// and Graph are explicit overlays opened by buttons.
+	void SetBottomMode(BottomMode mode) { m_bottomMode = mode; }
+	void SetUseTimeline(bool v) { m_bottomMode = v ? BottomMode::CameraTimeline : BottomMode::Graph; }
+	void ToggleUseTimeline() {
+		m_bottomMode = (m_bottomMode == BottomMode::CameraTimeline) ? BottomMode::Graph : BottomMode::CameraTimeline;
+	}
+	bool UseTimeline() const { return m_bottomMode == BottomMode::CameraTimeline; }
+	BottomMode GetBottomMode() const { return m_bottomMode; }
+
+	// Game-HUD visibility while the editor is open. HideAll = clean workspace (the original
+	// auto-hide, default); InGame = keep radar + HP/ammo but strip the spectator observer
+	// panel (player avatar/name bar); ShowAll = full spectator HUD. The actual show/hide lives
+	// in CameraTimelineHud's JS, which reads this through the "hudView" state field.
+	enum class HudView { HideAll = 0, InGame = 1, ShowAll = 2 };
+	void SetHudView(HudView v) { m_hudView = v; }
+	void CycleHudView() { m_hudView = (HudView)(((int)m_hudView + 1) % 3); }
+	HudView GetHudView() const { return m_hudView; }
+
+	// The scaled-preview rect (normalised window fractions, x0 y0 x1 y1) the world blit uses,
+	// plus whether the scaled viewport is live. The timeline HUD reads these to scale the native
+	// game HUD into the SAME rect so the HUD lines up with the shrunk world preview.
+	bool ScaledHudActive() const { return m_scaleEnabled && m_previewValid; }
+	bool PreviewRect(float& x0, float& y0, float& x1, float& y1) const {
+		x0 = m_previewX0; y0 = m_previewY0; x1 = m_previewX1; y1 = m_previewY1; return m_previewValid;
+	}
+
+	std::string DebugStateJson() { return BuildStateJson(); }
 
 	void RequestEval(const std::string& js) { m_evalQueue.push_back(js); }
 
@@ -76,7 +107,11 @@ private:
 	bool m_built = false;
 	bool m_enabled = false;     // Camera Editor Mode on/off
 	bool m_scaleEnabled = false; // true scaled-preview viewport (render-layer blit)
-	bool m_useTimeline = false; // false = graph editor (default), true = old camera timeline
+	BottomMode m_bottomMode = BottomMode::Native;
+	HudView m_hudView = HudView::HideAll; // game-HUD visibility while the editor is open
+	// Last preview rect parsed from the JS-published "previewrect" (normalised window fractions).
+	float m_previewX0 = 0, m_previewY0 = 0, m_previewX1 = 0, m_previewY1 = 0;
+	bool m_previewValid = false;
 	bool m_wasEnabled = false;  // for enter/exit edge detection
 	bool m_prevMovieHud = false; // MovieHud visibility to restore on exit
 	std::string m_lastState;

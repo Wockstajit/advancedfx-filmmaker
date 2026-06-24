@@ -2,12 +2,18 @@
 param(
     [int]$Port = 29010,
     [int]$StartTick = 11148,
-    [string]$OutDir = (Join-Path $env:TEMP 'cs2-camtl-shortpath')
+    [string]$OutDir
 )
 $ErrorActionPreference = 'Stop'
 
-$capture = Join-Path $PSScriptRoot 'capture-cs2.ps1'
-New-Item -ItemType Directory -Path $OutDir -Force | Out-Null
+$capture = Join-Path $PSScriptRoot 'capture-main-monitor.ps1'
+. (Join-Path $PSScriptRoot 'AutomationCommon.ps1')
+if ([string]::IsNullOrWhiteSpace($OutDir)) {
+    $OutDir = New-AutomationRunFolder -Name 'verify-camtl-shortpath'
+} else {
+    New-Item -ItemType Directory -Path $OutDir -Force | Out-Null
+}
+Save-AutomationRunMetadata -RunDirectory $OutDir -AutomationName 'verify-camtl-shortpath' -Additional @{ port = $Port; startTick = $StartTick } | Out-Null
 
 $client = [System.Net.Sockets.TcpClient]::new()
 $client.Connect('127.0.0.1', $Port)

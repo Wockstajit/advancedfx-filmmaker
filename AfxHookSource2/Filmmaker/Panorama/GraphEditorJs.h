@@ -34,9 +34,11 @@ inline const char* kGraphEditorJs = R"GEJS(
     var KF_R = 8, HANDLE_R = 7; // hit radii (layout px)
     // Docked layout: this editor lives in the bottom curve-editor zone -- left of the camera
     // editor's inspector and above the compact timeline scrub bar -- it is NOT full screen.
-    var INSPECTOR_W = 372; // keep in sync with CameraEditorJs INSPECTOR_W
+    var INSPECTOR_W = 430; // keep in sync with CameraEditorJs INSPECTOR_W
     var DOCK_H = 556;      // fills the whole bottom (timeline is hidden while we're open);
                            // keep in sync with CameraEditorJs GRAPH_DOCK_H
+    var BOTTOM_LIFT = 28;  // keep the dock above CS2's bottom-left build/version text (the Camera
+                           // Editor's bottom-editor tab bar sits ABOVE this dock, not below it)
 
     function mk(type, parent, props) { return $.CreatePanel(type, parent, '', props || {}); }
     function lbl(parent, text, color, size) {
@@ -133,12 +135,11 @@ R"GEJS(
     var rowTop = mk('Panel', rightCol); rowTop.style.flowChildren = 'right'; rowTop.style.horizontalAlign = 'right'; rowTop.style.marginBottom = '5px';
     var rowBot = mk('Panel', rightCol); rowBot.style.flowChildren = 'right'; rowBot.style.horizontalAlign = 'right';
 
-    // TOP row: back to the camera TIMELINE, then the demo timescale buttons. (The graph editor
-    // always drives the camera now, so there is no Drive toggle; the camera is seeded
-    // automatically, so no Reseed.)
-    btn(rowTop, '≡ Timeline', function () { rawCmd('mirv_filmmaker editor curveeditor timeline'); }, S.value).style.verticalAlign = 'center';
+    // TOP row: the demo timescale buttons. (Bottom-panel switching now lives in the Camera Editor's
+    // bottom-editor tab bar, so there is no in-graph "Timeline" switch button. The graph editor
+    // always drives the camera now -> no Drive toggle; the camera is seeded automatically -> no Reseed.)
     var speedWrap = mk('Panel', rowTop); speedWrap.style.flowChildren = 'right'; speedWrap.style.verticalAlign = 'center';
-    speedWrap.style.marginLeft = '4px'; speedWrap.style.marginRight = '0px';
+    speedWrap.style.marginRight = '0px';
     var SPD = [0.1, 0.25, 0.5, 1, 2, 4], speedBtns = [], activeSpeed = 1;
     function updateSpeedButtons() {
       for (var si = 0; si < speedBtns.length; si++) {
@@ -273,10 +274,10 @@ R"GEJS(
       // The graph editor REPLACES the camera timeline (the host hides it while we're open), so we
       // sit flush at the bottom and fill the whole bottom panel -- no timeline bar to sit above.
       var dockW = Math.max(360, scrW - INSPECTOR_W);
-      dockScreenX = 0; dockScreenY = Math.max(0, scrH - DOCK_H);
+      dockScreenX = 0; dockScreenY = Math.max(0, scrH - DOCK_H - BOTTOM_LIFT);
       // Size + place the dock within the full-screen root (bottom-left, flush to the screen bottom).
       dock.style.width = dockW + 'px'; dock.style.height = DOCK_H + 'px';
-      dock.style.marginBottom = '0px';
+      dock.style.marginBottom = BOTTOM_LIFT + 'px';
       G = { rw: dockW, rh: DOCK_H, headerH: HEADER_H, rulerH: RULER_H,
             cx: LEFTW, cy: HEADER_H + RULER_H,
             cw: Math.max(120, dockW - LEFTW - 16), ch: Math.max(80, DOCK_H - HEADER_H - RULER_H - FOOTER_H) };
@@ -395,26 +396,26 @@ R"GEJS(
     // ---- right-click ease menu (applies to the WHOLE selection) ---------
     function buildEaseMenu() {
       easeMenu = mk('Panel', dock); easeMenu.hittest = false; easeMenu.visible = false; easeMenu.style.zIndex = '20';
-      easeMenu.style.width = '152px'; easeMenu.style.height = '104px';
+      easeMenu.style.width = '152px'; easeMenu.style.height = '130px';
       easeMenu.style.backgroundColor = 'rgba(18,22,28,0.99)'; easeMenu.style.border = '1px solid ' + S.accent; easeMenu.style.borderRadius = '4px';
       var t = lbl(easeMenu, 'EASE SELECTION', S.dim, 10); t.style.position = '12px 6px 0px'; t.style.fontWeight = 'bold'; t.style.letterSpacing = '1px';
-      var labels = ['Ease In', 'Ease Out', 'Ease In / Out'];
+      var labels = ['Ease In', 'Ease Out', 'Ease In / Out', 'Delete'];
       easeItemPanels = [];
-      for (var i = 0; i < 3; i++) {
+      for (var i = 0; i < 4; i++) {
         var it = mk('Panel', easeMenu); it.hittest = false; it.style.position = '4px ' + (22 + i * 26) + 'px 0px';
         it.style.width = '144px'; it.style.height = '24px'; it.style.borderRadius = '3px';
-        var l = lbl(it, labels[i], S.value, 13); l.style.position = '10px 4px 0px';
+        var l = lbl(it, labels[i], i === 3 ? S.playhead : S.value, 13); l.style.position = '10px 4px 0px';
         easeItemPanels.push(it);
       }
     }
     function showEaseMenu(lx, ly) {
       if (!easeMenu) buildEaseMenu();
-      var W = 152, H = 104;
+      var W = 152, H = 130;
       if (lx + W > G.rw) lx = G.rw - W - 2; if (lx < 0) lx = 0;
       if (ly + H > G.rh) ly = G.rh - H - 2; if (ly < 0) ly = 0;
       easeMenu.style.position = lx + 'px ' + ly + 'px 0px'; easeMenu.visible = true;
-      var modes = ['in', 'out', 'inout']; easeRects = [];
-      for (var i = 0; i < 3; i++) easeRects.push({ x0: lx + 4, x1: lx + 148, y0: ly + 22 + i * 26, y1: ly + 22 + i * 26 + 24, mode: modes[i] });
+      var modes = ['in', 'out', 'inout', 'delete']; easeRects = [];
+      for (var i = 0; i < 4; i++) easeRects.push({ x0: lx + 4, x1: lx + 148, y0: ly + 22 + i * 26, y1: ly + 22 + i * 26 + 24, mode: modes[i] });
     }
     function hideEaseMenu() { if (easeMenu) { easeMenu.visible = false; easeRects = []; } }
     function easeMenuOpen() { return easeMenu && easeMenu.visible; }
@@ -450,7 +451,7 @@ R"GEJS(
       if (lmb && !prevLmb) {
         // While the ease menu is open a click picks an item (or closes it), and is consumed.
         if (easeMenuOpen()) {
-          var em = easeHit(cc.lx, cc.ly); if (em) cmd('ease ' + em);
+          var em = easeHit(cc.lx, cc.ly); if (em) { if (em === 'delete') cmd('delsel'); else cmd('ease ' + em); }
           hideEaseMenu(); prevLmb = lmb; return;
         }
         // A press anywhere commits an open type field first (click-away).

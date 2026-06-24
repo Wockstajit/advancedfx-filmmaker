@@ -2,6 +2,7 @@
 
 #include "GraphEditorJs.h"
 #include "CameraTimelineHud.h"
+#include "../Filmmaker.h"
 #include "../Movie/CameraPath.h"
 #include "../Movie/CameraBridge.h"
 
@@ -116,7 +117,9 @@ void GraphEditorExperimentHud::OnEnter() {
 		m_model.SeedFromMarkers(CameraPathRef().Markers());
 	m_viewInit = false;
 	m_scrubbing = false;
-	m_drive = true; // the graph editor ALWAYS drives the camera now (no Drive toggle in the UI)
+	// Camera Editor's G key may have switched to game/free-look before this overlay
+	// finished entering. Respect that cursor mode instead of re-taking the camera.
+	m_drive = CameraEditor_Active() ? CameraTimelineHudRef().Cursor() : true;
 	BumpRev();
 
 	// The UI cursor is shown via our GraphEditorExperiment_WantsCursor() hook into MovieMode's
@@ -327,6 +330,14 @@ void GraphEditorExperimentHud::CmdDeleteSelected() {
 			if (m_model.IsSelected(c, k.id)) doomed.emplace_back(c, k.id);
 	for (auto& d : doomed) m_model.DeleteKey(d.first, d.second);
 	m_model.ClearSelection();
+	BumpRev();
+}
+
+void GraphEditorExperimentHud::CmdClear() {
+	m_model.BeginEdit();
+	m_model.Clear();
+	m_viewInit = false;
+	m_scrubbing = false;
 	BumpRev();
 }
 

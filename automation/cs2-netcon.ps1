@@ -1,7 +1,7 @@
 # Sends console commands to a running CS2 over its -netconport TCP console and
 # prints the streamed console output. Pure backend - no window focus needed.
 #
-#   pwsh misc\cs2-netcon.ps1 -Port 29010 -Commands "mirv_filmmaker ui_status","mirv_filmmaker list"
+#   pwsh automation\cs2-netcon.ps1 -Port 29010 -Commands "mirv_filmmaker ui_status","mirv_filmmaker list"
 param(
     [int]$Port = 29010,
     [string[]]$Commands = @('mirv_filmmaker ui_status'),

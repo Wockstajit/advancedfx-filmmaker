@@ -33,6 +33,15 @@ struct ScoreboardPlayer {
 	std::vector<RoundStat> perRound; // empty until a full demofile parse has run
 };
 
+// One recorded loadout event from the demo pre-scan (.fmjson v5): a weapon/C4 drop or
+// pickup at a specific demo tick, used by the Follow Camera's Preview-Tick jump.
+struct DemoEvent {
+	int tick = -1;
+	std::string type;       // "weapon_drop" | "bomb_dropped" | "bomb_pickup" | "item_pickup"
+	std::string item;       // e.g. "weapon_ak47", "c4"
+	uint32_t accountId = 0; // Steam account id of the player involved (0 = unknown)
+};
+
 struct DemoEntry {
 	std::wstring path;        // full path on disk
 	std::string fileName;     // file name only (UTF-8), for display

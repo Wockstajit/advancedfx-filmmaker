@@ -61,6 +61,10 @@ public:
 
     SOURCESDK::CS2::CBaseHandle GetHandle();
 
+    SOURCESDK::CS2::CBaseHandle GetOwnerEntityHandle();
+
+    float GetGrenadeTrajectoryCreationTime();
+
     uint8_t LookupAttachment(const char* attachmentName);
 	bool GetAttachment(uint8_t idx, SOURCESDK::Vector &origin, SOURCESDK::Quaternion &angles);
 };

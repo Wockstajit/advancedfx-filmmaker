@@ -19,8 +19,8 @@
           and, to place/play markers, a demo loaded + playing.
 
   RUN:
-    powershell -ExecutionPolicy Bypass -File misc\cs2-live.ps1
-    powershell -ExecutionPolicy Bypass -File misc\cs2-live.ps1 -Port 29010 -WebPort 8765
+    powershell -ExecutionPolicy Bypass -File automation\cs2-live.ps1
+    powershell -ExecutionPolicy Bypass -File automation\cs2-live.ps1 -Port 29010 -WebPort 8765
 
   Stop with Ctrl+C in this window (or the Stop button on the page).
 ============================================================

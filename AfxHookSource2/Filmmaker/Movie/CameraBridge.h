@@ -45,6 +45,12 @@ void CameraBridge_SetCameraPose(double x, double y, double z,
 // Enable/disable the in-world camera-path keyframe gizmos (g_CampathDrawer).
 void CameraBridge_SetPathDrawEnabled(bool enable);
 
+// Draw/hide the single follow-camera marker. This marker is not part of the
+// path-camera keyframe model.
+void CameraBridge_SetFollowCameraMarker(bool enabled,
+                                        double x, double y, double z,
+                                        double pitch, double yaw, double roll, double fov);
+
 // UI cursor probe for the EXPERIMENTAL graph editor. Returns the latest client-area cursor
 // position + left/right-button state captured in the WndProc (main.cpp), plus the live Shift
 // state (read on the main thread). 'seq' increments on every mouse-move so the JS can detect

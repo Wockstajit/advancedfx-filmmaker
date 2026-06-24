@@ -143,6 +143,10 @@ int CEntityInstance::GetTeam() {
  */
 void CEntityInstance::GetOrigin(float & x, float & y, float & z) {
     auto ptr = *(u_char**)((u_char*)this + g_clientDllOffsets.C_BaseEntity.m_pGameSceneNode);
+	if (!ptr) {
+		x = y = z = FLT_MAX;
+		return;
+	}
 	// See cl_ent_text drawing function. Near "Position: %0.3f, %0.3f, %0.3f\n" or cl_ent_viewoffset related function.
 	auto vector = (float*)(ptr + g_clientDllOffsets.CGameSceneNode.m_vecAbsOrigin);
 	x =  vector[0];
@@ -176,7 +180,7 @@ SOURCESDK::CS2::CBaseHandle CEntityInstance::GetActiveWeaponHandle() {
 
 const char * CEntityInstance::GetPlayerName(){
     if (!IsPlayerController()) return nullptr;
-    return *(const char **)((u_char*)(this) + g_clientDllOffsets.CBasePlayerController.m_iszPlayerName);
+    return (const char*)((u_char*)this + g_clientDllOffsets.CBasePlayerController.m_iszPlayerName);
 }
 
 uint64_t CEntityInstance::GetSteamId(){
@@ -212,6 +216,16 @@ SOURCESDK::CS2::CBaseHandle CEntityInstance::GetHandle() {
 	return SOURCESDK::CS2::CEntityHandle::CEntityHandle();
 }
 
+SOURCESDK::CS2::CBaseHandle CEntityInstance::GetOwnerEntityHandle() {
+	return SOURCESDK::CS2::CEntityHandle::CEntityHandle(
+		*(uint32_t*)((unsigned char*)this + g_clientDllOffsets.C_BaseEntity.m_hOwnerEntity));
+}
+
+float CEntityInstance::GetGrenadeTrajectoryCreationTime() {
+	return *(float*)((unsigned char*)this
+		+ g_clientDllOffsets.C_BaseCSGrenadeProjectile.m_flTrajectoryTrailEffectCreationTime);
+}
+
 typedef	void (__fastcall * org_LookupAttachment_t)(void* This, uint8_t& outIdx, const char* attachmentName);
 org_LookupAttachment_t org_LookupAttachment = nullptr;
 
@@ -220,11 +234,15 @@ org_GetAttachment_t org_GetAttachment = nullptr;
 
 uint8_t CEntityInstance::LookupAttachment(const char* attachmentName) {
 	uint8_t idx = 0;
+	if (!org_LookupAttachment || !attachmentName || !*attachmentName)
+		return idx;
 	org_LookupAttachment(this, idx, attachmentName);
 	return idx;
 }
 
 bool CEntityInstance::GetAttachment(uint8_t idx, SOURCESDK::Vector &origin, SOURCESDK::Quaternion &angles) {
+	if (!org_GetAttachment || idx == 0)
+		return false;
 	alignas(16) float resData[8] = {0};
 
 	if(org_GetAttachment(this, idx, resData)) {

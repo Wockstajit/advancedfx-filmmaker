@@ -97,6 +97,8 @@ void CameraTimelineHud::Teardown() {
 // Declared in Filmmaker.cpp; queried so the timeline yields the curve zone to the experimental
 // graph editor (forces compact scrub view + hides its own curve-editor toggle) while it is on.
 bool GraphEditorExperiment_Enabled();
+const char* CameraEditor_HudViewName(); // declared in Filmmaker.cpp; game-HUD visibility while hosted
+bool CameraEditor_ScaledHud(float& x0, float& y0, float& x1, float& y1); // scaled-preview rect + active
 
 std::string CameraTimelineHud::BuildStateJson() {
 	CameraPath& cp = CameraPathRef();
@@ -114,6 +116,15 @@ std::string CameraTimelineHud::BuildStateJson() {
 	o << "{";
 	o << "\"open\":" << (m_visible ? "true" : "false");
 	o << ",\"hosted\":" << (m_editorHosted ? "true" : "false");
+	o << ",\"hudView\":\"" << CameraEditor_HudViewName() << "\""; // game-HUD visibility while hosted
+	{
+		// Scaled-preview rect + active flag, so the JS scales the native game HUD into the same
+		// rect the world blit uses (HUD then lines up with the shrunk world preview).
+		float sx0 = 0, sy0 = 0, sx1 = 0, sy1 = 0;
+		const bool hudScale = CameraEditor_ScaledHud(sx0, sy0, sx1, sy1);
+		o << ",\"hudScale\":" << (hudScale ? "true" : "false");
+		o << ",\"previewRect\":[" << sx0 << "," << sy0 << "," << sx1 << "," << sy1 << "]";
+	}
 	o << ",\"cursor\":" << (Cursor() ? "true" : "false");
 	o << ",\"cursorForced\":" << (CursorForced() ? "true" : "false");
 	o << ",\"view\":\"timeline\"";

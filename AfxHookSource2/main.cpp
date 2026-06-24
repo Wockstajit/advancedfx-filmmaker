@@ -455,6 +455,13 @@ namespace Filmmaker {
 
 	void CameraBridge_SetPathDrawEnabled(bool enable) { g_CampathDrawer.Draw_set(enable); }
 
+	void CameraBridge_SetFollowCameraMarker(bool enabled,
+		double x, double y, double z,
+		double pitch, double yaw, double roll, double fov) {
+		g_CampathDrawer.FollowCameraMarker_set(enabled, CamPathValue(x, y, z, pitch, yaw, roll, fov));
+		if (enabled) g_CampathDrawer.Draw_set(true);
+	}
+
 	void CameraBridge_SetMarkerStyle(bool enabled, bool freeze, int highlightIndex) {
 		g_CampathDrawer.MarkerStyle_set(enabled, freeze, highlightIndex);
 		if (enabled) {

@@ -26,6 +26,7 @@ struct DemoHelperResult {
 	int teamScore0 = 0;         // CT
 	int teamScore1 = 0;         // T
 	std::vector<ScoreboardPlayer> players;
+	std::vector<DemoEvent> events; // weapon/C4 drop+pickup ticks (full parse only, v5+)
 };
 
 // Parses demoPath via the helper (using/refreshing the "<demo>.fmjson" cache).

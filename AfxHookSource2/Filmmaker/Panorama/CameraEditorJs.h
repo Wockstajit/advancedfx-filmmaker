@@ -40,7 +40,9 @@ inline const char* kCameraEditorJs = R"EDJS(
       btnBg: '#ffffff14', btnOn: '#f0b32333',
       font: 'Stratum2, "Arial Unicode MS"'
     };
-    var INSPECTOR_W = 372, BOTTOM_H = 176;
+    var INSPECTOR_W = 430, BOTTOM_H = 176, BOTTOM_LIFT = 28;
+    var TAB_BAR_H = 34, TAB_GAP = 4; // bottom-editor tab bar (DIVIDER above the active editor) height + gap
+    var NATIVE_BAR_H = 96;  // fallback height for CS2's native demo bar (measured at runtime when shown)
     var GRAPH_DOCK_H = 556; // experimental graph-editor dock height; when open it REPLACES the timeline
                             // and fills the whole bottom (keep in sync with GraphEditorJs DOCK_H).
     var CH_ROLL = 5, CH_FOV = 6;
@@ -60,10 +62,10 @@ inline const char* kCameraEditorJs = R"EDJS(
     function btn(parent, text, onClick, color) {
       var b = mk('Panel', parent); b.hittest = true;
       b.style.backgroundColor = S.btnBg; b.style.borderRadius = '3px';
-      b.style.paddingTop = '5px'; b.style.paddingBottom = '5px';
-      b.style.paddingLeft = '10px'; b.style.paddingRight = '10px';
+      b.style.paddingTop = '6px'; b.style.paddingBottom = '6px';
+      b.style.paddingLeft = '11px'; b.style.paddingRight = '11px';
       b.style.marginRight = '5px'; b.style.verticalAlign = 'center';
-      var l = lbl(b, text, color || S.value, 13); l.style.fontWeight = 'bold';
+      var l = lbl(b, text, color || S.value, 14); l.style.fontWeight = 'bold';
       b.SetPanelEvent('onactivate', onClick);
       b.__lbl = l; return b;
     }
@@ -72,7 +74,7 @@ inline const char* kCameraEditorJs = R"EDJS(
       s.style.marginTop = '12px'; s.style.paddingTop = '8px'; s.style.paddingBottom = '10px';
       s.style.paddingLeft = '10px'; s.style.paddingRight = '10px';
       s.style.backgroundColor = S.sectionBg; s.style.borderRadius = '4px';
-      var t = lbl(s, title, S.dim, 11); t.style.fontWeight = 'bold'; t.style.letterSpacing = '2px';
+      var t = lbl(s, title, S.dim, 12); t.style.fontWeight = 'bold'; t.style.letterSpacing = '2px';
       t.style.marginBottom = '6px';
       return s;
     }
@@ -88,6 +90,38 @@ R"EDJS(
     // ---- root: full-screen, non-hittest. Children draw bottom -> top. ----
     var root = $.CreatePanel('Panel', ctx, 'CamEditorRoot', {});
     root.hittest = false; root.style.width = '100%'; root.style.height = '100%'; root.style.zIndex = '53';
+
+    var confirmOverlay = mk('Panel', root); confirmOverlay.visible = false; confirmOverlay.hittest = true;
+    confirmOverlay.style.width = '100%'; confirmOverlay.style.height = '100%'; confirmOverlay.style.zIndex = '200';
+    confirmOverlay.style.backgroundColor = 'rgba(0,0,0,0.72)';
+    confirmOverlay.SetPanelEvent('onactivate', function () { hideClearConfirm(); });
+    var confirmBox = mk('Panel', confirmOverlay); confirmBox.hittest = true;
+    confirmBox.style.width = '520px'; confirmBox.style.height = '230px';
+    confirmBox.style.horizontalAlign = 'center'; confirmBox.style.verticalAlign = 'center';
+    confirmBox.style.backgroundColor = 'rgba(16,20,26,0.99)';
+    confirmBox.style.border = '1px solid ' + S.accent; confirmBox.style.borderRadius = '6px';
+    confirmBox.style.boxShadow = '#000000ee 0px 0px 28px 6px';
+    confirmBox.style.flowChildren = 'down';
+    confirmBox.style.paddingTop = '26px'; confirmBox.style.paddingBottom = '24px';
+    confirmBox.style.paddingLeft = '28px'; confirmBox.style.paddingRight = '28px';
+    confirmBox.SetPanelEvent('onactivate', function () { /* keep clicks inside from dismissing */ });
+    var confirmTitle = lbl(confirmBox, 'CLEAR ALL CAMERA PATHS?', S.value, 22);
+    confirmTitle.style.fontWeight = 'bold'; confirmTitle.style.letterSpacing = '2px';
+    confirmTitle.style.horizontalAlign = 'center'; confirmTitle.style.marginBottom = '14px';
+    var confirmBody = lbl(confirmBox, 'This deletes every path camera/keyframe for this demo.', S.label, 14);
+    confirmBody.style.horizontalAlign = 'center'; confirmBody.style.marginBottom = '22px';
+    var confirmActions = mk('Panel', confirmBox); confirmActions.style.flowChildren = 'right';
+    confirmActions.style.horizontalAlign = 'center';
+    function hideClearConfirm() { confirmOverlay.visible = false; }
+    function showClearConfirm() { confirmOverlay.visible = true; }
+    var confirmNo = btn(confirmActions, 'No', function () { hideClearConfirm(); }, S.value);
+    confirmNo.style.width = '132px'; confirmNo.__lbl.style.textAlign = 'center'; confirmNo.__lbl.style.width = '100%';
+    var confirmYes = btn(confirmActions, 'Yes, clear all', function () {
+      hideClearConfirm();
+      cmd('mirv_filmmaker camtl clear');
+    }, S.danger);
+    confirmYes.style.width = '172px'; confirmYes.style.marginRight = '0px';
+    confirmYes.__lbl.style.textAlign = 'center'; confirmYes.__lbl.style.width = '100%';
 
     // Preview catcher: full-screen click swallow (UI-cursor mode only) so clicking the
     // game preview can't leak through to spectator target switching. Inspector/backdrop
@@ -125,6 +159,37 @@ R"EDJS(
     backdrop.style.verticalAlign = 'bottom'; backdrop.style.horizontalAlign = 'left';
     backdrop.style.width = '100%'; backdrop.style.height = BOTTOM_H + 'px';
     backdrop.style.backgroundColor = S.bg; backdrop.style.borderTop = '1px solid #ffffff14';
+
+    // Bottom-editor tab bar: a DIVIDER sitting directly ABOVE the active bottom editor with the
+    // three bottom-panel switches (where CS2's old CAM EDITOR / MOUSE buttons sat). It stays put
+    // across modes; render() positions it just above whichever editor is docked below it, and sizes
+    // its width. The native demo bar's own buttons are suppressed while the editor is open, so these
+    // tabs replace them. Pure switches (NOT toggles): always select that mode -> never an empty bottom.
+    var curBottomMode = 'native';
+    var tabBar = mk('Panel', root); tabBar.hittest = false;
+    tabBar.style.verticalAlign = 'bottom'; tabBar.style.horizontalAlign = 'left';
+    tabBar.style.height = TAB_BAR_H + 'px';
+    tabBar.style.backgroundColor = S.bgSoft;
+    tabBar.style.borderTop = '1px solid ' + S.accent; tabBar.style.borderBottom = '1px solid ' + S.accent;
+    tabBar.style.flowChildren = 'right';
+    tabBar.style.paddingTop = '4px'; tabBar.style.paddingBottom = '4px';
+    tabBar.style.paddingLeft = '12px'; tabBar.style.paddingRight = '12px';
+    // Order (left->right): Regular Timeline (native CS2 bar), Camera, Graph.
+    var regularViewBtn = btn(tabBar, 'Regular Timeline', function () {
+      cmd('mirv_filmmaker editor curveeditor native');
+    }, S.value);
+    regularViewBtn.style.verticalAlign = 'center'; regularViewBtn.style.width = '150px';
+    regularViewBtn.__lbl.style.horizontalAlign = 'center';
+    var timelineViewBtn = btn(tabBar, 'Camera', function () {
+      cmd('mirv_filmmaker editor curveeditor timeline');
+    }, S.value);
+    timelineViewBtn.style.verticalAlign = 'center'; timelineViewBtn.style.width = '150px';
+    timelineViewBtn.__lbl.style.horizontalAlign = 'center';
+    var graphViewBtn = btn(tabBar, 'Graph', function () {
+      cmd('mirv_filmmaker editor curveeditor graph');
+    }, S.value);
+    graphViewBtn.style.verticalAlign = 'center'; graphViewBtn.style.width = '150px';
+    graphViewBtn.style.marginRight = '0px'; graphViewBtn.__lbl.style.horizontalAlign = 'center';
 
     // Right inspector column.
     var inspector = mk('Panel', root); inspector.hittest = false;
@@ -171,8 +236,8 @@ R"EDJS(
     var hTitle = lbl(head, 'CAMERA EDITOR', S.value, 16); hTitle.style.fontWeight = 'bold';
     hTitle.style.letterSpacing = '2px'; hTitle.style.width = 'fill-parent-flow(1.0)';
     hTitle.style.verticalAlign = 'center';
-    // The graph editor is the default curve editor now (auto-opened with the workspace), so the
-    // old opt-in "Experiment" launcher is gone.
+    // Exit fully closes the editor and restores the native CS2 demo bar. The bottom-panel switch
+    // (Camera Timeline / Graph) lives in the persistent bottom tab bar built above, not here.
     var exitBtn = btn(head, '✕ Exit', function () { cmd('mirv_filmmaker editor close'); }, S.value);
     exitBtn.style.marginRight = '0px';
 
@@ -181,8 +246,316 @@ R"EDJS(
     mouseBtn.style.width = 'fill-parent-flow(1.0)'; mouseBtn.style.marginRight = '0px';
     mouseBtn.__lbl.style.horizontalAlign = 'center';
 
+    var inspectorMode = 'path';
+    var targetDropdownOpen = false;
+    var modeRow = row(inspector);
+    var pathTab = btn(modeRow, 'PATH CAMERA', function () { inspectorMode = 'path'; }, S.accent);
+    var followTab = btn(modeRow, 'FOLLOW CAMERA', function () { inspectorMode = 'follow'; }, S.value);
+    pathTab.style.width = 'fill-parent-flow(1.0)';
+    followTab.style.width = 'fill-parent-flow(1.0)'; followTab.style.marginRight = '0px';
+
+    // Game-UI visibility (persists across the Path/Follow tabs): how much of CS2's own HUD
+    // shows behind the editor. Hide All = clean; In-Game = radar + HP/ammo with NO spectator
+    // observer panel; Show All = full spectator HUD.
+    var hudLabel = lbl(inspector, 'GAME UI', S.dim, 10);
+    hudLabel.style.letterSpacing = '1px'; hudLabel.style.marginTop = '7px';
+    var hudRow = row(inspector);
+    var hudBtns = [];
+    [['Hide All', 'hidden'], ['In-Game', 'game'], ['Show All', 'full']].forEach(function (it) {
+      var b = btn(hudRow, it[0], function () { cmd('mirv_filmmaker editor hud ' + it[1]); }, S.value);
+      b.style.width = 'fill-parent-flow(1.0)'; b.__lbl.style.fontSize = '11px';
+      b.__lbl.style.horizontalAlign = 'center'; b.__hud = it[1]; hudBtns.push(b);
+    });
+    hudBtns[hudBtns.length - 1].style.marginRight = '0px';
+
+)EDJS"
+R"EDJS(
+    // ===================== FOLLOW / LOCK-ON CAMERA =====================
+    var followSec = section(inspector, 'FOLLOW / ATTACH CAMERA');
+    var singleHint = lbl(followSec, 'ONE CAMERA · PLACING AGAIN REPLACES IT', S.dim, 9);
+    singleHint.style.letterSpacing = '1px'; singleHint.style.marginBottom = '4px';
+    var followActions = row(followSec);
+    var followPlace = btn(followActions, 'Place', function () {
+      cmd('mirv_filmmaker follow place');
+      // Immediate confirmation that the CLICK registered (independent of engine state): flash the
+      // button white for a moment. The status line below then updates from the engine's place
+      // message (which now includes the tick), so a successful place is visibly distinguishable
+      // from a click that never landed.
+      followPlace.style.backgroundColor = '#ffffffcc';
+      try { $.Schedule(0.18, function () { followPlace.style.backgroundColor = S.btnBg; }); } catch (e) {}
+    }, S.accent);
+    btn(followActions, 'Reposition', function () { cmd('mirv_filmmaker follow reposition'); }, S.value);
+    btn(followActions, 'Clear', function () { cmd('mirv_filmmaker follow clear'); }, S.danger);
+    var followPreview = btn(followSec, '▶ Preview Follow Cam', function () {
+      cmd((st && st.follow && st.follow.enabled) ? 'mirv_filmmaker follow stop' : 'mirv_filmmaker follow preview');
+    }, S.accent);
+    followPreview.style.marginTop = '5px'; followPreview.style.marginRight = '0px';
+
+    var followStatus = lbl(followSec, 'Place a camera and select a target.', S.dim, 11);
+    followStatus.style.marginTop = '8px';
+    var followWarn = lbl(followSec, '', '#f4c95dff', 10); followWarn.style.marginTop = '3px';
+
+    // Camera model: Lock-on (placed turret that rotates to track) vs Attach (ride-along).
+    var modeBtns = [];
+    var modeRow2 = row(followSec); modeRow2.style.marginTop = '7px';
+    [['Lock-on', 'lockon'], ['Attach', 'attach']].forEach(function (it, idx) {
+      var b = btn(modeRow2, it[0], function () { cmd('mirv_filmmaker follow mode ' + it[1]); }, S.value);
+      b.style.width = 'fill-parent-flow(1.0)'; b.__lbl.style.horizontalAlign = 'center'; b.__mode = idx;
+      modeBtns.push(b);
+    });
+    modeBtns[modeBtns.length - 1].style.marginRight = '0px';
+    var modeHint = lbl(followSec, '', S.dim, 9); modeHint.style.marginTop = '2px';
+
+    // Target type: 5 presets over (type, mode). __match(type, mode) flags the active one.
+    var typeRow = row(followSec); typeRow.style.marginTop = '6px';
+    var typeBtns = [];
+    var FOLLOW_TYPES = [
+      ['Player',        ['follow mode lockon', 'follow type player'], function (t, m) { return t === 0 && m === 0; }],
+      ['Grenade',       ['follow type grenade'],                      function (t, m) { return t === 1; }],
+      ['Weapon/C4',     ['follow mode lockon', 'follow type weapon'], function (t, m) { return t === 2 && m === 0; }],
+      ['Player Bone',   ['follow type player', 'follow mode attach'], function (t, m) { return t === 0 && m === 1; }],
+      ['Weapon Attach', ['follow type weapon', 'follow mode attach'], function (t, m) { return t === 2 && m === 1; }]
+    ];
+    FOLLOW_TYPES.forEach(function (it) {
+      var b = btn(typeRow, it[0], function () { it[1].forEach(function (c) { cmd('mirv_filmmaker ' + c); }); }, S.value);
+      b.style.paddingLeft = '4px'; b.style.paddingRight = '4px'; b.style.width = 'fill-parent-flow(1.0)';
+      b.__lbl.style.fontSize = '10px'; b.__match = it[2]; typeBtns.push(b);
+    });
+    typeBtns[typeBtns.length - 1].style.marginRight = '0px';
+
+    var pickRow = row(followSec);
+    var nearestBtn = btn(pickRow, 'Select Nearest', function () { cmd('mirv_filmmaker follow nearest'); }, S.value);
+    nearestBtn.style.width = 'fill-parent-flow(1.0)';
+    var refreshHint = lbl(pickRow, 'live list', S.dim, 10); refreshHint.style.verticalAlign = 'center';
+
+    var targetDropBtn = btn(followSec, 'Target  ▾', function () {
+      targetDropdownOpen = !targetDropdownOpen;
+      candidateList.visible = targetDropdownOpen;
+    }, S.value);
+    targetDropBtn.style.marginTop = '7px'; targetDropBtn.style.marginRight = '0px';
+
+    var candidateList = mk('Panel', followSec); candidateList.style.flowChildren = 'down';
+    candidateList.style.width = '100%'; candidateList.style.marginTop = '7px';
+    candidateList.style.paddingTop = '5px'; candidateList.style.paddingBottom = '5px';
+    candidateList.style.paddingLeft = '5px'; candidateList.style.paddingRight = '5px';
+    candidateList.style.backgroundColor = S.bgSoft; candidateList.style.border = '1px solid ' + S.panelBorder;
+    // Cap the height and allow scrolling so a long grenade list (recent + nearby ticks) is browsable.
+    candidateList.style.maxHeight = '260px'; candidateList.style.overflow = 'squish scroll';
+    candidateList.visible = false;
+    var candidateSig = '';
+    var pendingCandidate = null;
+    var confirmRow = row(followSec); confirmRow.visible = false;
+    var confirmText = lbl(confirmRow, 'Target is far away. Use anyway?', '#f4c95dff', 10);
+    confirmText.style.width = 'fill-parent-flow(1.0)'; confirmText.style.verticalAlign = 'center';
+    btn(confirmRow, 'Use', function () {
+      if (pendingCandidate) cmd('mirv_filmmaker follow select ' + pendingCandidate.index);
+      pendingCandidate = null; confirmRow.visible = false;
+    }, S.accent);
+    btn(confirmRow, 'Cancel', function () { pendingCandidate = null; confirmRow.visible = false; }, S.value);
+
+    function chooseCandidate(c) {
+      if (st && st.follow && st.follow.type === 1) {
+        cmd('mirv_filmmaker follow selecthandle ' + c.handle);
+        return;
+      }
+      if (c.distanceLevel >= 2) {
+        pendingCandidate = c;
+        confirmText.text = (c.distanceLevel >= 3 ? 'Very far target' : 'Far target') +
+          ' (' + Math.round(c.distance) + 'u). Use anyway?';
+        confirmRow.visible = true;
+      } else cmd('mirv_filmmaker follow select ' + c.index);
+    }
+    function renderCandidates(f) {
+      // Show many rows (grenades around the current tick can be numerous); the list scrolls.
+      var MAXCAND = 40;
+      var list = (f && f.candidates) || [], sigParts = [];
+      for (var i = 0; i < Math.min(MAXCAND, list.length); i++) {
+        var c = list[i]; sigParts.push(c.index + ':' + c.handle + ':' + c.name + ':' + c.status + ':' + c.throwTick + ':' + Math.round(c.distance));
+      }
+      var sig = sigParts.join('|') + ':' + (f ? f.type : -1);
+      if (sig === candidateSig) return;
+      candidateSig = sig; candidateList.RemoveAndDeleteChildren();
+      if (!list.length) { lbl(candidateList, 'No matching targets found.', S.dim, 10); return; }
+      for (var j = 0; j < Math.min(MAXCAND, list.length); j++) (function (c) {
+        var r = row(candidateList); r.style.marginTop = '2px';
+        var text;
+        if (f.type === 1) {
+          var delta = c.tickDelta >= 0 ? ('+' + c.tickDelta) : String(c.tickDelta);
+          text = (c.grenadeType || c.name) + ' · ' + (c.ownerName || 'unknown thrower') +
+            (c.team !== '-' ? ' · ' + c.team : '') + ' · tick ' + c.throwTick +
+            ' (' + delta + ') · ' + (c.status || 'nearby');
+        } else if (c.isWeapon) {
+          text = c.name + ' · WEAPON · ' + (c.status || (c.dropped ? 'dropped' : 'held'));
+        } else {
+          text = c.name + (c.team !== '-' ? ' · ' + c.team : '') +
+            (f.type === 0 ? (c.alive ? ' · alive' : ' · dead') : '') +
+            (c.status ? ' · ' + c.status : '') + ' · ' + Math.round(c.distance) + 'u';
+        }
+        var b = btn(r, text, function () { chooseCandidate(c); }, c.distanceLevel >= 2 ? '#f4c95dff' : S.value);
+        b.style.width = '100%'; b.style.marginRight = '0px'; b.__lbl.style.fontSize = '11px';
+      })(list[j]);
+    }
+
+    // ---- Weapon source: held vs dropped (Weapon type only) --------------
+    var srcRow = row(followSec); srcRow.style.marginTop = '7px';
+    var srcLabel = lbl(srcRow, 'Source', S.label, 10); srcLabel.style.width = '52px'; srcLabel.style.verticalAlign = 'center';
+    var srcBtns = [];
+    [['Auto', 'auto'], ['Held', 'held'], ['Dropped', 'dropped']].forEach(function (it, idx) {
+      var b = btn(srcRow, it[0], function () { cmd('mirv_filmmaker follow weaponsource ' + it[1]); }, S.value);
+      b.style.width = 'fill-parent-flow(1.0)'; b.__lbl.style.fontSize = '10px'; b.__src = idx; srcBtns.push(b);
+    });
+    srcBtns[srcBtns.length - 1].style.marginRight = '0px';
+
+    // ---- Attach point: player bone / weapon point (Attach mode only) ----
+    var attachRow = row(followSec); attachRow.style.marginTop = '7px';
+    var attachLabel = lbl(attachRow, 'Attach pt', S.label, 10); attachLabel.style.width = '66px'; attachLabel.style.verticalAlign = 'center';
+    var attachSelect = btn(attachRow, 'head', function () { attachMenu.visible = !attachMenu.visible; }, S.value);
+    attachSelect.style.width = 'fill-parent-flow(1.0)'; attachSelect.style.marginRight = '0px';
+    var attachMenu = mk('Panel', followSec); attachMenu.style.flowChildren = 'down';
+    attachMenu.style.width = '100%'; attachMenu.style.marginTop = '3px';
+    attachMenu.style.paddingTop = '4px'; attachMenu.style.paddingBottom = '4px';
+    attachMenu.style.paddingLeft = '4px'; attachMenu.style.paddingRight = '4px';
+    attachMenu.style.backgroundColor = S.bgSoft; attachMenu.style.border = '1px solid ' + S.panelBorder;
+    attachMenu.style.maxHeight = '200px'; attachMenu.style.overflow = 'squish scroll';
+    attachMenu.visible = false;
+    var attachSig = '';
+    function renderAttachmentMenu(f) {
+      var options = (f && f.type === 2) ? ['muzzle', 'muzzle_flash', 'shell_eject'] : ['head', 'eyes', 'weapon_hand_R', 'weapon_hand_L'];
+      var list = (f && f.candidates) || [], selected = null;
+      for (var i = 0; i < list.length; i++) {
+        if ((list[i].index === f.targetIndex) || (f.targetHandle && list[i].handle === f.targetHandle)) { selected = list[i]; break; }
+      }
+      if (selected && selected.attachments && selected.attachments.length) options = selected.attachments;
+      if (f && f.attachment && options.indexOf(f.attachment) < 0) options.unshift(f.attachment);
+      var sig = options.join('|');
+      if (sig === attachSig) return;
+      attachSig = sig; attachMenu.RemoveAndDeleteChildren();
+      for (var j = 0; j < options.length; j++) (function (name, isLast) {
+        var option = btn(attachMenu, name, function () { cmd('mirv_filmmaker follow bone ' + name); attachMenu.visible = false; }, S.value);
+        option.style.width = '100%'; option.style.marginRight = '0px'; option.style.marginBottom = isLast ? '0px' : '3px';
+      })(options[j], j + 1 === options.length);
+    }
+
+    // ---- Events: throw / drop / pickup ticks + Preview Tick -------------
+    var eventsLabel = lbl(followSec, 'EVENTS', S.dim, 10);
+    eventsLabel.style.letterSpacing = '1px'; eventsLabel.style.marginTop = '9px';
+    var previewTickBtn = btn(followSec, 'Preview Tick (jump before event)', function () { cmd('mirv_filmmaker follow previewtick'); }, S.accent);
+    previewTickBtn.style.marginTop = '3px'; previewTickBtn.style.marginRight = '0px';
+    var eventList = mk('Panel', followSec); eventList.style.flowChildren = 'down';
+    eventList.style.width = '100%'; eventList.style.marginTop = '5px';
+    eventList.style.paddingTop = '4px'; eventList.style.paddingBottom = '4px';
+    eventList.style.paddingLeft = '4px'; eventList.style.paddingRight = '4px';
+    eventList.style.backgroundColor = S.bgSoft; eventList.style.border = '1px solid ' + S.panelBorder;
+    eventList.style.maxHeight = '150px'; eventList.style.overflow = 'squish scroll';
+    var eventSig = '';
+    function renderEvents(f) {
+      var list = (f && f.events) || [];
+      var sig = (f ? (f.eventStatus + ':' + f.selectedEvent + ':') : '') + list.length;
+      for (var i = 0; i < list.length; i++) sig += '|' + list[i].index + ':' + list[i].tick;
+      if (sig === eventSig) return;
+      eventSig = sig; eventList.RemoveAndDeleteChildren();
+      if (!list.length) {
+        lbl(eventList, (f && f.eventStatus === 1) ? 'Scanning demo for drop/pickup events...'
+          : ((f && f.eventStatus === 3) ? 'Event scan unavailable for this demo.' : 'No drop/pickup events near here.'), S.dim, 10);
+        return;
+      }
+      for (var j = 0; j < list.length; j++) (function (e) {
+        var r = row(eventList); r.style.marginTop = '2px';
+        var label = e.type.replace('weapon_drop', 'death drop').replace('bomb_dropped', 'C4 drop')
+          .replace('bomb_pickup', 'C4 pickup').replace('bomb_planted', 'C4 plant').replace('item_pickup', 'pickup');
+        var text = 'tick ' + e.tick + '  ' + label + (e.item ? ('  ' + e.item) : '') + (e.ownerName ? ('  ' + e.ownerName) : '');
+        var on = (f.selectedEvent === e.index);
+        var b = btn(r, text, function () { cmd('mirv_filmmaker follow eventselect ' + e.index); }, on ? S.accent : S.value);
+        b.style.width = '100%'; b.style.marginRight = '0px'; b.__lbl.style.fontSize = '10px';
+        if (on) b.style.backgroundColor = S.btnOn;
+      })(list[j]);
+    }
+
+    // ---- Framing: offset / rotation / FOV (native Sliders) -------------
+    var framingLabel = lbl(followSec, 'FRAMING (OFFSET / ROTATION / FOV)', S.dim, 10);
+    framingLabel.style.letterSpacing = '1px'; framingLabel.style.marginTop = '9px';
+    var xformPanel = mk('Panel', followSec); xformPanel.style.flowChildren = 'down'; xformPanel.style.width = '100%'; xformPanel.style.marginTop = '3px';
+    var xformSliders = [];
+    function vslider(parent, name, lo, hi, decimals, getVal, command) {
+      var r = row(parent);
+      var nl = lbl(r, name, S.label, 10); nl.style.width = '46px'; nl.style.verticalAlign = 'center';
+      var sl = $.CreatePanel('Slider', r, '', { direction: 'horizontal' }); sl.AddClass('HorizontalSlider');
+      sl.style.width = 'fill-parent-flow(1.0)'; sl.style.height = '14px'; sl.style.verticalAlign = 'center';
+      var vl = lbl(r, '-', S.accent, 10); vl.style.width = '50px'; vl.style.textAlign = 'right'; vl.style.verticalAlign = 'center'; vl.style.marginLeft = '6px';
+      var rec = { sl: sl, vl: vl, lo: lo, hi: hi, decimals: decimals, getVal: getVal, busy: false };
+      $.RegisterEventHandler('SliderValueChanged', sl, function (p, v) {
+        if (rec.busy) return;
+        var value = lo + v * (hi - lo); vl.text = value.toFixed(decimals);
+        cmd('mirv_filmmaker follow ' + command + ' ' + value.toFixed(3));
+      });
+      xformSliders.push(rec); return rec;
+    }
+    vslider(xformPanel, 'Off X', -256, 256, 1, function (f) { return f.offset ? f.offset[0] : 0; }, 'offsetx');
+    vslider(xformPanel, 'Off Y', -256, 256, 1, function (f) { return f.offset ? f.offset[1] : 0; }, 'offsety');
+    vslider(xformPanel, 'Off Z', -256, 256, 1, function (f) { return f.offset ? f.offset[2] : 0; }, 'offsetz');
+    vslider(xformPanel, 'Pitch', -180, 180, 0, function (f) { return f.rotation ? f.rotation[0] : 0; }, 'rotpitch');
+    vslider(xformPanel, 'Yaw', -180, 180, 0, function (f) { return f.rotation ? f.rotation[1] : 0; }, 'rotyaw');
+    vslider(xformPanel, 'Roll', -180, 180, 0, function (f) { return f.rotation ? f.rotation[2] : 0; }, 'rotroll');
+    vslider(xformPanel, 'FOV', 1, 170, 0, function (f) { return f.fov || 90; }, 'fov');
+
+)EDJS"
+R"EDJS(
+    var presetRow = row(followSec);
+    [['Center','centered'],['Above','above'],['Low','low'],['Shoulder','shoulder'],['Side','side']].forEach(function (it) {
+      var b = btn(presetRow, it[0], function () { cmd('mirv_filmmaker follow preset ' + it[1]); }, S.value);
+      b.style.paddingLeft = '5px'; b.style.paddingRight = '5px'; b.__lbl.style.fontSize = '10px';
+    });
+
+    var advancedOpen = false;
+    var advancedToggle = btn(followSec, 'Advanced Tracking  ▸', function () {
+      advancedOpen = !advancedOpen;
+      advancedPanel.visible = advancedOpen;
+      advancedToggle.__lbl.text = advancedOpen ? 'Advanced Tracking  ▾' : 'Advanced Tracking  ▸';
+    }, S.value);
+    advancedToggle.style.marginTop = '8px'; advancedToggle.style.marginRight = '0px';
+    var advancedPanel = mk('Panel', followSec); advancedPanel.style.flowChildren = 'down';
+    advancedPanel.style.width = '100%'; advancedPanel.style.marginTop = '4px'; advancedPanel.visible = false;
+
+    var followSliders = [];
+    function followSlider(parent, name, field, lo, hi, command, decimals) {
+      var r = row(parent);
+      var nl = lbl(r, name, S.label, 10); nl.style.width = '58px'; nl.style.verticalAlign = 'center';
+      var sl = $.CreatePanel('Slider', r, '', { direction: 'horizontal' }); sl.AddClass('HorizontalSlider');
+      sl.style.width = 'fill-parent-flow(1.0)'; sl.style.height = '14px'; sl.style.verticalAlign = 'center';
+      var vl = lbl(r, '-', S.accent, 10); vl.style.width = '48px'; vl.style.textAlign = 'right';
+      vl.style.verticalAlign = 'center'; vl.style.marginLeft = '6px';
+      var rec = { sl: sl, vl: vl, field: field, lo: lo, hi: hi, command: command, decimals: decimals || 2, busy: false };
+      $.RegisterEventHandler('SliderValueChanged', sl, function (p, v) {
+        if (rec.busy) return;
+        var value = lo + v * (hi - lo); vl.text = value.toFixed(rec.decimals);
+        cmd('mirv_filmmaker follow ' + command + ' ' + value.toFixed(3));
+      });
+      followSliders.push(rec); return rec;
+    }
+    followSlider(advancedPanel, 'Look', 'look', 0, 1.0, 'look', 2);
+    followSlider(advancedPanel, 'Pos', 'position', 0, 1.0, 'position', 2);
+    followSlider(advancedPanel, 'Predict', 'prediction', 0, 0.5, 'prediction', 2);
+    followSlider(advancedPanel, 'Deadzone', 'deadzone', 0, 10, 'deadzone', 1);
+    followSlider(advancedPanel, 'Turn °/s', 'maxTurn', 0, 1440, 'maxturn', 0);
+
+    var optionBtns = {};
+    function followToggle(parent, key, label, command) {
+      var b = btn(parent, label, function () {
+        var f = st && st.follow; cmd('mirv_filmmaker follow ' + command + ' ' + ((f && f[key]) ? 0 : 1));
+      }, S.value);
+      optionBtns[key] = b; return b;
+    }
+    followToggle(advancedPanel, 'autoDead', 'Auto-disable on death', 'autodead');
+    followToggle(advancedPanel, 'switchWeapon', 'Retarget dropped weapon', 'switchweapon');
+    followToggle(advancedPanel, 'switchBomb', 'Retarget dropped C4', 'switchbomb');
+    followToggle(advancedPanel, 'holdLast', 'Hold last known position', 'hold');
+
+    // (Attach-point selector + framing sliders moved up into the FOLLOW / ATTACH section.)
+
     // ===================== SELECTED CAMERA ==============================
+    var pathPanels = [];
     var selSec = section(inspector, 'SELECTED CAMERA');
+    pathPanels.push(selSec);
     var navRow = row(selSec);
     btn(navRow, '◀', function () { cmd('mirv_filmmaker camtl selectdelta -1'); }, S.value);
     var selLbl = lbl(navRow, 'none', S.value, 14); selLbl.style.fontWeight = 'bold';
@@ -193,9 +566,12 @@ R"EDJS(
     btn(actRow, '+ Add', function () { cmd('mirv_filmmaker camtl addkey'); }, S.accent);
     var delBtn = btn(actRow, '− Delete', function () { if (st && st.selected >= 0) cmd('mirv_filmmaker camtl delkey ' + st.selected); }, S.value);
     var retimeBtn = btn(actRow, '⟲ Tick→Here', function () { if (st && st.selected >= 0) cmd('mirv_filmmaker camtl movekey ' + st.selected + ' ' + st.tick); }, S.value);
+    var clearAllBtn = btn(actRow, 'Clear All', function () { showClearConfirm(); }, S.danger);
+    clearAllBtn.style.marginRight = '0px';
 
     // ===================== TRANSFORM (readout) ==========================
     var xfSec = section(inspector, 'TRANSFORM');
+    pathPanels.push(xfSec);
     var posLbl = lbl(xfSec, '', S.value, 12); posLbl.style.marginTop = '2px';
     var angLbl = lbl(xfSec, '', S.value, 12); angLbl.style.marginTop = '3px';
     var xfHint = lbl(xfSec, '', S.dim, 10); xfHint.style.marginTop = '4px';
@@ -224,6 +600,7 @@ R"EDJS(
       sliders.push(rec); return rec;
     }
     var lensSec = section(inspector, 'LENS');
+    pathPanels.push(lensSec);
     valSlider(lensSec, 'FOV', CH_FOV, 1, 170);
     valSlider(lensSec, 'Roll', CH_ROLL, -180, 180);
     var lensHint = lbl(lensSec, '', S.dim, 10); lensHint.style.marginTop = '4px';
@@ -241,6 +618,7 @@ R"EDJS(
 
     // ===================== PATH (interp / ease / speed / timing) ========
     var pathSec = section(inspector, 'PATH');
+    pathPanels.push(pathSec);
     var interpBtn = btn(pathSec, 'Curve: Linear', function () {
       cmd('mirv_filmmaker marker interp cycle');
       // Mirror onto the experimental graph editor (the curve editor): the path interp is binary,
@@ -294,6 +672,7 @@ R"EDJS(
 
     // ===================== PLAYBACK hints ===============================
     var playSec = section(inspector, 'SHORTCUTS');
+    pathPanels.push(playSec);
     lbl(playSec, 'Space  ▶ / ⏸     ←/→  ±15s', S.value, 12);
     lbl(playSec, 'Scrub + keyframes on the timeline below.', S.dim, 10);
 )EDJS"
@@ -301,6 +680,12 @@ R"EDJS(
     // =====================================================================
     var st = null;
     var api = {};
+    api.setInspectorMode = function (mode) {
+      inspectorMode = mode === 'follow' ? 'follow' : 'path';
+    };
+    api.setAttachmentMenuOpen = function (open) {
+      attachMenu.visible = !!open;
+    };
     api.render = function () {
       var raw = root.GetAttributeString('state', '');
       if (!raw) { root.visible = false; return; }
@@ -315,9 +700,113 @@ R"EDJS(
       catcher.hittest = cur;
       inspector.hittest = cur;
       backdrop.hittest = cur;
+      tabBar.hittest = cur;
       mouseBtn.__lbl.text = cur ? 'MOUSE: UI  (G)' : 'MOUSE: GAME  (G)';
       mouseBtn.style.backgroundColor = cur ? S.btnOn : S.btnBg;
       mouseBtn.__lbl.style.color = cur ? S.accent : S.label;
+
+      // Game-UI visibility picker highlight (default 'hidden' = clean workspace).
+      var hv = st.hudView || 'hidden';
+      for (var hb = 0; hb < hudBtns.length; hb++) {
+        var onH = (hudBtns[hb].__hud === hv);
+        hudBtns[hb].style.backgroundColor = onH ? S.btnOn : S.btnBg;
+        hudBtns[hb].__lbl.style.color = onH ? S.accent : S.value;
+      }
+
+      var followMode = inspectorMode === 'follow';
+      followSec.visible = followMode;
+      for (var pm = 0; pm < pathPanels.length; pm++) pathPanels[pm].visible = !followMode;
+      followTab.style.backgroundColor = followMode ? S.btnOn : S.btnBg;
+      followTab.__lbl.style.color = followMode ? S.accent : S.value;
+      pathTab.style.backgroundColor = followMode ? S.btnBg : S.btnOn;
+      pathTab.__lbl.style.color = followMode ? S.value : S.accent;
+      var bm = st.bottomMode || (st.graphExp ? 'graph' : 'native');
+      curBottomMode = bm;
+      var regularActive = (bm !== 'camera' && bm !== 'graph'); // 'native' (Regular Timeline)
+      timelineViewBtn.style.backgroundColor = bm === 'camera' ? S.btnOn : S.btnBg;
+      timelineViewBtn.__lbl.style.color = bm === 'camera' ? S.accent : S.value;
+      graphViewBtn.style.backgroundColor = bm === 'graph' ? S.btnOn : S.btnBg;
+      graphViewBtn.__lbl.style.color = bm === 'graph' ? S.accent : S.value;
+      regularViewBtn.style.backgroundColor = regularActive ? S.btnOn : S.btnBg;
+      regularViewBtn.__lbl.style.color = regularActive ? S.accent : S.value;
+
+      var f = st.follow || {};
+      var attachModeOn = (f.mode === 1);
+      // Camera-model toggle (Lock-on vs Attach).
+      for (var mb = 0; mb < modeBtns.length; mb++) {
+        var onM = (f.mode === modeBtns[mb].__mode);
+        modeBtns[mb].style.backgroundColor = onM ? S.btnOn : S.btnBg;
+        modeBtns[mb].__lbl.style.color = onM ? S.accent : S.value;
+      }
+      modeHint.text = attachModeOn ? 'Attach: the camera rides the target (offset / rotation / FOV).'
+                                   : 'Lock-on: a placed camera rotates to track the target.';
+      // Target-type presets (active = type + mode match).
+      for (var ft = 0; ft < typeBtns.length; ft++) {
+        var activeType = typeBtns[ft].__match(f.type, f.mode);
+        typeBtns[ft].style.backgroundColor = activeType ? S.btnOn : S.btnBg;
+        typeBtns[ft].__lbl.style.color = activeType ? S.accent : S.value;
+      }
+      // Placement is lock-on only; attach needs no placed camera.
+      if (singleHint) singleHint.visible = !attachModeOn;
+      followActions.visible = !attachModeOn;
+      followPlace.__lbl.text = f.hasCamera ? 'Replace' : 'Place';
+      // Live Preview (drives the rendered view from this camera).
+      followPreview.__lbl.text = f.enabled ? 'Stop Live Preview' : 'Live Preview';
+      followPreview.style.backgroundColor = f.enabled ? S.btnOn : S.btnBg;
+      var haveTarget = (f.targetIndex >= 0) || (f.type === 2 && f.weaponPlayerIndex >= 0);
+      followStatus.text = haveTarget
+        ? ((f.targetName || ('Entity #' + f.targetIndex)) + '  -  ' + (f.typeName || 'Player') + (attachModeOn ? ' (attach)' : ' (lock-on)'))
+        : (attachModeOn ? 'Select a target to ride.' : 'Place a camera, then select a target.');
+      followStatus.style.color = f.targetValid ? S.value : S.dim;
+      followWarn.text = f.repositioning ? 'Reposition active: move in freecam, then left-click to place.'
+        : (f.message ? f.message
+        : (!attachModeOn && f.distanceLevel >= 3 ? 'Very far / likely outside the useful shot area.'
+        : (!attachModeOn && f.distanceLevel >= 2 ? 'Selected target is far from this camera.' : '')));
+      // Target selector.
+      nearestBtn.__lbl.text = (f.type === 1 ? 'Select Nearest Throw' : 'Select Nearest') +
+        (f.targetName ? (' - ' + f.targetName) : '');
+      targetDropBtn.__lbl.text = 'Target: ' + (f.targetName || 'none');
+      candidateList.visible = targetDropdownOpen;
+      renderCandidates(f);
+      // Weapon source (Weapon type only).
+      srcRow.visible = (f.type === 2);
+      for (var sb = 0; sb < srcBtns.length; sb++) {
+        var onS = (f.weaponSource === srcBtns[sb].__src);
+        srcBtns[sb].style.backgroundColor = onS ? S.btnOn : S.btnBg;
+        srcBtns[sb].__lbl.style.color = onS ? S.accent : S.value;
+      }
+      // Attach point (attach mode only).
+      attachRow.visible = attachModeOn;
+      if (!attachModeOn) attachMenu.visible = false;
+      renderAttachmentMenu(f);
+      attachSelect.__lbl.text = (f.attachment || 'head');
+      // Events + Preview Tick (grenade throws / weapon-C4 drops).
+      var eventsRelevant = (f.type === 1 || f.type === 2);
+      eventsLabel.visible = eventsRelevant;
+      previewTickBtn.visible = eventsRelevant;
+      eventList.visible = (f.type === 2);
+      previewTickBtn.__lbl.text = (f.type === 1)
+        ? (f.grenadePending ? 'Waiting for Throw...' : 'Preview Tick (track grenade throw)')
+        : 'Preview Tick (jump before drop)';
+      previewTickBtn.style.backgroundColor = f.grenadePending ? S.btnOn : S.btnBg;
+      if (f.type === 2) renderEvents(f);
+      // Framing sliders (offset / rotation / FOV).
+      for (var xs = 0; xs < xformSliders.length; xs++) {
+        var xr = xformSliders[xs], xv = num(xr.getVal(f));
+        xr.busy = true; xr.sl.value = clamp01((xv - xr.lo) / (xr.hi - xr.lo)); xr.busy = false;
+        xr.vl.text = xv.toFixed(xr.decimals);
+      }
+      // Advanced smoothing sliders.
+      for (var fs = 0; fs < followSliders.length; fs++) {
+        var rec = followSliders[fs], value = num(f[rec.field]);
+        rec.busy = true; rec.sl.value = clamp01((value - rec.lo) / (rec.hi - rec.lo)); rec.busy = false;
+        rec.vl.text = value.toFixed(rec.decimals);
+      }
+      for (var fk in optionBtns) if (optionBtns.hasOwnProperty(fk)) {
+        optionBtns[fk].style.backgroundColor = f[fk] ? S.btnOn : S.btnBg;
+        optionBtns[fk].__lbl.style.color = f[fk] ? S.accent : S.value;
+        optionBtns[fk].__lbl.text = (f[fk] ? '[x] ' : '[ ] ') + optionBtns[fk].__lbl.text.replace(/^\[.\]\s*/, '');
+      }
       // Aspect-ratio letterbox. Virtual px = actuallayout / uiscale (matches style px).
       // Measure from the ALREADY-laid-out HUD context panel when our fresh root still reports 0
       // (the first layout passes after a build / resolution switch) -- otherwise the preview +
@@ -326,31 +815,62 @@ R"EDJS(
       var rawW = root.actuallayoutwidth || 0, rawH = root.actuallayoutheight || 0;
       if (rawW < 16) { rawW = ctx.actuallayoutwidth || 0; rawH = ctx.actuallayoutheight || 0; }
       var rw = rawW / rsx, rh = rawH / rsy;
+      // The tab bar + backdrop span the content width left of the inspector. The tab bar is a
+      // DIVIDER docked directly ABOVE the active bottom editor; the editor rests flush at the
+      // bottom and the preview shrinks to clear both. Width set here so it tracks resolution.
+      tabBar.style.width = Math.floor(Math.max(0, rw - INSPECTOR_W)) + 'px';
       if (!finitePositive(rw) || !finitePositive(rh)) {
         hidePreviewLayout();
       } else {
-      var bottomH;
-      if (st.graphExp) {
-        // The experimental graph editor REPLACES the timeline and fills the whole bottom: reserve
-        // exactly its (expanded) height so the preview shrinks to sit above it. The timeline is
-        // hidden while it's open, so we do NOT also add the bar height.
-        bottomH = GRAPH_DOCK_H;
-      } else {
-        // The hosted CameraTimeline bar (#CamTimelineBar) is fit-children, so it grows tall when
-        // the curve editor opens. Read its ACTUAL height so the preview shrinks to sit exactly
-        // above it and the backdrop matches -- no shared constant, no manual sync. Fall back to
-        // BOTTOM_H until the bar exists / has laid out.
-        bottomH = BOTTOM_H;
+      // editorTop = y-from-bottom of the TOP edge of whatever editor is docked below the tab bar.
+      // Camera/Graph overlays rest at marginBottom=BOTTOM_LIFT; the native bar rests at the very
+      // bottom (Regular Timeline mode). Measure live heights where they can grow.
+      var nativeBottom = (bm !== 'camera' && bm !== 'graph'); // 'native' = Regular Timeline
+)EDJS"
+R"EDJS(
+      var editorTop;
+      if (bm === 'graph') {
+        editorTop = BOTTOM_LIFT + GRAPH_DOCK_H;
+      } else if (bm === 'camera') {
+        // The hosted CameraTimeline bar (#CamTimelineBar) is fit-children, so it grows when the
+        // curve editor opens. Read its ACTUAL height; fall back to BOTTOM_H until it lays out.
+        var camH = BOTTOM_H;
         try {
           var tlBar = ctx.FindChildTraverse && ctx.FindChildTraverse('CamTimelineBar');
-          // Only trust a SANE bar height (a half-laid-out panel can momentarily report a huge
-          // value, which would collapse the preview and leave it stuck off to the side).
           var bh = (tlBar && tlBar.visible) ? tlBar.actuallayoutheight / rsy : 0;
-          if (bh > 10 && bh < rh * 0.6) bottomH = bh;
+          if (bh > 10 && bh < rh * 0.6) camH = bh;
         } catch (eBar) {}
+        editorTop = BOTTOM_LIFT + camH;
+      } else {
+        // Regular Timeline = CS2's native demo bar (docked left of the inspector by CameraTimelineJs),
+        // resting at the very bottom. Measure its height so the tab bar sits right above it.
+        var natH = NATIVE_BAR_H;
+        try {
+          var sr = ctx.FindChildTraverse && ctx.FindChildTraverse('SliderRow');
+          var nc = sr && sr.GetParent ? sr.GetParent() : null;
+          var nh = (nc && nc.visible) ? nc.actuallayoutheight / rsy : 0;
+          if (nh > 10 && nh < rh * 0.6) natH = nh;
+        } catch (eNat) {}
+        editorTop = natH;
       }
-      bottomH = Math.max(0, Math.min(bottomH, Math.max(0, rh - 160)));
-      backdrop.style.height = Math.floor(bottomH) + 'px';
+      tabBar.style.marginBottom = Math.floor(editorTop + TAB_GAP) + 'px';
+      var bottomH = Math.max(TAB_BAR_H + BOTTOM_LIFT, Math.min(editorTop + TAB_GAP + TAB_BAR_H, Math.max(0, rh - 160)));
+      // In Regular Timeline mode the native CS2 bar (a LOWER-z HUD root) is the editor: our opaque
+      // backdrop (z53) would HIDE the bar if it covered it, and our full-screen catcher would eat the
+      // bar's clicks -- so the catcher shrinks to the preview area (the scaler blacks the rest).
+      // For the backdrop we DON'T drop it entirely (that left the TAB_GAP strip just above the bar
+      // see-through, bleeding the game render as a thin line); instead we anchor it ABOVE the bar
+      // (editorTop..bottomH) so it fills that gap behind the tab bar without covering the native bar.
+      // Camera/graph overlays render ABOVE z53, so there the backdrop covers the whole band (0..bottomH).
+      if (nativeBottom) {
+        backdrop.style.marginBottom = Math.floor(editorTop) + 'px';
+        backdrop.style.height = Math.floor(Math.max(0, bottomH - editorTop)) + 'px';
+      } else {
+        backdrop.style.marginBottom = '0px';
+        backdrop.style.height = Math.floor(bottomH) + 'px';
+      }
+      backdrop.visible = true;
+      catcher.style.height = nativeBottom ? Math.floor(Math.max(0, rh - bottomH)) + 'px' : '100%';
       var areaW = rw - INSPECTOR_W, areaH = rh - bottomH;
       if (finitePositive(areaW) && finitePositive(areaH)) {
         var aspect = rw / rh;            // the game's render aspect (full window)

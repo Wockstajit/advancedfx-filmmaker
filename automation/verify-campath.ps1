@@ -29,10 +29,10 @@
 
   PREREQ:
     1. Rebuild (build.bat) and relaunch with netcon:
-         powershell -ExecutionPolicy Bypass -File misc\launch-cs2-netcon.ps1 -Port 29010
+         powershell -ExecutionPolicy Bypass -File automation\launch-cs2-netcon.ps1 -Port 29010
     2. Load a demo and let it PLAY (Watch -> Downloaded -> a demo, or
        `playdemo <name>` in the console). A demo must be playing.
-    3. Run:  pwsh misc\verify-campath.ps1
+    3. Run:  pwsh automation\verify-campath.ps1
 ============================================================
 #>
 [CmdletBinding()]
@@ -41,9 +41,24 @@ param(
     # Demo ticks to drop markers at. Spread wide so the spectated player
     # actually moves between them (Constant mode needs non-zero chords).
     [int[]]$Ticks = @(2000, 6000, 10000, 14000),
-    [double]$ReadSeconds = 1.1
+    [double]$ReadSeconds = 1.1,
+    [string]$OutDir
 )
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'AutomationCommon.ps1')
+if ([string]::IsNullOrWhiteSpace($OutDir)) {
+    $OutDir = New-AutomationRunFolder -Name 'verify-campath'
+} else {
+    New-Item -ItemType Directory -Path $OutDir -Force | Out-Null
+}
+Save-AutomationRunMetadata -RunDirectory $OutDir -AutomationName 'verify-campath' -Additional @{ port = $Port; ticks = $Ticks } | Out-Null
+$transcriptStarted = $false
+try {
+    Start-Transcript -LiteralPath (Join-Path $OutDir 'verification.log') -Force | Out-Null
+    $transcriptStarted = $true
+} catch {
+    Write-Warning "Could not start transcript: $($_.Exception.Message)"
+}
 
 # --- netcon plumbing (mirror of cs2-netcon.ps1, but returns the text) --------
 $cs2 = Get-Process -Name 'cs2' -ErrorAction SilentlyContinue
@@ -78,13 +93,19 @@ function Check([string]$label, [bool]$cond, [string]$detail = '') {
 }
 
 # --- domain helpers ----------------------------------------------------------
-# Place a marker at each requested demo tick. Free cam is OFF so the camera sits
-# at the spectated player's eye, giving each marker a distinct world position.
+# Place a marker at each requested demo tick, then set deterministic positions.
+# The live spectator camera can be static at seek time, which makes Constant mode's
+# chord-length duration collapse to ~0 and turns this into a demo-dependent test.
 function PlaceAtTicks([int[]]$ticks) {
-    Send 'mirv_input camera 0' 0.5 | Out-Null   # follow the demo POV (distinct positions)
+    Send 'mirv_input camera 0' 0.5 | Out-Null
+    $i = 0
     foreach ($t in $ticks) {
         Send "demo_gototick $t" 0.9 | Out-Null  # let the seek settle before reading the tick
         Send 'mirv_filmmaker marker place' 0.6 | Out-Null
+        Send "mirv_filmmaker camtl setval $i 0 $($i * 300)" 0.25 | Out-Null
+        Send "mirv_filmmaker camtl setval $i 1 $($i * 80)" 0.25 | Out-Null
+        Send "mirv_filmmaker camtl setval $i 2 128" 0.25 | Out-Null
+        $i++
     }
 }
 function MarkerCount() {
@@ -204,7 +225,7 @@ Send 'mirv_filmmaker marker interp linear' 0.4 | Out-Null
 ClearAll
 PlaceAtTicks @($Ticks[0], $Ticks[1], $Ticks[2])   # 3 markers
 $outBz = Send 'mirv_filmmaker marker interp bezier' 0.6
-Check 'Bezier<4 markers falls back to Linear (logged)' ($outBz -match 'Bezier needs >=4')
+Check 'Bezier<4 markers falls back to Linear (logged)' ($outBz -match 'Bezier(/Smooth)? needs >=4|Smooth needs >=4')
 Send 'mirv_filmmaker marker interp linear' 0.4 | Out-Null
 
 $client.Close()
@@ -214,6 +235,8 @@ $results | ForEach-Object { if ($_ -like 'PASS*') { Write-Host "  $_" -Foregroun
 Write-Host "`nManual eyeball pass (in-game, free cam): K places, J flies through ALL markers as" -ForegroundColor DarkGray
 Write-Host "one smooth path (no snapping/restart), X stops, Tab toggles HUD, F opens the menu," -ForegroundColor DarkGray
 Write-Host "L deletes the aimed marker. With <2 markers, J shows the on-screen 'need 2' banner." -ForegroundColor DarkGray
-$fail = ($results | Where-Object { $_ -like 'FAIL*' }).Count
+$fail = @($results | Where-Object { $_ -like 'FAIL*' }).Count
+Write-Host "Artifacts: $OutDir"
+if ($transcriptStarted) { Stop-Transcript | Out-Null }
 if ($fail -eq 0) { Write-Host "`nALL AUTOMATED CHECKS PASSED" -ForegroundColor Green; exit 0 }
 else { Write-Host "`n$fail CHECK(S) FAILED" -ForegroundColor Red; exit 1 }

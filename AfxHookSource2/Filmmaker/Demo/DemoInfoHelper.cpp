@@ -12,7 +12,8 @@ namespace {
 
 // Must match FilmmakerDemoInfo's DemoInfo.SchemaVersion. A cached "<demo>.fmjson"
 // whose "v" differs was produced by an older helper and is discarded.
-constexpr int kSchemaVersion = 4;
+// v5: added top-level "events" (weapon/C4 drop + pickup ticks) for Follow Camera.
+constexpr int kSchemaVersion = 5;
 
 // Directory containing this DLL (HLAE's bin\x64 when injected from staging).
 std::wstring SelfModuleDir() {
@@ -179,6 +180,19 @@ bool ParseJson(const std::string& json, DemoHelperResult& out) {
 	}
 	if (!out.players.empty())
 		out.hasScoreboard = true;
+
+	if (const JsonValue* events = root.Find("events"); events && events->type == JsonValue::Type::Array) {
+		out.events.reserve(events->arr.size());
+		for (const auto& ej : events->arr) {
+			if (ej.type != JsonValue::Type::Object) continue;
+			DemoEvent e;
+			if (const JsonValue* v = ej.Find("tick")) e.tick = v->AsInt();
+			if (const JsonValue* v = ej.Find("type")) e.type = v->AsString();
+			if (const JsonValue* v = ej.Find("item")) e.item = v->AsString();
+			if (const JsonValue* v = ej.Find("accountId")) e.accountId = (uint32_t)v->AsNumber();
+			out.events.push_back(std::move(e));
+		}
+	}
 	return true;
 }
 

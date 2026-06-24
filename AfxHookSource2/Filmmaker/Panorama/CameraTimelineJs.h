@@ -28,15 +28,17 @@ inline const char* kCameraTimelineJs = R"TLJS(
 
     var S = {
       accent: '#f0b323ff', freeze: '#4aa3ffff',
-      bg: 'rgba(12,14,18,0.96)', panelBorder: '#ffffff1f',
+      bg: 'rgba(12,14,18,0.96)', bgSolid: 'rgba(12,14,18,1)', panelBorder: '#ffffff1f',
       track: '#ffffff1a', grid: '#ffffff0e', gridMid: '#ffffff1c',
       line: '#f0b323dd', lineSel: '#ffffffff', playhead: '#ff5a5aee',
       label: '#9aa4b0ff', value: '#eef2f6ff', btnBg: '#ffffff14', btnOn: '#f0b32333',
       font: 'Stratum2, "Arial Unicode MS"'
     };
     var W = 1250, W_DEFAULT = 1250, LABELW = 132;
-    var EDITOR_INSPECTOR_W = 372; // keep in sync with CameraEditorJs INSPECTOR_W
+    var EDITOR_INSPECTOR_W = 430; // keep in sync with CameraEditorJs INSPECTOR_W
     var EDITOR_BOTTOM_H = 176;    // keep in sync with CameraEditorJs BOTTOM_H
+    var EDITOR_BOTTOM_LIFT = 28;  // lifted above the CS2 build/version text (editor's bottom tab bar sits ABOVE this bar)
+    var HUD_INSET_X = 14, HUD_INSET_TOP = 12; // keep scaled CS2 HUD clear of the preview frame
     var EASE = ['none','in','out','inout'];
     var EASE_LBL = ['None','Ease In','Ease Out','Ease In/Out'];
 
@@ -88,18 +90,58 @@ inline const char* kCameraTimelineJs = R"TLJS(
       if (!p && ctx.FindChildTraverse) p = ctx.FindChildTraverse(id);
       return p;
     }
-    // Hide/show the native demo bar (CSGOHudDemoController "Contents": SliderRow +
-    // ControlRow). We cache the panel once found; cheap and idempotent each frame.
-    var nativeContents = null;
+    // Hide/show the native demo bar (CSGOHudDemoController "Contents": SliderRow + ControlRow), and
+    // -- for the editor's Regular Timeline mode -- DOCK it to fit left of the inspector. We touch
+    // ONLY width + horizontalAlign (on Contents and its root); the undock path resets BOTH to their
+    // defaults (100% / center), so the bar restores pixel-perfect when the editor closes. (The old
+    // dock also changed height/verticalAlign/margin and never reset them -> the broken-on-exit bar.)
+    var nativeContents = null, nativeRoot = null, nativeBgOn = false;
+    function ensureNative() {
+      if (!nativeContents) {
+        var sr = findNative('SliderRow');
+        if (sr && sr.GetParent) { nativeContents = sr.GetParent(); nativeRoot = nativeContents.GetParent && nativeContents.GetParent(); }
+      }
+      return nativeContents;
+    }
     function setNativeHidden(hide) {
-      if (!nativeContents) { var sr = findNative('SliderRow'); if (sr && sr.GetParent) nativeContents = sr.GetParent(); }
-      if (nativeContents) nativeContents.visible = !hide;
+      if (ensureNative()) nativeContents.visible = !hide;
+    }
+    function nativeDock(barW) {
+      if (!ensureNative()) return;
+      var w = Math.max(360, Math.floor(barW || 0));
+      nativeContents.style.width = w + 'px'; nativeContents.style.horizontalAlign = 'left';
+      // Give the docked bar the same opaque editor background as the camera/graph panels.
+      // The editor's backdrop is dropped in Regular Timeline mode (it would cover this lower-z
+      // native bar), so this is the ONLY fill behind the bar -- it must be FULLY opaque (bgSolid),
+      // not the 0.96 S.bg the camera/graph use (those look solid only because they're layered over
+      // the opaque backdrop; a single 0.96 layer here would let the game blur show through).
+      nativeContents.style.backgroundColor = S.bgSolid;
+      if (nativeRoot && nativeRoot.style) { nativeRoot.style.width = w + 'px'; nativeRoot.style.horizontalAlign = 'left'; nativeRoot.style.backgroundColor = S.bgSolid; }
+      nativeBgOn = true;
+    }
+    function nativeUndock() {
+      if (!ensureNative()) return;
+      // Restore width/align FIRST so the bar always un-docks, even if a later assignment fails.
+      nativeContents.style.width = '100%'; nativeContents.style.horizontalAlign = 'center';
+      if (nativeRoot && nativeRoot.style) { nativeRoot.style.width = '100%'; nativeRoot.style.horizontalAlign = 'center'; }
+      // Only clear the fill we added (NOTE: Panorama rejects '' as a style value -> use a fully
+      // transparent color), and skip it entirely when we never docked so CS2's own frosted
+      // demo-bar background is left untouched during normal playback.
+      if (nativeBgOn) {
+        nativeContents.style.backgroundColor = 'rgba(0,0,0,0)';
+        if (nativeRoot && nativeRoot.style) nativeRoot.style.backgroundColor = 'rgba(0,0,0,0)';
+        nativeBgOn = false;
+      }
     }
 
     // Patch the LIVE native demo bar (CSGOHudDemoController): remove the
     // next-camera / next-player / mouse-cursor hotkey hints, and inject our
     // "MOUSE" + "CAM EDITOR" buttons into it (idempotent; re-adds if the bar is recreated).
     // Runs every frame while in a demo so the clutter never reappears.
+    //
+    // The injected buttons are HIDDEN only when the editor replaces the native bar with the
+    // camera-timeline or graph overlay (hosted + open / graphExp). In the editor's default NATIVE
+    // bottom mode the native bar IS the bottom panel, so we keep the buttons present on it.
     function patchNativeBar() {
       var ids = ['HotKey_Next_Camera', 'HotKey_Player_Next', 'HotKey_Toggle_Mouse_Cursor'];
       for (var i = 0; i < ids.length; i++) { var p = findNative(ids[i]); if (p) p.visible = false; }
@@ -111,8 +153,18 @@ inline const char* kCameraTimelineJs = R"TLJS(
         for (var ci = 0; ci < n; ci++) if (host.GetChild(ci) === p) return ci;
         return -1;
       }
+      var hosted = !!(st && st.hosted);
       var oldMouse = host.FindChildTraverse && host.FindChildTraverse('CamCursorBtn');
       var oldEditor = host.FindChildTraverse && host.FindChildTraverse('CamEditorBtn');
+      // Camera Editor open: the whole native demo bar is hidden and the editor draws its own
+      // Camera Timeline / Graph tab bar at the bottom. Suppress our injected MOUSE / CAM EDITOR
+      // buttons entirely -- this also removes the CAM EDITOR toggle while the editor is open, so
+      // there is no way to accidentally flip back to the broken native-timeline state.
+      if (hosted) {
+        try { if (oldMouse) oldMouse.visible = false; } catch (hm) {}
+        try { if (oldEditor) oldEditor.visible = false; } catch (he) {}
+        return;
+      }
       if ((!oldMouse && oldEditor) || (oldMouse && oldEditor && childIndex(oldMouse) > childIndex(oldEditor))) {
         try { if (oldMouse) oldMouse.DeleteAsync(0); } catch (orderErr1) {}
         try { oldEditor.DeleteAsync(0); } catch (orderErr2) {}
@@ -141,27 +193,107 @@ inline const char* kCameraTimelineJs = R"TLJS(
       var curOn = !!(st && st.cursor);
       mb.style.backgroundColor = curOn ? '#c92a2acc' : '#ffffff14';
       mb.__lbl.style.color = curOn ? '#ffffffff' : S.label;
+      mb.visible = true; // re-show if we hid it for a previous overlay bottom mode
       var cb = nativeBtn('CamEditorBtn', 'CAM EDITOR', function () { cmd('mirv_filmmaker editor toggle'); });
       cb.style.backgroundColor = '#f0b32333';
       cb.__lbl.style.color = S.accent;
+      cb.visible = true;
     }
 
     // Legacy cleanup hook: if an older build hid native HUD siblings, restore them. The
     // camera timeline HUD toggle is disabled; this must not hide anything anymore.
     var OURS = { 'CamTimelineRoot': 1, 'MarkerHudRoot': 1, 'MovieHudRoot': 1, 'CamEditorRoot': 1 };
-    var hiddenNatives = null; // [{p, v}] captured while hidden; null while the HUD is shown
-    function setGameHudHidden(hide) {
-      if (hide) {
-        if (!hiddenNatives) hiddenNatives = [];
+    // Spectator observer chrome stripped for the "in-game" look: the player name/clan/weapon
+    // side bar, the centred player avatar, and the spectator vignette. Radar + HP/ammo stay.
+    var SPEC_PANELS = ['jsHudSpecplayer__Bg', 'HudSpecplayer__Avatar', 'HudSpectatorVignetting'];
+    var hiddenNatives = null; // [{p, v}] captured while ANY panel is hidden; null while fully shown
+    var curHudView = 'full';
+    function restoreGameHud() {
+      if (!hiddenNatives) return;
+      for (var j = 0; j < hiddenNatives.length; j++) { try { hiddenNatives[j].p.visible = hiddenNatives[j].v; } catch (e2) {} }
+      hiddenNatives = null;
+    }
+    function hideIfVisible(c) {
+      if (c && c.visible) { hiddenNatives.push({ p: c, v: true }); try { c.visible = false; } catch (e) {} }
+    }
+    // view: 'full' (show everything) | 'hidden' (hide the whole gameplay HUD) | 'game' (keep
+    // radar + HP/ammo, drop the spectator observer panel). Called every frame so a panel the
+    // game re-shows (round start, etc.) gets re-hidden; a mode change restores the baseline first.
+    function applyHudView(view) {
+      if (view !== curHudView) { restoreGameHud(); curHudView = view; }
+      if (view === 'full') return;
+      if (!hiddenNatives) hiddenNatives = [];
+      if (view === 'hidden') {
         var nk = ctx.GetChildCount ? ctx.GetChildCount() : 0;
         for (var i = 0; i < nk; i++) {
           var c = ctx.GetChild(i);
           if (!c || OURS[c.id]) continue;
-          if (c.visible) { hiddenNatives.push({ p: c, v: true }); try { c.visible = false; } catch (e) {} }
+          if ((c.FindChildTraverse && (c.FindChildTraverse('SliderRow') || c.FindChildTraverse('ControlRow')))) continue;
+          hideIfVisible(c);
         }
-      } else if (hiddenNatives) {
-        for (var j = 0; j < hiddenNatives.length; j++) { try { hiddenNatives[j].p.visible = hiddenNatives[j].v; } catch (e2) {} }
-        hiddenNatives = null;
+      } else { // 'game'
+        for (var s = 0; s < SPEC_PANELS.length; s++)
+          hideIfVisible(ctx.FindChildTraverse && ctx.FindChildTraverse(SPEC_PANELS[s]));
+      }
+    }
+)TLJS"
+R"TLJS(
+    var viewportHudPanels = [];
+    function isOurPanel(p) {
+      return !!(p && OURS[p.id]);
+    }
+    function isNativeDemoBarPanel(p) {
+      return !!(p && p.FindChildTraverse && (p.FindChildTraverse('SliderRow') || p.FindChildTraverse('ControlRow')));
+    }
+    function restoreHudViewport() {
+      for (var i = 0; i < viewportHudPanels.length; i++) {
+        var p = viewportHudPanels[i];
+        try {
+          if (!p || (p.IsValid && !p.IsValid())) continue;
+          p.style.transformOrigin = p.__camViewportOrigin || '50% 50%';
+          p.style.transform = p.__camViewportTransform || 'none';
+          p.__camViewportAdjusted = false;
+        } catch (e) {}
+      }
+      viewportHudPanels = [];
+    }
+    function rememberHudViewportPanel(p) {
+      if (!p || p.__camViewportAdjusted) return;
+      try {
+        p.__camViewportTransform = p.style.transform || 'none';
+        p.__camViewportOrigin = p.style.transformOrigin || '50% 50%';
+        p.__camViewportAdjusted = true;
+        viewportHudPanels.push(p);
+      } catch (e) {}
+    }
+    function applyGameHudViewport(active, rect) {
+      if (!active || !rect || rect.length < 4) { restoreHudViewport(); return; }
+      var rsx = ctx.actualuiscale_x || root.actualuiscale_x || 1;
+      var rsy = ctx.actualuiscale_y || root.actualuiscale_y || 1;
+      var rawW = ctx.actuallayoutwidth || root.actuallayoutwidth || 0;
+      var rawH = ctx.actuallayoutheight || root.actuallayoutheight || 0;
+      var rw = rawW / rsx, rh = rawH / rsy;
+      if (!(rw > 1 && rh > 1)) { restoreHudViewport(); return; }
+      var x0 = Number(rect[0]), y0 = Number(rect[1]), x1 = Number(rect[2]), y1 = Number(rect[3]);
+      if (!(isFinite(x0) && isFinite(y0) && isFinite(x1) && isFinite(y1) && x1 > x0 && y1 > y0)) {
+        restoreHudViewport(); return;
+      }
+      var x0p = x0 + (HUD_INSET_X / rw);
+      var x1p = x1 - (HUD_INSET_X / rw);
+      var y0p = y0 + (HUD_INSET_TOP / rh);
+      if (x1p <= x0p || y1 <= y0p) { restoreHudViewport(); return; }
+      var tx = x0p * rw, ty = y0p * rh, sx = x1p - x0p, sy = y1 - y0p;
+      var tr = 'translate3d(' + tx.toFixed(1) + 'px, ' + ty.toFixed(1) + 'px, 0px) scale3d('
+        + sx.toFixed(5) + ', ' + sy.toFixed(5) + ', 1)';
+      var n = ctx.GetChildCount ? ctx.GetChildCount() : 0;
+      for (var i = 0; i < n; i++) {
+        var c = ctx.GetChild(i);
+        if (!c || isOurPanel(c) || isNativeDemoBarPanel(c)) continue;
+        rememberHudViewportPanel(c);
+        try {
+          c.style.transformOrigin = '0% 0%';
+          c.style.transform = tr;
+        } catch (e2) {}
       }
     }
 
@@ -392,16 +524,31 @@ R"TLJS(
     var api = {};
     api.render = function () {
       var raw = root.GetAttributeString('state', '');
-      if (!raw) { root.visible = false; setNativeHidden(false); setGameHudHidden(false); return; }
+      if (!raw) { root.visible = false; setNativeHidden(false); applyHudView('full'); return; }
       try { st = JSON.parse(raw); } catch (e) { return; }
 
       patchNativeBar(); // keep the native demo bar de-cluttered + our button present
       // Camera Editor Mode hosts this panel and wants a clean workspace: hide the whole
       // gameplay HUD (radar/health/ammo/scoreboard/native demo bar). Restored on exit.
       var hosted = !!st.hosted;
-      setGameHudHidden(hosted);
+      var previewHidden = !!st.previewHudHidden;
+      // Editor's "Regular Timeline" bottom mode = hosted with neither the camera overlay (st.open)
+      // nor the graph (st.graphExp) active. There the native CS2 demo bar IS the bottom editor.
+      var nativeMode = hosted && !st.open && !st.graphExp;
+      // While hosted, the editor's UI-visibility picker chooses how much gameplay HUD shows
+      // (default 'hidden'); when not hosted the game HUD is fully restored.
+      applyHudView(hosted ? (st.hudView || 'hidden') : 'full');
+      // Move the native CS2 gameplay HUD into the same preview rect as the rendered game.
+      // This includes radar, score, player strip, health/ammo, inventory and death notices,
+      // while excluding our editor/timeline chrome and the docked native demo bar.
+      applyGameHudViewport(hosted && !!st.hudScale && (st.hudView || 'hidden') !== 'hidden', st.previewRect);
+      // Native demo bar visibility: SHOWN in Regular Timeline mode (and in normal play); hidden when
+      // a camera/graph overlay is up, our standalone panel is open, or a clean preview frame is
+      // needed. Done up here -- BEFORE the hosted-layout early-return below -- so it never flashes
+      // wrong during an unsettled first layout frame.
+      setNativeHidden((!!st.open) || (hosted && !!st.graphExp) || previewHidden);
       closeBtn.visible = !hosted; // editor mode exits via its own "✕ Exit" button
-      graphBtn.visible = hosted;  // ...and switches back to the graph editor via this button
+      graphBtn.visible = false;   // bottom-panel switching is now the editor's bottom tab bar only
       // When hosted, this panel IS the editor's bottom bar under the preview. It fills the
       // entire width left of the inspector instead of floating as a card inside that bar.
       // Standalone timeline mode keeps the compact native-style card.
@@ -417,32 +564,35 @@ R"TLJS(
         if (barW <= 0) return; // no valid width yet: hold last-good layout, retry next frame
         panel.style.horizontalAlign = 'left';
         panel.style.marginLeft = '0px';
+        panel.style.marginBottom = EDITOR_BOTTOM_LIFT + 'px'; // rests at the bottom; tab bar sits ABOVE it
         panel.style.width = barW + 'px';
         // fit-children (NOT a fixed height): CameraEditorJs reads this panel's actual height
-        // (#CamTimelineBar) to shrink the preview + letterbox the rest.
+        // (#CamTimelineBar) to position the tab bar above it + shrink the preview.
         panel.style.height = 'fit-children';
         panel.style.borderRadius = '0px';
         panel.style.border = '0px solid transparent';
         panel.style.boxShadow = 'none';
         applyLayout(barW - 28); // inner content fills the bar minus L/R padding
+        // Regular Timeline mode: dock the native bar to fit left of the inspector (same barW).
+        // Other hosted modes hide it; keep its geometry reset so it's correct when shown again.
+        if (nativeMode) nativeDock(barW); else nativeUndock();
       } else {
         panel.style.horizontalAlign = 'center';
         panel.style.marginLeft = '0px';
+        panel.style.marginBottom = '0px';
         panel.style.width = (LABELW + W_DEFAULT + 28) + 'px';
         panel.style.height = 'fit-children';
         panel.style.borderRadius = '6px';
         panel.style.border = '1px solid ' + S.panelBorder;
         panel.style.boxShadow = '#000000cc 0px 0px 12px 2px';
         applyLayout(LABELW + W_DEFAULT); // restore the standalone default width
+        nativeUndock(); // restore the native demo bar to full width / centre (pixel-perfect on exit)
       }
 
       var graphExp = !!st.graphExp;
       graphExpActive = graphExp;
-      var previewHidden = !!st.previewHudHidden;
       root.visible = !!st.open && !previewHidden;
-      // Hide the native demo bar when our panel is open (it replaces it) or when
-      // camera-path preview needs a clean frame.
-      setNativeHidden(!!st.open || previewHidden);
+      // (native demo bar visibility already resolved above, before the hosted early-return)
       if (!st.open || previewHidden) { catcher.visible = false; return; }
 
       // UI-mouse mode. The editor forces it on while open; the catcher absorbs stray

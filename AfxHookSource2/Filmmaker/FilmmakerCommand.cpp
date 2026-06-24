@@ -8,10 +8,12 @@
 #include "Panorama/FilmmakerMenu.h"
 #include "Panorama/PanoramaBridge.h"
 #include "Panorama/CameraTimelineHud.h"
+#include "Panorama/CameraEditorHud.h"
 #include "Panorama/GraphEditorExperimentHud.h"
 #include "Platform/TextEncoding.h"
 #include "Movie/CameraBridge.h"
 #include "Movie/CameraPath.h"
+#include "Movie/FollowCamera.h"
 #include "Movie/MovieMode.h"
 
 #include "../WrpConsole.h"
@@ -24,6 +26,38 @@
 #include <cstdint>
 
 namespace {
+
+std::string Base64Encode(const std::string& input) {
+	static const char table[] =
+		"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+	std::string output;
+	output.reserve(((input.size() + 2) / 3) * 4);
+	unsigned int value = 0;
+	int bits = -6;
+	for (unsigned char c : input) {
+		value = (value << 8) | c;
+		bits += 8;
+		while (bits >= 0) {
+			output.push_back(table[(value >> bits) & 0x3f]);
+			bits -= 6;
+		}
+	}
+	if (bits > -6)
+		output.push_back(table[((value << 8) >> (bits + 8)) & 0x3f]);
+	while (output.size() % 4)
+		output.push_back('=');
+	return output;
+}
+
+void PrintEncodedState(const char* marker, const std::string& json) {
+	const std::string encoded = Base64Encode(json);
+	constexpr size_t chunkSize = 120;
+	const size_t chunks = (encoded.size() + chunkSize - 1) / chunkSize;
+	for (size_t i = 0; i < chunks; ++i) {
+		const std::string chunk = encoded.substr(i * chunkSize, chunkSize);
+		advancedfx::Message("%s %zu/%zu %s\n", marker, i + 1, chunks, chunk.c_str());
+	}
+}
 
 std::string FormatDuration(int seconds) {
 	if (seconds <= 0)
@@ -68,8 +102,10 @@ void PrintHelp(const char* cmd) {
 		"%s camtl [...] - camera timeline scrubber (scrub, keys, easing; run for sub-help).\n"
 		"%s editor [on|off|toggle] - dedicated CAMERA EDITOR workspace (preview + inspector + graph editor).\n"
 		"%s editor scale [on|off|toggle] - TRUE scaled preview viewport (whole frame shrunk, not a crop).\n"
-		"%s editor curveeditor [graph|timeline|toggle] - bottom editor: graph (default) or timeline.\n"
-		, cmd, cmd, cmd, cmd, cmd
+		"%s editor curveeditor [native|graph|timeline|camera|toggle] - bottom editor: native CS2 timeline, graph, or camera timeline.\n"
+		"%s editor hud [hidden|game|full|cycle] - game UI behind the editor: hide all, in-game (radar+HP/ammo, no spectator panel), or full.\n"
+		"%s follow [...] - place and control a Follow / Lock-On camera.\n"
+		, cmd, cmd, cmd, cmd, cmd, cmd, cmd
 	);
 }
 
@@ -80,6 +116,7 @@ bool RegularCursorToggleAllowed() {
 }
 
 void PlayCameraTimeline(Filmmaker::CameraPath& cp) {
+	Filmmaker::FollowCameraRef().StopPreview("camera path started");
 	if (Filmmaker::CameraEditor_Active())
 		cp.PlayFromEditor();
 	else
@@ -168,7 +205,10 @@ void DoMarker(int argc, advancedfx::ICommandArgs* args, const char* cmd) {
 
 	if (0 == _stricmp(a, "place")) cp.PlaceMarker();
 	else if (0 == _stricmp(a, "preview") || 0 == _stricmp(a, "arm")) cp.ArmPreview();
-	else if (0 == _stricmp(a, "play") || 0 == _stricmp(a, "previewplay")) cp.StartPreviewPlay();
+	else if (0 == _stricmp(a, "play") || 0 == _stricmp(a, "previewplay")) {
+		Filmmaker::FollowCameraRef().StopPreview("camera path started");
+		cp.StartPreviewPlay();
+	}
 	else if (0 == _stricmp(a, "previewstop") || 0 == _stricmp(a, "stop")) cp.StopPreview();
 	else if (0 == _stricmp(a, "hudtoggle")) advancedfx::Message("mirv_filmmaker: camera path HUD toggle is disabled.\n");
 	else if (0 == _stricmp(a, "repositionplace")) cp.PlaceReposition();
@@ -300,9 +340,18 @@ void DoCamTimeline(int argc, advancedfx::ICommandArgs* args, const char* cmd) {
 		cp.SelectEditorDelta((argc >= 4) ? atoi(a3) : 1);
 	}
 	else if (0 == _stricmp(a, "play")) PlayCameraTimeline(cp);
-	else if (0 == _stricmp(a, "playtest")) cp.PlayFromEditor();
-	else if (0 == _stricmp(a, "playtimeline")) cp.PlayFromTimeline();
-	else if (0 == _stricmp(a, "playpath")) cp.PlayPath();
+	else if (0 == _stricmp(a, "playtest")) {
+		Filmmaker::FollowCameraRef().StopPreview("camera path started");
+		cp.PlayFromEditor();
+	}
+	else if (0 == _stricmp(a, "playtimeline")) {
+		Filmmaker::FollowCameraRef().StopPreview("camera path started");
+		cp.PlayFromTimeline();
+	}
+	else if (0 == _stricmp(a, "playpath")) {
+		Filmmaker::FollowCameraRef().StopPreview("camera path started");
+		cp.PlayPath();
+	}
 	else if (0 == _stricmp(a, "pause")) cp.PausePreview();
 	else if (0 == _stricmp(a, "debug")) {
 		bool on = (argc >= 4) ? (atoi(a3) != 0) : !cp.Debug();
@@ -369,14 +418,17 @@ void DoCamTimeline(int argc, advancedfx::ICommandArgs* args, const char* cmd) {
 			advancedfx::Message("mirv_filmmaker: cursor is forced on while the camera timeline is open.\n");
 			return;
 		}
-		if (0 == _stricmp(a3, "on")) tl.SetCursor(true);
-		else if (0 == _stricmp(a3, "off")) tl.SetCursor(false);
-		else {
-			tl.ToggleCursor();
-		}
+		bool nextCursor = tl.Cursor();
+		if (0 == _stricmp(a3, "on")) nextCursor = true;
+		else if (0 == _stricmp(a3, "off")) nextCursor = false;
+		else nextCursor = !nextCursor;
+		if (Filmmaker::CameraEditor_Active())
+			Filmmaker::CameraEditor_SetCursorMode(nextCursor);
+		else
+			tl.SetCursor(nextCursor);
 		// Returning to free-cam look (cursor off) releases any active scrub so the
 		// camera stops being pinned to the scrub tick and the user can fly again.
-		if (!tl.Cursor()) cp.StopScrub();
+		if (!nextCursor) cp.StopScrub();
 	}
 	else if (0 == _stricmp(a, "clear")) cp.DeleteAll(true); // remove all keyframes
 	else if (0 == _stricmp(a, "eval")) {
@@ -386,6 +438,98 @@ void DoCamTimeline(int argc, advancedfx::ICommandArgs* args, const char* cmd) {
 		tl.RequestEval(js);
 	}
 	else advancedfx::Warning("%s camtl: unknown action '%s'\n", cmd, a);
+}
+
+void DoFollow(int argc, advancedfx::ICommandArgs* args, const char* cmd) {
+	using Filmmaker::FollowTargetType;
+	Filmmaker::FollowCamera& follow = Filmmaker::FollowCameraRef();
+	if (argc < 3) {
+		advancedfx::Message(
+			"%s follow place|reposition|clear|preview|stop|status.\n"
+			"%s follow type player|grenade|weapon  (weapon covers held/dropped weapons + C4).\n"
+			"%s follow mode lockon|attach | weaponsource auto|held|dropped.\n"
+			"%s follow nearest | select <entityIndex> | selecthandle <handle> | trackgrenade.\n"
+			"%s follow eventselect <index> | previewtick   (jump to a recorded throw/drop tick).\n"
+			"%s follow preset centered|above|low|shoulder|side|behind|orbitleft|orbitright|weapon|bomb.\n"
+			"%s follow offset <x> <y> <z> | offsetx|offsety|offsetz <v>.\n"
+			"%s follow rotation <p> <y> <r> | rotpitch|rotyaw|rotroll <v> | fov <v>.\n"
+			"%s follow look|position|prediction|deadzone|maxturn <value>.\n"
+			"%s follow autodead|switchweapon|switchbomb|hold <0|1>.\n"
+			"%s follow attachment|bone <name> | campose | debug <0|1>.\n",
+			cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd);
+		return;
+	}
+
+	const char* action = args->ArgV(2);
+	const char* a3 = argc >= 4 ? args->ArgV(3) : "";
+	if (0 == _stricmp(action, "place")) follow.PlaceCamera();
+	else if (0 == _stricmp(action, "reposition")) follow.BeginReposition();
+	else if (0 == _stricmp(action, "repositionplace")) follow.PlaceReposition();
+	else if (0 == _stricmp(action, "repositioncancel")) follow.CancelReposition();
+	else if (0 == _stricmp(action, "clear")) follow.ClearCamera();
+	else if (0 == _stricmp(action, "preview") || 0 == _stricmp(action, "play")) follow.Preview();
+	else if (0 == _stricmp(action, "stop")) follow.StopPreview("user");
+	else if (0 == _stricmp(action, "status")) follow.PrintStatus();
+	else if (0 == _stricmp(action, "state")) advancedfx::Message("[followcam][state] %s\n", follow.BuildStateJson().c_str());
+	else if (0 == _stricmp(action, "state64")) PrintEncodedState("[followcam][state64]", follow.BuildStateJson());
+	else if (0 == _stricmp(action, "type")) {
+		if (0 == _stricmp(a3, "grenade")) follow.SetTargetType(FollowTargetType::Grenade);
+		else if (0 == _stricmp(a3, "weapon") || 0 == _stricmp(a3, "droppedweapon")
+			|| 0 == _stricmp(a3, "bomb") || 0 == _stricmp(a3, "c4")) follow.SetTargetType(FollowTargetType::Weapon);
+		else follow.SetTargetType(FollowTargetType::Player);
+	}
+	else if (0 == _stricmp(action, "mode")) {
+		if (0 == _stricmp(a3, "attach")) follow.SetMode(Filmmaker::FollowMode::Attach);
+		else follow.SetMode(Filmmaker::FollowMode::LockOn);
+	}
+	else if (0 == _stricmp(action, "weaponsource")) {
+		if (0 == _stricmp(a3, "held")) follow.SetWeaponSource(Filmmaker::WeaponSource::Held);
+		else if (0 == _stricmp(a3, "dropped")) follow.SetWeaponSource(Filmmaker::WeaponSource::Dropped);
+		else follow.SetWeaponSource(Filmmaker::WeaponSource::Auto);
+	} else if (0 == _stricmp(action, "nearest") || 0 == _stricmp(action, "newest")) follow.SelectNearest();
+	else if (0 == _stricmp(action, "select")) {
+		if (argc < 4) { advancedfx::Warning("usage: %s follow select <entityIndex>\n", cmd); return; }
+		follow.SelectEntity(atoi(a3));
+	} else if (0 == _stricmp(action, "selecthandle")) {
+		if (argc < 4) { advancedfx::Warning("usage: %s follow selecthandle <handle>\n", cmd); return; }
+		follow.SelectHandle(_strtoui64(a3, nullptr, 0));
+	} else if (0 == _stricmp(action, "trackgrenade")) {
+		follow.TrackSelectedGrenade();
+	} else if (0 == _stricmp(action, "preset")) follow.SetPreset(a3);
+	else if (0 == _stricmp(action, "offset")) {
+		if (argc < 6) { advancedfx::Warning("usage: %s follow offset <x> <y> <z>\n", cmd); return; }
+		follow.SetOffset(atof(a3), atof(args->ArgV(4)), atof(args->ArgV(5)));
+	}
+	else if (0 == _stricmp(action, "offsetx")) follow.SetOffsetAxis(0, atof(a3));
+	else if (0 == _stricmp(action, "offsety")) follow.SetOffsetAxis(1, atof(a3));
+	else if (0 == _stricmp(action, "offsetz")) follow.SetOffsetAxis(2, atof(a3));
+	else if (0 == _stricmp(action, "rotation")) {
+		if (argc < 6) { advancedfx::Warning("usage: %s follow rotation <pitch> <yaw> <roll>\n", cmd); return; }
+		follow.SetRotationOffset(atof(a3), atof(args->ArgV(4)), atof(args->ArgV(5)));
+	}
+	else if (0 == _stricmp(action, "rotpitch")) follow.SetRotationAxis(0, atof(a3));
+	else if (0 == _stricmp(action, "rotyaw")) follow.SetRotationAxis(1, atof(a3));
+	else if (0 == _stricmp(action, "rotroll")) follow.SetRotationAxis(2, atof(a3));
+	else if (0 == _stricmp(action, "fov")) follow.SetFov(atof(a3));
+	else if (0 == _stricmp(action, "bone")) follow.SetAttachmentName(a3);
+	else if (0 == _stricmp(action, "previewtick")) follow.PreviewTick();
+	else if (0 == _stricmp(action, "eventselect")) {
+		if (argc < 4) { advancedfx::Warning("usage: %s follow eventselect <index>\n", cmd); return; }
+		follow.SelectEvent(atoi(a3));
+	}
+	else if (0 == _stricmp(action, "campose")) follow.PrintCamPose();
+	else if (0 == _stricmp(action, "look")) follow.SetLookSmoothing(atof(a3));
+	else if (0 == _stricmp(action, "position")) follow.SetPositionSmoothing(atof(a3));
+	else if (0 == _stricmp(action, "prediction")) follow.SetPrediction(atof(a3));
+	else if (0 == _stricmp(action, "deadzone")) follow.SetDeadzone(atof(a3));
+	else if (0 == _stricmp(action, "maxturn")) follow.SetMaxTurnSpeed(atof(a3));
+	else if (0 == _stricmp(action, "autodead")) follow.SetAutoDisableOnDeath(atoi(a3) != 0);
+	else if (0 == _stricmp(action, "switchweapon")) follow.SetSwitchToDroppedWeapon(atoi(a3) != 0);
+	else if (0 == _stricmp(action, "switchbomb")) follow.SetSwitchToDroppedBomb(atoi(a3) != 0);
+	else if (0 == _stricmp(action, "hold")) follow.SetHoldLastKnown(atoi(a3) != 0);
+	else if (0 == _stricmp(action, "attachment")) follow.SetAttachmentName(a3);
+	else if (0 == _stricmp(action, "debug")) follow.SetDebug(atoi(a3) != 0);
+	else advancedfx::Warning("%s follow: unknown action '%s'\n", cmd, action);
 }
 
 // Experimental After-Effects-style graph editor (mirv_filmmaker grapheditor ...). Entirely
@@ -425,9 +569,15 @@ void DoGraphEditor(int argc, advancedfx::ICommandArgs* args, const char* cmd) {
 		ge.Toggle();
 		advancedfx::Message("mirv_filmmaker: experimental graph editor %s.\n", ge.Enabled() ? "ON" : "off");
 	} else if (0 == _stricmp(a, "drive")) {
-		if (0 == _stricmp(a3, "on") || 0 == _stricmp(a3, "1")) ge.SetDrive(true);
+		if (0 == _stricmp(a3, "on") || 0 == _stricmp(a3, "1")) {
+			Filmmaker::FollowCameraRef().StopPreview("graph camera drive started");
+			ge.SetDrive(true);
+		}
 		else if (0 == _stricmp(a3, "off") || 0 == _stricmp(a3, "0")) ge.SetDrive(false);
-		else ge.ToggleDrive();
+		else {
+			if (!ge.Drive()) Filmmaker::FollowCameraRef().StopPreview("graph camera drive started");
+			ge.ToggleDrive();
+		}
 	} else if (0 == _stricmp(a, "reseed")) ge.CmdReseed();
 	else if (0 == _stricmp(a, "undo")) ge.CmdUndo();
 	else if (0 == _stricmp(a, "redo")) ge.CmdRedo();
@@ -480,6 +630,7 @@ void DoGraphEditor(int argc, advancedfx::ICommandArgs* args, const char* cmd) {
 		if (argc < 5) { advancedfx::Warning("usage: %s grapheditor delkey <ch> <id>\n", cmd); return; }
 		ge.CmdDeleteKey(atoi(a3), atoi(a4));
 	} else if (0 == _stricmp(a, "delsel")) ge.CmdDeleteSelected();
+	else if (0 == _stricmp(a, "clear")) ge.CmdClear();
 	else if (0 == _stricmp(a, "handle")) {
 		if (argc < 8) { advancedfx::Warning("usage: %s grapheditor handle <ch> <id> left|right <tx> <dv> [reflect]\n", cmd); return; }
 		int side = (0 == _stricmp(a5, "left")) ? -1 : 1;
@@ -590,13 +741,26 @@ CON_COMMAND(mirv_filmmaker, "Browse and play CS2 demos (filmmaker tool).") {
 		DoMarker(argc, args, cmd);
 	} else if (0 == _stricmp(sub, "camtl")) {
 		DoCamTimeline(argc, args, cmd);
+	} else if (0 == _stricmp(sub, "follow")) {
+		DoFollow(argc, args, cmd);
 	} else if (0 == _stricmp(sub, "grapheditor")) {
 		DoGraphEditor(argc, args, cmd);
 	} else if (0 == _stricmp(sub, "editor")) {
 		// Dedicated camera-editor workspace. Bind it to a key, e.g.
 		//   bind "F9" "mirv_filmmaker editor toggle"
 		const char* arg = (argc >= 3) ? args->ArgV(2) : "toggle";
-		if (0 == _stricmp(arg, "scale")) {
+		if (0 == _stricmp(arg, "state")) {
+			advancedfx::Message("[cameraeditor][state] %s\n",
+				Filmmaker::CameraEditorHudRef().DebugStateJson().c_str());
+		} else if (0 == _stricmp(arg, "state64")) {
+			PrintEncodedState("[cameraeditor][state64]",
+				Filmmaker::CameraEditorHudRef().DebugStateJson());
+		} else if (0 == _stricmp(arg, "eval")) {
+			if (argc < 4) { advancedfx::Warning("usage: %s editor eval <panorama js>\n", cmd); return; }
+			std::string js;
+			for (int i = 3; i < argc; ++i) { if (i > 3) js += ' '; js += args->ArgV(i); }
+			Filmmaker::CameraEditorHudRef().RequestEval(js);
+		} else if (0 == _stricmp(arg, "scale")) {
 			// TRUE scaled preview viewport (render-layer). Falls back to the crop when off.
 			const char* a2 = (argc >= 4) ? args->ArgV(3) : "toggle";
 			if (0 == _stricmp(a2, "on") || 0 == _stricmp(a2, "1")) Filmmaker::CameraEditor_SetScale(true);
@@ -605,11 +769,25 @@ CON_COMMAND(mirv_filmmaker, "Browse and play CS2 demos (filmmaker tool).") {
 			advancedfx::Message("mirv_filmmaker: camera editor scaled preview %s (auto-off while recording).\n",
 				Filmmaker::CameraEditor_ScaleActive() ? "ON" : "off");
 		} else if (0 == _stricmp(arg, "curveeditor")) {
-			// Pick the bottom editor: graph (default) or the compact camera timeline.
+			// Pick the bottom editor: native CS2 demo timeline, graph, or custom camera timeline.
 			const char* a2 = (argc >= 4) ? args->ArgV(3) : "toggle";
-			if (0 == _stricmp(a2, "timeline")) Filmmaker::CameraEditor_SetUseTimeline(true);
+			if (0 == _stricmp(a2, "native") || 0 == _stricmp(a2, "cs2") || 0 == _stricmp(a2, "off")) Filmmaker::CameraEditor_SetNativeTimeline();
+			else if (0 == _stricmp(a2, "timeline") || 0 == _stricmp(a2, "camera")) Filmmaker::CameraEditor_SetUseTimeline(true);
 			else if (0 == _stricmp(a2, "graph")) Filmmaker::CameraEditor_SetUseTimeline(false);
 			else Filmmaker::CameraEditor_ToggleUseTimeline();
+		} else if (0 == _stricmp(arg, "hud")) {
+			// Game-HUD visibility behind the editor: hide all / in-game (radar + HP/ammo, no
+			// spectator observer panel) / show all (full spectator HUD).
+			using HV = Filmmaker::CameraEditorHud::HudView;
+			const char* a2 = (argc >= 4) ? args->ArgV(3) : "cycle";
+			if (0 == _stricmp(a2, "hidden") || 0 == _stricmp(a2, "hideall") || 0 == _stricmp(a2, "hide") || 0 == _stricmp(a2, "none"))
+				Filmmaker::CameraEditorHudRef().SetHudView(HV::HideAll);
+			else if (0 == _stricmp(a2, "game") || 0 == _stricmp(a2, "ingame") || 0 == _stricmp(a2, "in-game"))
+				Filmmaker::CameraEditorHudRef().SetHudView(HV::InGame);
+			else if (0 == _stricmp(a2, "full") || 0 == _stricmp(a2, "showall") || 0 == _stricmp(a2, "show") || 0 == _stricmp(a2, "all"))
+				Filmmaker::CameraEditorHudRef().SetHudView(HV::ShowAll);
+			else Filmmaker::CameraEditorHudRef().CycleHudView();
+			advancedfx::Message("mirv_filmmaker: editor game-HUD = %s.\n", Filmmaker::CameraEditor_HudViewName());
 		} else {
 			if (0 == _stricmp(arg, "on") || 0 == _stricmp(arg, "open") || 0 == _stricmp(arg, "1")) Filmmaker::CameraEditor_Set(true);
 			else if (0 == _stricmp(arg, "off") || 0 == _stricmp(arg, "close") || 0 == _stricmp(arg, "0")) Filmmaker::CameraEditor_Set(false);

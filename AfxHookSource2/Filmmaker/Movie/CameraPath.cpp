@@ -3,6 +3,7 @@
 #include "CameraBridge.h"
 #include "../Filmmaker.h"            // PlayingDemoPath(), CurrentDemoPath()
 #include "../Demo/PlayingDemoPath.h" // CanonicalDemoPath()
+#include "../Panorama/GraphEditorExperimentHud.h"
 #include "../../MirvTime.h"
 
 #include "../../../shared/AfxConsole.h"
@@ -232,6 +233,7 @@ void CameraPath::DeleteIndex(int index) {
 	m_data.DeleteIndex(index);
 	if (m_data.Empty()) m_menuOpen = false;
 	RebuildCamPath();
+	GraphEditorExperimentHudRef().CmdReseed();
 	EnsureDrawState();
 	MarkDirty();
 	advancedfx::Message("[campath] marker #%d deleted (%d left).\n", index, Count());
@@ -248,6 +250,7 @@ void CameraPath::DeleteAll(bool confirmed) {
 	m_play.Stop();
 	SetMode(Mode::Editing);
 	RebuildCamPath();
+	GraphEditorExperimentHudRef().CmdClear();
 	EnsureDrawState();
 	MarkDirty();
 	advancedfx::Message("[campath] all markers deleted (%d).\n", c);
@@ -388,6 +391,8 @@ void CameraPath::BeginReposition() {
 	SeekDemoTick(m_data.At(sel).tick);
 	m_menuOpen = false;
 	CameraBridge_SetFreeCamEnabled(true);
+	if (CameraEditor_Active())
+		CameraEditor_SetCursorMode(false);
 	SetMode(Mode::Reposition);
 	advancedfx::Message("[campath] repositioning marker #%d @ tick %d: move + left-click to place (X/Esc cancel).\n",
 		sel, m_data.At(sel).tick);
@@ -407,6 +412,8 @@ void CameraPath::PlaceReposition() {
 	RebuildCamPath();
 	MarkDirty();
 	SetMode(Mode::Editing);
+	if (CameraEditor_Active())
+		CameraEditor_SetCursorMode(true);
 	advancedfx::Message("[campath] marker #%d repositioned @ tick %d (%.1f %.1f %.1f).\n",
 		sel, m.tick, m.x, m.y, m.z);
 }
@@ -414,6 +421,8 @@ void CameraPath::PlaceReposition() {
 void CameraPath::CancelReposition() {
 	if (GetMode() != Mode::Reposition) return;
 	SetMode(Mode::Editing);
+	if (CameraEditor_Active())
+		CameraEditor_SetCursorMode(true);
 	advancedfx::Message("[campath] reposition cancelled.\n");
 }
 

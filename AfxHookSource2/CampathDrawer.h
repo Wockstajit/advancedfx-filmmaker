@@ -52,6 +52,12 @@ public:
 		m_MarkerStyle = enabled; m_MarkerFreeze = freeze; m_MarkerHighlight = highlight;
 	}
 
+	// Standalone follow-camera marker. This is independent of g_CamPath so placing
+	// a follow camera does not create or leak path-camera keyframes.
+	void FollowCameraMarker_set(bool enabled, const CamPathValue& value) {
+		m_FollowCameraMarker = enabled; m_FollowCameraValue = value;
+	}
+
 	void BeginDevice(ID3D11Device * device);
 	void EndDevice();
 	void Reset();
@@ -142,6 +148,8 @@ private:
 		bool GetMarkerStyle() const { return m_MarkerStyle; }
 		bool GetMarkerFreeze() const { return m_MarkerFreeze; }
 		int GetMarkerHighlight() const { return m_MarkerHighlight; }
+		bool GetFollowCameraMarker() const { return m_FollowCameraMarker; }
+		const CamPathValue& GetFollowCameraValue() const { return m_FollowCameraValue; }
 
 	private:
 		double m_CurTime;
@@ -162,6 +170,8 @@ private:
 		bool m_MarkerStyle;
 		bool m_MarkerFreeze;
 		int m_MarkerHighlight;
+		bool m_FollowCameraMarker;
+		CamPathValue m_FollowCameraValue;
 
 		CamPathValue m_CurrentValue;
 	};
@@ -262,6 +272,8 @@ private:
 	bool m_MarkerStyle = false;
 	bool m_MarkerFreeze = false;
 	int m_MarkerHighlight = -1;
+	bool m_FollowCameraMarker = false;
+	CamPathValue m_FollowCameraValue;
 
 	ID3D11Device * m_Device = nullptr;
 	ID3D11DeviceContext * m_DeviceContext = nullptr;

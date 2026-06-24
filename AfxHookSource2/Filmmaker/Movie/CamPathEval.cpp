@@ -42,7 +42,7 @@ void CamPathEval::Rebuild(const CamMarkers& mk, const PathSettings& st) {
 	const bool wantCubic = (st.interp == kInterpSmooth);
 	const bool cubicOk = wantCubic && n >= 4; // cubic needs >=4 keyframes to eval
 	if (wantCubic && !cubicOk)
-		advancedfx::Message("[campath] Smooth needs >=4 markers; using Linear for now (%d).\n", n);
+		advancedfx::Message("[campath] Bezier/Smooth needs >=4 markers; using Linear for now (%d).\n", n);
 	const CamPath::DoubleInterp di = cubicOk ? CamPath::DI_CUBIC : CamPath::DI_LINEAR;
 	const CamPath::QuaternionInterp qi = cubicOk ? CamPath::QI_SCUBIC : CamPath::QI_SLINEAR;
 	g_CamPath.PositionInterpMethod_set(di);

@@ -58,6 +58,7 @@ public:
 	void CmdAddKey(int ch, double tick, double value);
 	void CmdDeleteKey(int ch, int id);
 	void CmdDeleteSelected();
+	void CmdClear();
 	void CmdSetHandle(int ch, int id, int side, double tx, double dv, bool reflect);
 	void CmdClearHandles(int ch, int id);
 	void CmdEase(int mode, bool selectedOnly); // 0 ease-in, 1 ease-out, 2 ease-in/out (selection or all)

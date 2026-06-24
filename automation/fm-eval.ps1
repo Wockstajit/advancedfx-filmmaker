@@ -2,7 +2,7 @@
 # (mirv_filmmaker ui_eval). The JS is sent as a single double-quoted console
 # arg, so use SINGLE quotes inside your JS (no double quotes).
 #
-#   pwsh misc\fm-eval.ps1 -Js "$.Msg('hi ' + (typeof $.GetContextPanel().BLoadLayout))"
+#   pwsh automation\fm-eval.ps1 -Js "$.Msg('hi ' + (typeof $.GetContextPanel().BLoadLayout))"
 param(
     [Parameter(Mandatory=$true)][string]$Js,
     [int]$Port = 29010,

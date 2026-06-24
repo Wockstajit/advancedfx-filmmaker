@@ -2,9 +2,11 @@
 
 #include "CameraEditorJs.h"
 #include "CameraTimelineHud.h"
+#include "GraphEditorExperimentHud.h"
 #include "MovieHud.h"
 #include "../Movie/CameraPath.h"
 #include "../Movie/CameraBridge.h"
+#include "../Movie/FollowCamera.h"
 
 #include "../../DeathMsg.h" // AfxHookSource2_GetPanoramaHudPanel + PanoramaUIPanel offsets
 #include "../../MirvTime.h"
@@ -104,15 +106,16 @@ void CameraEditorHud::Teardown() {
 	m_lastState.clear();
 }
 
-// Declared in Filmmaker.cpp. The experimental graph editor is now the DEFAULT curve editor:
-// the camera editor turns it on with the workspace (replacing the old timeline curve view).
+// Declared in Filmmaker.cpp.
 bool GraphEditorExperiment_Enabled();
 void GraphEditorExperiment_Set(bool enabled);
+const char* CameraEditor_HudViewName();
 
-// One-shot enter: host the timeline (kept hidden -- only its cursor/mouse-mode state still
-// feeds the editor's MOUSE button; its curve view is retired, the experimental graph editor is
-// the curve editor now), hide the floating movie-director cards, enable free cam, turn the graph
-// editor on, and select a key so the inspector has something to edit. Re-entry handled by caller.
+// One-shot enter: default the bottom to the REGULAR (native CS2) timeline -- the familiar game
+// demo bar, docked to fit left of the inspector (CameraTimelineJs), minus its CAM EDITOR/MOUSE
+// buttons. The bottom tab bar switches to the camera timeline or graph. Host the custom timeline,
+// hide the floating movie-director cards, select a key for the inspector. Free cam is NOT forced
+// on -- the user toggles it explicitly (the editor must not hijack the camera on open).
 void CameraEditorHud::OnEnter() {
 	CameraTimelineHud& tl = CameraTimelineHudRef();
 	CameraPath& cp = CameraPathRef();
@@ -121,20 +124,17 @@ void CameraEditorHud::OnEnter() {
 	MovieHudRef().SetVisible(false);
 
 	tl.SetEditorHosted(true);
-	tl.SetVisible(false); // hosted for its cursor state only; the graph editor is the curve editor
+	tl.SetVisible(false); // default bottom mode is the native (Regular) timeline; camera timeline hidden
 	tl.SetCursor(true); // start in UI-cursor so the inspector is immediately clickable
 
-	// Start on the graph editor (the default curve editor); the "≡ Timeline" button can flip to
-	// the old timeline later. Turning the graph on here seeds it; RunFrame re-asserts visibility.
-	m_useTimeline = false;
-	GraphEditorExperiment_Set(true);
+	m_bottomMode = BottomMode::Native;
+	GraphEditorExperiment_Set(false);
 
 	// Scale the live game into the preview rect by default -- that "shrunk viewport" IS the
 	// point of the editor (vs. the full-screen crop). `mirv_filmmaker editor scale off`
 	// reverts to the crop. Auto-disables itself while recording (engine-side check).
 	m_scaleEnabled = true;
 
-	CameraBridge_SetFreeCamEnabled(true);
 	if (cp.Count() > 0) cp.SelectForEditor(cp.Selected() >= 0 ? cp.Selected() : 0);
 }
 
@@ -145,7 +145,8 @@ void CameraEditorHud::OnExit() {
 
 	tl.SetEditorHosted(false);
 	tl.SetVisible(false);
-	GraphEditorExperiment_Set(false); // graph editor is part of the workspace; leave with it
+	GraphEditorExperiment_Set(false);
+	FollowCameraRef().StopPreview("camera editor closed");
 	cp.StopScrub();
 
 	MovieHudRef().SetVisible(m_prevMovieHud);
@@ -175,6 +176,10 @@ std::string CameraEditorHud::BuildStateJson() {
 	o << "{";
 	o << "\"enabled\":" << (m_enabled ? "true" : "false");
 	o << ",\"graphExp\":" << (GraphEditorExperiment_Enabled() ? "true" : "false");
+	o << ",\"graphDrive\":" << (GraphEditorExperimentHudRef().Drive() ? "true" : "false");
+	o << ",\"bottomMode\":\"" << (m_bottomMode == BottomMode::Graph ? "graph" :
+		(m_bottomMode == BottomMode::CameraTimeline ? "camera" : "native")) << "\"";
+	o << ",\"hudView\":\"" << CameraEditor_HudViewName() << "\""; // game-UI visibility picker
 	o << ",\"cursor\":" << (tl.Cursor() ? "true" : "false");
 	o << ",\"tick\":" << curTick;
 	o << ",\"time\":" << r2(curTime);
@@ -190,6 +195,7 @@ std::string CameraEditorHud::BuildStateJson() {
 	o << ",\"cam\":{\"x\":" << r2(camOrigin[0]) << ",\"y\":" << r2(camOrigin[1]) << ",\"z\":" << r2(camOrigin[2])
 		<< ",\"pitch\":" << r2(camAngles[0]) << ",\"yaw\":" << r2(camAngles[1]) << ",\"roll\":" << r2(camAngles[2])
 		<< ",\"fov\":" << r2(camFov) << "}";
+	o << ",\"follow\":" << FollowCameraRef().BuildStateJson();
 	if (selValid) {
 		const CamMarker& m = mk[sel];
 		o << ",\"sel\":{\"tick\":" << m.tick
@@ -230,13 +236,13 @@ void CameraEditorHud::RunFrame() {
 	}
 
 	// While enabled, re-assert hosting every frame (cheap) so a stray timeline close or HUD
-	// recreation can't leave the workspace half-torn-down. The bottom curve editor is the graph
-	// editor by default; the "≡ Timeline" button flips m_useTimeline to bring back the old camera
-	// timeline (and the timeline's "≡ Graph" button flips it back). Exactly one is shown.
-	const bool useGraph = !m_useTimeline;
+	// recreation can't leave the workspace half-torn-down. Native mode leaves CS2's own demo
+	// timeline visible; custom camera timeline / graph are explicit bottom overlays.
+	const bool useGraph = m_bottomMode == BottomMode::Graph;
+	const bool useCameraTimeline = m_bottomMode == BottomMode::CameraTimeline;
 	GraphEditorExperiment_Set(useGraph);
 	CameraTimelineHudRef().SetEditorHosted(true);
-	CameraTimelineHudRef().SetVisible(!useGraph);
+	CameraTimelineHudRef().SetVisible(useCameraTimeline);
 
 	if (!BuildIfNeeded()) {
 		AfxViewportScaler::SetRequest(false, 0, 0, 0, 0);
@@ -289,6 +295,10 @@ void CameraEditorHud::UpdateScaleRequest() {
 		valid = parsed && (x1 - x0 > 0.01f) && (y1 - y0 > 0.01f)
 			&& x0 >= 0 && y0 >= 0 && x1 <= 1.0001f && y1 <= 1.0001f;
 	}
+
+	// Cache the rect so the timeline HUD can scale the native game HUD into the same region.
+	m_previewValid = valid;
+	if (valid) { m_previewX0 = x0; m_previewY0 = y0; m_previewX1 = x1; m_previewY1 = y1; }
 
 	const bool active = m_scaleEnabled && valid;
 

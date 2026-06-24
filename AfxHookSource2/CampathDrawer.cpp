@@ -750,6 +750,8 @@ CCampathDrawer::CDynamicProperties::CDynamicProperties(CCampathDrawer * drawer) 
 	m_MarkerStyle = drawer->m_MarkerStyle;
 	m_MarkerFreeze = drawer->m_MarkerFreeze;
 	m_MarkerHighlight = drawer->m_MarkerHighlight;
+	m_FollowCameraMarker = drawer->m_FollowCameraMarker;
+	m_FollowCameraValue = drawer->m_FollowCameraValue;
 
 	if(g_CamPath.CanEval() && 2 <= g_CamPath.GetSize()) {
 		m_CurrentValue = g_CamPath.Eval(m_CurTime);
@@ -1010,6 +1012,8 @@ void CCampathDrawer::OnPostRenderAllTools_DrawingThread(CDynamicProperties * dyn
 		const DWORD markerTraj = markerFreeze ? D3DCOLOR_RGBA(80, 160, 255, 150) : D3DCOLOR_RGBA(255, 200, 40, 150);
 		const DWORD markerHiCore = D3DCOLOR_RGBA(255, 255, 255, 255);
 		const DWORD markerHiHalo = D3DCOLOR_RGBA(255, 255, 255, 120);
+		const bool followMarker = dynamicPorperties->GetFollowCameraMarker();
+		const CamPathValue followCpv = dynamicPorperties->GetFollowCameraValue();
 
 		// Draw keyframes index:
 		float drawKeyFrameIndex = dynamicPorperties->GetDrawKeyframeIndex();
@@ -1376,6 +1380,34 @@ void CCampathDrawer::OnPostRenderAllTools_DrawingThread(CDynamicProperties * dyn
 
 		// Restore the standard alpha blend after the marker glow (which used additive).
 		m_DeviceContext->OMSetBlendState(m_BlendState, NULL, 0xffffffff);
+
+		if (followMarker)
+		{
+			const DWORD followCore = D3DCOLOR_RGBA(190, 80, 255, 255);
+			struct FollowGlowPass { float widthMul; unsigned char alpha; };
+			static const FollowGlowPass kFollowGlow[] = { {4.8f, 24}, {3.2f, 42}, {2.0f, 74}, {1.2f, 150}, {1.0f, 255} };
+			double dgx = followCpv.X - planeOrigin.X, dgy = followCpv.Y - planeOrigin.Y, dgz = followCpv.Z - planeOrigin.Z;
+			double gscale = sqrt(dgx * dgx + dgy * dgy + dgz * dgz) / c_MarkerScreenRefDist;
+			if (gscale < c_MarkerScreenMinScale) gscale = c_MarkerScreenMinScale;
+			else if (gscale > c_MarkerScreenMaxScale) gscale = c_MarkerScreenMaxScale;
+			double gcross = c_CampathCrossRadius * gscale;
+
+			m_DeviceContext->OMSetBlendState(m_BlendStateAdditive ? m_BlendStateAdditive : m_BlendState, NULL, 0xffffffff);
+			for (int pass = 0; pass < (int)(sizeof(kFollowGlow) / sizeof(kFollowGlow[0])); ++pass)
+			{
+				DWORD colour = D3DCOLOR_RGBA(190, 80, 255, kFollowGlow[pass].alpha);
+				this->SetLineWidth(c_CampathCrossPixelWidth * kFollowGlow[pass].widthMul);
+				AutoSingleLine(Vector3(followCpv.X - gcross, followCpv.Y, followCpv.Z), colour, Vector3(followCpv.X + gcross, followCpv.Y, followCpv.Z), colour);
+				AutoSingleLine(Vector3(followCpv.X, followCpv.Y - gcross, followCpv.Z), colour, Vector3(followCpv.X, followCpv.Y + gcross, followCpv.Z), colour);
+				AutoSingleLine(Vector3(followCpv.X, followCpv.Y, followCpv.Z - gcross), colour, Vector3(followCpv.X, followCpv.Y, followCpv.Z + gcross), colour);
+				DrawCamera(followCpv, colour, dynamicPorperties->GetScreenWidth(), dynamicPorperties->GetScreenHeight(), gscale);
+				AutoSingleLineFlush();
+			}
+			m_DeviceContext->OMSetBlendState(m_BlendState, NULL, 0xffffffff);
+			this->SetLineWidth(c_CameraPixelWidth);
+			DrawCamera(followCpv, followCore, dynamicPorperties->GetScreenWidth(), dynamicPorperties->GetScreenHeight(), gscale);
+			AutoSingleLineFlush();
+		}
 
 		// Draw wireframe camera:
 		// NOTE: this "current position" gizmo samples g_CamPath at the engine clock

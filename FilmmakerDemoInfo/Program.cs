@@ -64,7 +64,10 @@ static class DemoInfo
     // v3: added per-player "perRound" (the round-performance timeline).
     // v4: "team" now reports the side held at the last scored round (the side the
     //     player ended the match on), not the last side seen in the GOTV wind-down.
-    const int SchemaVersion = 4;
+    // v5: added top-level "events" (weapon-drop-on-death, C4 drop/pickup/plant, and
+    //     visible item pickups) with a per-event demo tick, for the Follow Camera's
+    //     Preview-Tick jump. Full-parse only (empty in names-fast mode).
+    const int SchemaVersion = 5;
 
     // In names-fast mode, give up waiting for a straggler name after this many
     // commands so a player who connects very late never forces a full decode.
@@ -92,6 +95,22 @@ static class DemoInfo
         var reader = DemoFileReader.Create(demo, stream);
 
         var roster = new Dictionary<ulong, Rec>();
+
+        // Loadout events (full parse only): weapon drops (taken at the victim's death
+        // tick, since CS2 has no weapon_drop game event), C4 drop/pickup/plant, and
+        // visible item pickups. Each carries the demo tick so the tool can jump to it.
+        var events = new List<object>();
+        uint AccountId(ulong sid) => sid > SteamId64Base ? (uint)(sid - SteamId64Base) : 0u;
+        void AddEvent(string type, CCSPlayerController? who, string item)
+        {
+            events.Add(new
+            {
+                tick = demo.CurrentDemoTick.Value,
+                type,
+                item = item ?? "",
+                accountId = who != null ? AccountId(who.SteamID) : 0u
+            });
+        }
 
         bool namesFast = wantedAccountIds.Count > 0;
         var namedAccounts = namesFast ? new HashSet<uint>() : null;
@@ -221,6 +240,17 @@ static class DemoInfo
                     r.curKills = r.curHeadshots = r.curDied = r.curMvp = 0;
                 }
             };
+
+            // Loadout events for the Follow Camera. CS2 exposes no weapon_drop game event,
+            // so weapon drops are recorded at the victim's death tick (the dominant drop
+            // moment); C4 and visible item pickups come straight from their events.
+            demo.Source1GameEvents.PlayerDeath += e => AddEvent("weapon_drop", e.Player, "");
+            demo.Source1GameEvents.ItemPickup += e => { if (!e.Silent) AddEvent("item_pickup", e.Player, e.Item ?? ""); };
+            demo.Source1GameEvents.BombDropped += e => AddEvent("bomb_dropped", e.Player, "c4");
+            // Source1BombPickupEvent has no resolved .Player (only the pawn); reach the
+            // controller through the pawn so the drop/pickup carries an account id.
+            demo.Source1GameEvents.BombPickup += e => AddEvent("bomb_pickup", e.PlayerPawn?.Controller, "c4");
+            demo.Source1GameEvents.BombPlanted += e => AddEvent("bomb_planted", e.Player, "c4");
         }
 
         try
@@ -290,7 +320,8 @@ static class DemoInfo
             teamScore0 = ctScore,
             teamScore1 = tScore,
             hasScoreboard = rows.Count > 0,
-            players = rows
+            players = rows,
+            events
         };
 
         return JsonSerializer.Serialize(result);

@@ -217,17 +217,16 @@ std::wstring ResolvePlayingDemoPath() {
 	if (!g_pEngineToClient) return L"";
 	SOURCESDK::CS2::IDemoFile* demo = g_pEngineToClient->GetDemoFile();
 
-	// Cache by demo-object pointer: the path is constant for a playing session, so we scan once
-	// per demo. The null transition between demos clears the cache, so a new demo re-scans even
-	// if the engine reuses the object address. Mutex-guarded because console commands (demoprobe)
-	// can call in off the main thread.
+	// Cache by demo-object pointer only for the guarded memory scan. The engine can reuse the
+	// same IDemoFile object across direct demo-to-demo transitions, so the authoritative engine
+	// path getter must be sampled every call; otherwise the previous demo path can survive into
+	// the next demo and carry its camera markers over.
 	static std::mutex s_m;
 	std::lock_guard<std::mutex> lk(s_m);
 	static void* s_lastDemo = nullptr;
 	static std::wstring s_lastPath;
 
 	if (!demo || !demo->IsPlayingDemo()) { s_lastDemo = nullptr; s_lastPath.clear(); return L""; }
-	if (demo == s_lastDemo) return s_lastPath;
 
 	// Primary: the engine's own getter (exact + robust). Fall back to the guarded object scan
 	// only if it yields nothing, so behaviour never regresses on an SDK the slot doesn't match.
@@ -239,6 +238,15 @@ std::wstring ResolvePlayingDemoPath() {
 		if (!EndsWithDemCI(abs)) abs += L".dem";
 		resolved = CanonicalDemoPath(abs);
 	}
+	if (!resolved.empty()) {
+		s_lastPath = resolved;
+		s_lastDemo = demo;
+		return s_lastPath;
+	}
+
+	if (demo == s_lastDemo)
+		return s_lastPath;
+
 	if (resolved.empty()) resolved = ScanAndResolve(demo);
 
 	s_lastPath = resolved;

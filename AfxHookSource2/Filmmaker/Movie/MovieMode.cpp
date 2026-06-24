@@ -2,6 +2,7 @@
 
 #include "CameraBridge.h"
 #include "CameraPath.h"
+#include "FollowCamera.h"
 #include "../Filmmaker.h"            // CameraTimeline_Visible()
 #include "../Panorama/MovieHud.h"
 #include "../../MirvTime.h"
@@ -34,6 +35,8 @@ namespace {
 	constexpr int kVK_G = 0x47;     // toggle UI-mouse for the camera timeline panel
 	constexpr int kVK_Z = 0x5A;     // Ctrl+Z: undo last curve edit
 	constexpr int kVK_A = 0x41;     // Ctrl+A: select all keyframes (graph editor)
+	constexpr int kVK_DELETE = 0x2E;
+	constexpr int kVK_BACKSPACE = 0x08;
 
 	constexpr int kSkipSeconds = 15; // arrow-key demo skip step
 
@@ -70,20 +73,28 @@ bool MovieMode::OnMouseWheel(int delta, bool shiftDown, bool ctrlDown) {
 	if (delta == 0)
 		return false;
 
-	// Scrolling must NOT move, select, or change keyframes in the camera timeline or the
-	// experimental graph editor (it used to step the selected camera). Swallow the wheel there
-	// so nothing changes -- but still block the mode-cycle fall-through below.
-	if (CameraTimeline_Visible() || GraphEditorExperiment_Enabled())
-		return true;
-
-	// In the director FREE CAM the wheel can drive the camera (modifier held):
+	// In the director FREE CAM the wheel drives the camera when a modifier is held:
 	//   Ctrl+scroll  = FOV zoom -- up = zoom in (lower FOV), down = zoom out (higher FOV),
 	//   Shift+scroll = move SPEED (documented control).
-	// Plain scroll still falls through to the camera-mode cycle below (so you can scroll
-	// back out of free cam).
+	// Checked first so framing a shot works no matter which editor surface is open.
 	if (CameraBridge_GetFreeCamEnabled() && (ctrlDown || shiftDown)) {
 		if (ctrlDown) CameraBridge_AdjustFreeCamFov(delta > 0 ? +1 : -1);
 		else CameraBridge_AdjustFreeCamSpeed(delta > 0 ? +1 : -1);
+		return true;
+	}
+
+	// Plain-wheel routing depends on whether the UI mouse is active:
+	//   * Camera Editor Mode: the G key flips UI<->GAME. In UI mouse (cursor on) the wheel
+	//     stays a no-op so editing never "throws you back into the game"; in GAME mouse
+	//     (cursor off) it falls through to the POV cycle below, so you can scroll between
+	//     First/Third/Free while controlling the game.
+	//   * Standalone camera timeline / experimental graph editor are always UI surfaces, so
+	//     the plain wheel is swallowed there (it used to step the selected camera / keyframes).
+	if (CameraEditor_Active()) {
+		if (CameraTimeline_WantsCursor())
+			return true; // UI mouse: keep the wheel a no-op while editing
+		// GAME mouse: fall through to the camera-mode cycle below.
+	} else if (CameraTimeline_Visible() || GraphEditorExperiment_Enabled()) {
 		return true;
 	}
 
@@ -100,6 +111,12 @@ bool MovieMode::OnMouseWheel(int delta, bool shiftDown, bool ctrlDown) {
 }
 
 bool MovieMode::OnMouseButton(int button, bool down) {
+	// Follow Camera reposition uses the same free-look + left-click placement model
+	// as path-marker repositioning.
+	if (button == 0 && IsDemoActive() && FollowCameraRef().Repositioning()) {
+		if (down) EnqueueCmd("mirv_filmmaker follow repositionplace");
+		return true;
+	}
 	// While repositioning a camera marker, left-click places the selected marker at
 	// the current camera pose. Consume both down+up so MirvInput doesn't treat it as
 	// a free-cam drag and the game doesn't switch spectator targets.
@@ -174,6 +191,11 @@ bool MovieMode::OnKey(int vkey, bool down) {
 		return true;
 	}
 
+	if ((vkey == kVK_DELETE || vkey == kVK_BACKSPACE) && GraphEditorExperiment_Enabled()) {
+		if (down) EnqueueCmd("mirv_filmmaker grapheditor delsel");
+		return true;
+	}
+
 	// G toggles the native-demo-bar UI cursor only in regular viewing mode, and only
 	// from third-person/freecam. The camera timeline / curve editor is always a UI
 	// surface, so G is swallowed there and cannot turn the cursor off -- EXCEPT in
@@ -199,6 +221,13 @@ bool MovieMode::OnKey(int vkey, bool down) {
 	const CPMode cpMode = CameraPathRef().GetMode();
 
 	// --- camera-path sub-modes take priority over the normal director keys ---
+	if (FollowCameraRef().Repositioning()) {
+		if (vkey == kVK_X || vkey == kVK_ESC) {
+			if (down) EnqueueCmd("mirv_filmmaker follow repositioncancel");
+			return true;
+		}
+		if (vkey == kVK_LEFT || vkey == kVK_RIGHT) return true;
+	}
 	if (cpMode == CPMode::Reposition) {
 		// Free-look to position; left-click places (OnMouseButton); X/Esc cancels.
 		if (vkey == kVK_X || vkey == kVK_ESC) {
@@ -236,7 +265,11 @@ bool MovieMode::OnKey(int vkey, bool down) {
 		return true;
 	}
 
-	if (vkey == kVK_SPACE && CameraEditor_Active() && cpMode == CPMode::Editing) {
+	// Space drives camera-path play ONLY when a path editor overlay is actually open (Camera
+	// timeline or Graph). In the editor's Regular Timeline (native bottom) mode neither is open,
+	// so Space must fall through to plain demo pause/resume below -- not trigger a path playtest
+	// (which would just warn "need 2 camera markers"). Matches the gate used elsewhere here.
+	if (vkey == kVK_SPACE && (CameraTimeline_Visible() || GraphEditorExperiment_Enabled()) && cpMode == CPMode::Editing) {
 		// Skip re-issuing playtest while a start is PENDING (mode stays Editing during the
 		// seek settle) -- a held / repeated Space would otherwise restart the seek. Swallow
 		// the key regardless so it never leaks to the demo_pause fallback below.

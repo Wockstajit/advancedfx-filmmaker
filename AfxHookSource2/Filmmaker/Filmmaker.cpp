@@ -11,6 +11,7 @@
 #include "Panorama/DemoBarButtons.h"
 #include "Movie/MovieMode.h"
 #include "Movie/CameraPath.h"
+#include "Movie/FollowCamera.h"
 #include "Platform/FolderPicker.h"
 #include "Platform/TextEncoding.h"
 
@@ -155,6 +156,18 @@ std::wstring PlayingDemoPath() {
 	std::wstring eng = ResolvePlayingDemoPath();
 	if (!eng.empty())
 		return eng;
+
+	// If no demo is currently playing, do NOT fall back to the last Watch() path. Returning a
+	// stale path here keeps CameraPath bound to the previous demo while CS2 is between demos,
+	// which lets the old markers bleed into the next session.
+	bool playing = false;
+	if (g_pEngineToClient) {
+		if (auto pDemo = g_pEngineToClient->GetDemoFile())
+			playing = pDemo->IsPlayingDemo();
+	}
+	if (!playing)
+		return L"";
+
 	// Fallback: a demo is playing but the engine path couldn't be recovered. Use the path our
 	// own Watch() recorded (canonicalized so it matches the engine form when it does resolve),
 	// so a demo opened from our Downloaded tab is never worse off than before. Cached on the
@@ -211,6 +224,7 @@ void RunMainThreadFrame() {
 	// Camera-marker / dolly path: hover picking, playback driver, auto-save, then
 	// the BO2-style marker-edit menu. Both run on this (main/UI) thread.
 	CameraPathRef().RunFrame();
+	FollowCameraRef().RunFrame(CameraEditorHudRef().Enabled());
 	MarkerHudRef().RunFrame();
 
 	// Camera timeline / curve editor (native-styled scrubber + IWXMVM-style lanes).
@@ -262,13 +276,19 @@ bool CameraTimeline_WantsCursor() {
 bool CameraTimeline_Visible() { return CameraTimelineHudRef().Visible(); }
 
 // --- camera-path view ownership + debug gate (read by main.cpp's view-setup hook) ---
-bool CameraPathOwnsView() { return CameraPathRef().OwnsView(); }
+bool CameraPathOwnsView() { return CameraPathRef().OwnsView() || FollowCameraRef().OwnsView(); }
 bool CampathDebug() { return CameraPathRef().Debug(); }
 
 // --- Camera Editor Mode (dedicated editor workspace) ---
 void CameraEditor_Set(bool enabled) { CameraEditorHudRef().SetEnabled(enabled); }
 void CameraEditor_Toggle() { CameraEditorHudRef().Toggle(); }
 bool CameraEditor_Active() { return CameraEditorHudRef().Enabled(); }
+void CameraEditor_SetCursorMode(bool uiCursor) {
+	CameraTimelineHudRef().SetCursor(uiCursor);
+	GraphEditorExperimentHudRef().SetDrive(uiCursor);
+	if (!uiCursor)
+		CameraPathRef().StopScrub();
+}
 
 // Scaled-preview viewport (render-layer): scales the whole frame into the preview rect
 // instead of showing a crop. Only renders while the editor is open and not recording.
@@ -277,6 +297,21 @@ void CameraEditor_ToggleScale() { CameraEditorHudRef().ToggleScale(); }
 bool CameraEditor_ScaleActive() { return CameraEditorHudRef().ScaleEnabled(); }
 void CameraEditor_SetUseTimeline(bool useTimeline) { CameraEditorHudRef().SetUseTimeline(useTimeline); }
 void CameraEditor_ToggleUseTimeline() { CameraEditorHudRef().ToggleUseTimeline(); }
+void CameraEditor_SetNativeTimeline() {
+	CameraEditorHudRef().SetBottomMode(CameraEditorHud::BottomMode::Native);
+}
+const char* CameraEditor_HudViewName() {
+	switch (CameraEditorHudRef().GetHudView()) {
+	case CameraEditorHud::HudView::ShowAll: return "full";
+	case CameraEditorHud::HudView::InGame: return "game";
+	default: return "hidden";
+	}
+}
+bool CameraEditor_ScaledHud(float& x0, float& y0, float& x1, float& y1) {
+	CameraEditorHud& e = CameraEditorHudRef();
+	e.PreviewRect(x0, y0, x1, y1);
+	return e.ScaledHudActive();
+}
 
 // --- Camera-path preview: HUD masked (Tab) -> MovieHud hides itself this frame ---
 bool CameraPath_PreviewHudHidden() { return CameraPathRef().PreviewHudHidden(); }
@@ -286,6 +321,12 @@ void GraphEditorExperiment_Set(bool enabled) { GraphEditorExperimentHudRef().Set
 void GraphEditorExperiment_Toggle() { GraphEditorExperimentHudRef().Toggle(); }
 bool GraphEditorExperiment_Enabled() { return GraphEditorExperimentHudRef().Enabled(); }
 bool GraphEditorExperiment_OwnsView() { return GraphEditorExperimentHudRef().OwnsView(); }
-bool GraphEditorExperiment_WantsCursor() { return GraphEditorExperimentHudRef().WantsCursor(); }
+bool GraphEditorExperiment_WantsCursor() {
+	if (!GraphEditorExperimentHudRef().Enabled())
+		return false;
+	// Standalone graph-editor mode owns the cursor. Inside Camera Editor Mode,
+	// G controls cursor ownership through the hosted timeline flag.
+	return !CameraEditorHudRef().Enabled() || CameraTimelineHudRef().Cursor();
+}
 
 } // namespace Filmmaker

@@ -8,7 +8,7 @@
   WITHOUT pixel-clicking: it reads real Panorama panel state
   (tab visibility classes, child counts, whether tiles/detail
   loaded their native layouts) and captures a screenshot of the
-  game window at each step via PrintWindow.
+  full primary monitor at each step.
 
   This is the automated equivalent of the manual test flow:
     open Watch -> Downloaded -> screenshot -> click Your Matches
@@ -18,20 +18,26 @@
 
   PREREQ: CS2 must already be running under this HLAE build with
   the netcon console enabled (-netconport 29010). Use
-  test-filmmaker.ps1 to launch, then:
+  automation\test-filmmaker.ps1 to launch, then:
 
-    pwsh misc\verify-watch-ui.ps1
+    pwsh automation\verify-watch-ui.ps1
 ============================================================
 #>
 [CmdletBinding()]
 param(
     [int]$Port = 29010,
-    [string]$OutDir = (Join-Path $PSScriptRoot '..\build\verify-shots'),
+    [string]$OutDir,
     [double]$ReadSeconds = 1.2
 )
 $ErrorActionPreference = 'Stop'
 $here = $PSScriptRoot
-New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
+. (Join-Path $PSScriptRoot 'AutomationCommon.ps1')
+if ([string]::IsNullOrWhiteSpace($OutDir)) {
+    $OutDir = New-AutomationRunFolder -Name 'verify-watch-ui'
+} else {
+    New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
+}
+Save-AutomationRunMetadata -RunDirectory $OutDir -AutomationName 'verify-watch-ui' -Additional @{ port = $Port } | Out-Null
 
 # --- netcon plumbing (mirror of cs2-netcon.ps1, but returns the text) --------
 $cs2 = Get-Process -Name 'cs2' -ErrorAction SilentlyContinue
@@ -89,7 +95,7 @@ function Parse([string]$text) {
 
 function Shot([string]$name) {
     $out = Join-Path $OutDir $name
-    & powershell.exe -ExecutionPolicy Bypass -File (Join-Path $here 'capture-cs2.ps1') -Out $out 2>$null | Out-Null
+    & powershell.exe -ExecutionPolicy Bypass -File (Join-Path $here 'capture-main-monitor.ps1') -Out $out 2>$null | Out-Null
     if (Test-Path $out) { Write-Host "      shot -> $out" -ForegroundColor DarkGray }
 }
 

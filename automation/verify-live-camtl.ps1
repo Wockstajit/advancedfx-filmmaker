@@ -12,15 +12,21 @@ This intentionally checks the rendered CS2 window, not just console logs:
 param(
     [int]$Port = 29010,
     [int]$StartTick = 1945,
-    [string]$OutDir = (Join-Path $env:TEMP 'cs2-live-camtl')
+    [string]$OutDir
 )
 $ErrorActionPreference = 'Stop'
 
 $root = Split-Path -Parent $PSScriptRoot
-$capture = Join-Path $PSScriptRoot 'capture-cs2.ps1'
+$capture = Join-Path $PSScriptRoot 'capture-main-monitor.ps1'
 if (-not (Test-Path $capture)) { throw "Missing capture helper: $capture" }
 
-New-Item -ItemType Directory -Path $OutDir -Force | Out-Null
+. (Join-Path $PSScriptRoot 'AutomationCommon.ps1')
+if ([string]::IsNullOrWhiteSpace($OutDir)) {
+    $OutDir = New-AutomationRunFolder -Name 'verify-live-camtl'
+} else {
+    New-Item -ItemType Directory -Path $OutDir -Force | Out-Null
+}
+Save-AutomationRunMetadata -RunDirectory $OutDir -AutomationName 'verify-live-camtl' -Additional @{ port = $Port; startTick = $StartTick } | Out-Null
 
 $client = New-Object System.Net.Sockets.TcpClient
 $client.Connect('127.0.0.1', $Port)

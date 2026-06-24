@@ -15,20 +15,26 @@
   the assertions (pos changed / tick frozen) are automated.
 
   PREREQ:
-    1. Launch with test-filmmaker.ps1 (CS2 windowed, -netconport 29010).
+    1. Launch with automation\test-filmmaker.ps1 (CS2 windowed, -netconport 29010).
     2. Load a demo (Watch -> Downloaded -> Watch) and let it play.
-    3. Run:  pwsh misc\verify-moviecam.ps1
+    3. Run:  pwsh automation\verify-moviecam.ps1
 ============================================================
 #>
 [CmdletBinding()]
 param(
     [int]$Port = 29010,
-    [string]$OutDir = (Join-Path $PSScriptRoot '..\build\verify-shots'),
+    [string]$OutDir,
     [double]$MoveSeconds = 5.0
 )
 $ErrorActionPreference = 'Stop'
 $here = $PSScriptRoot
-New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
+. (Join-Path $PSScriptRoot 'AutomationCommon.ps1')
+if ([string]::IsNullOrWhiteSpace($OutDir)) {
+    $OutDir = New-AutomationRunFolder -Name 'verify-moviecam'
+} else {
+    New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
+}
+Save-AutomationRunMetadata -RunDirectory $OutDir -AutomationName 'verify-moviecam' -Additional @{ port = $Port } | Out-Null
 
 $cs2 = Get-Process -Name 'cs2' -ErrorAction SilentlyContinue
 if (-not $cs2) { Write-Host '[FAIL] cs2.exe is not running. Launch with test-filmmaker.ps1 first.' -ForegroundColor Red; exit 1 }
@@ -71,7 +77,7 @@ function ReadVisible() {
 }
 function Shot([string]$name) {
     $out = Join-Path $OutDir $name
-    & powershell.exe -ExecutionPolicy Bypass -File (Join-Path $here 'capture-cs2.ps1') -Out $out 2>$null | Out-Null
+    & powershell.exe -ExecutionPolicy Bypass -File (Join-Path $here 'capture-main-monitor.ps1') -Out $out 2>$null | Out-Null
     if (Test-Path $out) { Write-Host "      shot -> $out" -ForegroundColor DarkGray }
 }
 $results = New-Object System.Collections.Generic.List[string]

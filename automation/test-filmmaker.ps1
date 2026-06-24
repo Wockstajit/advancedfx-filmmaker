@@ -13,7 +13,7 @@
   pixel-clicking the Panorama UI.
 
   Usage:
-    powershell -ExecutionPolicy Bypass -File .\test-filmmaker.ps1
+    powershell -ExecutionPolicy Bypass -File .\automation\test-filmmaker.ps1
     ... -Cs2Dir "F:\SteamLibrary\steamapps\common\Counter-Strike Global Offensive"
     ... -NoLaunch          (preflight + copy cfg only, don't start HLAE)
 ============================================================
@@ -25,12 +25,12 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$root = $PSScriptRoot
+$root = Split-Path -Parent $PSScriptRoot
 $staging = Join-Path $root 'build\staging-release\bin'
 $dll     = Join-Path $staging 'x64\AfxHookSource2.dll'
 $helper  = Join-Path $staging 'x64\FilmmakerDemoInfo\FilmmakerDemoInfo.exe'
 $hlae    = Join-Path $staging 'HLAE.exe'
-$cfgSrc  = Join-Path $root 'misc\filmmaker_test.cfg'
+$cfgSrc  = Join-Path $PSScriptRoot 'filmmaker_test.cfg'
 
 function Ok($m)   { Write-Host "[ OK ] $m"   -ForegroundColor Green }
 function Warn($m) { Write-Host "[WARN] $m"   -ForegroundColor Yellow }
@@ -74,7 +74,7 @@ if (Test-Path $cfgSrc) {
         Warn "CS2 cfg dir not found: $cfgDir  (pass -Cs2Dir to point at your install)"
     }
 } else {
-    Warn "misc\filmmaker_test.cfg missing (aliases skipped)."
+    Warn "automation\filmmaker_test.cfg missing (aliases skipped)."
 }
 
 if ($fatal) { Err "Preflight failed. Fix the above and re-run."; exit 1 }

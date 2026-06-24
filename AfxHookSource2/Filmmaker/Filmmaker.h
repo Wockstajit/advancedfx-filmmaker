@@ -99,6 +99,9 @@ void CameraEditor_Toggle();
 // True while Camera Editor Mode is active. Read by the input layer so G keeps toggling
 // the UI/GAME mouse (to fly the free cam) even though the timeline panel is open.
 bool CameraEditor_Active();
+// Switch Camera Editor between UI cursor ownership and game/free-cam mouse look.
+// Also pauses/resumes graph-editor view driving so mouse look is not overwritten.
+void CameraEditor_SetCursorMode(bool uiCursor);
 
 // TRUE scaled preview viewport (render-layer): scales the whole rendered frame into the
 // preview rect instead of showing a crop. Driven by "mirv_filmmaker editor scale on|off|
@@ -107,10 +110,19 @@ void CameraEditor_SetScale(bool enabled);
 void CameraEditor_ToggleScale();
 bool CameraEditor_ScaleActive();
 
-// Bottom curve editor selection: false = graph editor (default), true = old camera timeline.
-// Driven by "mirv_filmmaker editor curveeditor graph|timeline|toggle".
+// Bottom editor selection. "native" leaves CS2's own demo timeline visible; "timeline" opens
+// the custom camera timeline; "graph" opens the graph editor.
 void CameraEditor_SetUseTimeline(bool useTimeline);
 void CameraEditor_ToggleUseTimeline();
+void CameraEditor_SetNativeTimeline();
+
+// Game-HUD visibility while the editor is open ("hidden" | "game" | "full"). Read by
+// CameraTimelineHud's state push so its JS shows/hides the native gameplay HUD accordingly.
+const char* CameraEditor_HudViewName();
+
+// Scaled-preview rect (normalised window fractions) the world blit uses; returns true when the
+// scaled viewport is live. The timeline HUD scales the native game HUD into this same rect.
+bool CameraEditor_ScaledHud(float& x0, float& y0, float& x1, float& y1);
 
 // --- Experimental After-Effects-style graph editor (isolated, opt-in overlay) ---
 // Default OFF; toggled by the "Experiment" button or "mirv_filmmaker grapheditor on|off|

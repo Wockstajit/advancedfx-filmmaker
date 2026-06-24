@@ -338,6 +338,10 @@ target_sources(${PROJECT_NAME} PRIVATE
     Filmmaker/Movie/CameraPath.h
     Filmmaker/Movie/GraphExpModel.cpp
     Filmmaker/Movie/GraphExpModel.h
+    Filmmaker/Movie/FollowCamera.cpp
+    Filmmaker/Movie/FollowCamera.h
+    Filmmaker/Movie/FollowCameraMath.cpp
+    Filmmaker/Movie/FollowCameraMath.h
     Filmmaker/Movie/MovieMode.cpp
     Filmmaker/Movie/MovieMode.h
 
@@ -354,6 +358,14 @@ target_sources(${PROJECT_NAME} PRIVATE
 )
 
 source_group("AfxHookSource2/Filmmaker" REGULAR_EXPRESSION "/AfxHookSource2/Filmmaker/")
+
+add_executable(FollowCameraMathTests
+    ../automation/follow-camera-math-tests.cpp
+    Filmmaker/Movie/FollowCameraMath.cpp
+    Filmmaker/Movie/FollowCameraMath.h
+)
+target_compile_features(FollowCameraMathTests PRIVATE cxx_std_17)
+add_test(NAME FollowCameraMathTests COMMAND FollowCameraMathTests)
 
 # This is far form proper, but it will do for now:
 source_group("deps/release/Detours" REGULAR_EXPRESSION "/deps/release/Detours/")
