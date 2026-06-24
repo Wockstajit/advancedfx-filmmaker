@@ -1,90 +1,137 @@
-# Half-Life Advanced Effects - advancedfx
+# SOURCE:MVM
 
-## About
+**Source Movie Maker** — a modern, in-game cinematics and demo-replay toolkit for Counter-Strike.
 
-Half-Life Advanced Effects (HLAE) is a tool to enrich content creation mainly for the Counter-Strike series.
+SOURCE:MVM is a fork of [HLAE / advancedfx](https://github.com/advancedfx/advancedfx) focused on making CS2 movie-making feel native. The goal is a clean, Panorama-integrated workflow for browsing demos, building camera paths, and editing shots without leaving the game.
 
-## Download
+---
 
-**VAC warning**: The HLAE tool is technically a hack, therefore you should only use it for making gaming videos or watching demos. Joining VAC protected servers with HLAE will probably get you VAC banned.
+## ⚠️ Warnings
 
-**Epilepsy warning**: This software will cause fast-changing images and colors on your screen.
+> **VAC warning** — This tool is technically a hack. Only use it for making videos or watching demos. Joining VAC-protected servers with it will probably get you VAC banned.
 
-### Latest release
+> **Epilepsy warning** — This software can cause fast-changing images and colors on your screen.
 
-https://github.com/advancedfx/advancedfx/releases/latest  
-Compatible with latest Steam version.
+---
 
-### Past releases
+## Game support
 
-https://github.com/advancedfx/advancedfx/releases
+| Engine | Game(s) | Status |
+| --- | --- | --- |
+| **Source 2** | Counter-Strike 2 | ✅ **In active development** |
+| Source / GoldSource | CS:GO, CS 1.6, and older Source/GoldSource titles | ⏸️ Not currently in development |
 
-* **HLAE 2.153.1** (2024-01-05T19:45Z)  
-  https://github.com/advancedfx/advancedfx/releases/tag/v2.153.1  
-  Release with AfxHookGoldSrc and related tools compatible with Steam version "steam_legacy - Pre-25th Anniversary Build.
-  The latest HLAE release should also work with steam_legacy.
+Right now all effort is on **CS2 (Source 2)**. The older GoldSource / Source code inherited from upstream is left intact but isn't being worked on here.
 
-* **HLAE 2.34.5** (2017-07-08T14:48Z)  
-  https://github.com/ripieces/advancedfx/releases/tag/v2.34.5  
-  Last release with AfxHookGoldSrc and related tools compatible with Steam version before 10th of July 2017.
+---
 
-* **HLAE 2.2.21.14** (2013-02-09T14:16Z)  
-  https://github.com/ripieces/advancedfx-prop/releases/tag/v2.2.21.14  
-  Release compatible with Steam version from July 2009.
+## What's here
+
+- **Panorama "Demos" tab** — browse and launch your demos straight from the CS2 main menu, with parsed scoreboards and match info.
+- **Camera editor mode** — a toggleable in-game editor workspace: scaled preview viewport, inspector, hosted timeline, and HUD hiding.
+- **Camera-path / dolly system** — BO2-style markers and smooth dolly paths with hotkeys and a Panorama menu.
+- **Director HUD & free-cam** — free-cam while paused and a native Panorama director HUD with camera-director controls.
+- **Movie export pipeline** — the full HLAE recording/export toolchain under the hood.
+
+## Coming soon
+
+- A more complete timeline editor for keyframing and easing camera moves.
+- Tighter Panorama integration across the editor and director tools.
+- Quality-of-life passes on the demo browser and export workflow.
+
+*(Features are evolving — expect rough edges.)*
+
+---
 
 ## System requirements
 
-* Microsoft Windows 10 or newer
-* Microsoft .NET Framework 4.6.2 or newer
-* Genuine Steam version
-* a lot of patience
+- Windows 10 or newer
+- .NET Framework 4.6.2 or newer
+- A genuine Steam copy of CS2
+- A lot of patience
 
-## Tip
-
-Using Steam's offline mode you can avoid retrieving updates that break HLAE during video production.
-
-## Support
-
-Please keep in mind, that even though we accept donations, HLAE is free software and a hobby for most in the HLAE team.
-Thus the support we can provide is limited. We encourage you to read the Manual or help each other in the Discord instead.
-
-### English
-
-* **Manual**  
-  https://github.com/advancedfx/advancedfx/wiki  
-  HLAE wiki with FAQ, tutorials, command lists, and more. 
-
-* **Discord**  
-  https://discord.gg/NGp8qhN  
-  Live text chat support from HLAE team members and community members.
-
-* GitHub - **Issues**  
-  https://github.com/advancedfx/advancedfx/issues  
-  For bug reports and feature requests (enhancements).
-
-### 中文 (zh-CN)
-
- * **HLAE中文站**  
-   https://hlae.site  
-   This site is run by a third party and one of the HLAE team members is involved.
-
-## Releated tools
-
-For a list of related tools see [related-tools.md](related-tools.md)
-
-## Changelog
-
-Newer changelog entries are replicated on the [releases page](https://github.com/advancedfx/advancedfx/releases).  
-Further changelog entries can be found in the changelog XML files included in the download.
-
-## Credits
-
-[CREDITS.md](CREDITS.md)
-
-## License
-
-This repository contains the parts of advancedfx project that are under MIT license. Please note: **the license does not apply to submodules**.
+---
 
 ## How to build
 
-[BUILDING.md](BUILDING.md)
+See [BUILDING.md](BUILDING.md).
+
+## License
+
+This repository contains the parts of the advancedfx project that are under the MIT license. See [LICENSE](LICENSE). **Note: the license does not apply to submodules.**
+
+Credits: [CREDITS.md](CREDITS.md)
+
+---
+
+## Looking for the original HLAE?
+
+This is a fork. For the full upstream documentation, releases, manual, and Discord support, see the original project:
+
+**[advancedfx/advancedfx →](https://github.com/advancedfx/advancedfx)**
+
+The previous upstream README is preserved there.
+
+```
+                                                                                                                             
+                                                                                                                             
+                                                             """"""""""                                                      
+                                                           """"""""""""""                                                    
+                                                          """"        """"                                                   
+                                                         """           """                                                   
+                                                         ""             ""                                                   
+                                                         ""            """                          "                        
+                                                    """""""           """" """                     """                       
+                                                  """""""""           """"""""""""""""""""""""""""""""                       
+                                                 """"                 """""" """""""""""""""""""""""""""""""""""             
+                                                """                                        """"""""  """"""""""""            
+                                               """                               ""     """""""""""""""""""""""""            
+                                               ""                              """"    """""""""""""""""""""""""             
+                                              """                             """""   """                                    
+                                              """                             """"    """                                    
+                                              """                              ""     ""                                     
+                                            """"                                     """                                     
+                                           """""                                     ""                                      
+                                          """"                        """"          """                                      
+                                          ""                          """"""""    """"                                       
+                                          ""                          """""""""""""""                                        
+                                          ""                           """  """""""                                          
+          """"""""""""""""""""""          ""                           """                 """"""""""""""""""""""""          
+        """""""""""""""""""""""I""        """                          """               """""""""""""""""""""""""I""        
+       """"                     ""         ""                          ""               """"                      """"       
+       ""   """""""""""""""""""""""        ""                          ""              """   """""""""""""""""""""""""       
+       ""   """"""""""""""""""""""         ""                         """              """   """"""""""""""""""""""""        
+       ""   ""                             ""                      """"""              """   ""                              
+       ""   ""                             ""                      """""               """   """""""""""""""""""""""         
+       ""   ""                             ""                      """                  """   """"""""""""""""""""""""       
+       ""   ""                            """                       """"                """"""""""""""""""""""""   """       
+       ""   ""                            ""                         """"                 """""""""""""""""""""""   ""       
+       ""   ""                            ""                          """"                    "  "  "  "  "  """"   """      
+       ""   """"""""""""""""""""""        ""                            """              """"""""""""""""""""""""   ""       
+       ""   """"""""""""""""""""""        """           ""               ""             """""""""""""""""""""""""   ""       
+       """                      ""        ""          """"""""           """            """                        """       
+        """""""""""""""""""""""I""        ""         """"""""""           """            ""I""""""""""""""""""""""I""        
+         """""""""""""""""""""""         """         """    """            """             """"""""""""""""""""""""          
+                                         """        """      """"           """                                              
+                                         """       """        """""""        ""                                              
+                                         """       """         """"""        ""                                              
+                                        """       """              """       ""                                              
+                                       """"     """"               ""        ""                                              
+                                      """      """"                ""       """                                              
+                                     """       ""                  ""       """                                              
+                                     ""       """                  ""       """                                              
+                                    """       ""                   ""       """                                              
+                                    ""       """                   """      """                                              
+                                   """      """                     ""      ""                                               
+                                   ""       """                     """     ""                                               
+                                   ""     """"                      """     ""                                               
+                                   ""    """"                       """    """                                               
+                                  """    ""                         ""     """                                               
+                                  ""    """                        """      """"                                             
+                                 """    ""                         ""        """"""                                          
+                                 ""     ""                         """""""     """""                                         
+                                 ""     """                        """""""""""""""""                                         
+                                 """"""""""                              """""""""""                                         
+                                 """""""""                                                                                   
+                                     "                                                                           
+```
