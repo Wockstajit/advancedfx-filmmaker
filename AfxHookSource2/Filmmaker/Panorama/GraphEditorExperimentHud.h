@@ -74,7 +74,7 @@ private:
 	void* FindRoot();
 	bool BuildIfNeeded();
 	void Teardown();
-	void OnEnter();   // seed, force cursor, enable free cam, stop stable scrub
+	void OnEnter();   // seed, sync drive mode, stop stable scrub only when graph has keys
 	void OnExit();    // stop driving + tear down
 	std::string BuildStateJson();
 	void DriveCameraThisFrame();

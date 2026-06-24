@@ -8,14 +8,16 @@ REM     mode, segment progress, console stream + drive buttons).
 REM
 REM  Usage:
 REM    live.bat                 (CS2 1920x1080, netcon 29010, web 8765)
+REM    live.bat "F:\path\to\demo.dem"
 REM ============================================================
 
 cd /d "%~dp0"
 
 set "PORT=29010"
 set "WEBPORT=8765"
-set "WIDTH=1920"
+set "WIDTH=2560"
 set "HEIGHT=1080"
+set "DEMO=%~1"
 
 if not exist "cs2-live.ps1" (
     echo cs2-live.ps1 not found ^(expected automation\cs2-live.ps1^).
@@ -43,7 +45,12 @@ if errorlevel 1 (
 )
 
 REM --- open the live dashboard (auto-retries until netcon is up)
-powershell -NoProfile -ExecutionPolicy Bypass -File "cs2-live.ps1" -Port %PORT% -WebPort %WEBPORT%
+if defined DEMO (
+    echo Loading demo in live dashboard: %DEMO%
+    powershell -NoProfile -ExecutionPolicy Bypass -File "cs2-live.ps1" -Port %PORT% -WebPort %WEBPORT% -Demo "%DEMO%"
+) else (
+    powershell -NoProfile -ExecutionPolicy Bypass -File "cs2-live.ps1" -Port %PORT% -WebPort %WEBPORT%
+)
 if errorlevel 1 (
     echo.
     echo ERROR: live dashboard stopped with an error.

@@ -323,6 +323,11 @@ void CViewportScaler::Blit(ID3D11DeviceContext* pImmediateContext, ID3D11RenderT
 	vp.MaxDepth = 1.0f;
 	m_DeviceContext->RSSetViewports(1, &vp);
 
+	// Record the actual numbers for the camera-editor debug overlay (read on the main thread).
+	m_LastBbWidth = bbDesc.Width; m_LastBbHeight = bbDesc.Height;
+	m_LastVp[0] = vp.TopLeftX; m_LastVp[1] = vp.TopLeftY; m_LastVp[2] = vp.Width; m_LastVp[3] = vp.Height;
+	m_LastBlitRan = true;
+
 	if (s_prevCode != 5 || s_prevW != bbDesc.Width || s_prevH != bbDesc.Height) {
 		s_prevCode = 5; s_prevW = bbDesc.Width; s_prevH = bbDesc.Height;
 		advancedfx::Message("[vpscale] blit RUN: bb=%ux%u fmt=%d samples=%u -> vp x=%.0f y=%.0f w=%.0f h=%.0f\n",

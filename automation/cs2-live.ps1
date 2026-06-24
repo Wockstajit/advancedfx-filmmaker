@@ -21,6 +21,7 @@
   RUN:
     powershell -ExecutionPolicy Bypass -File automation\cs2-live.ps1
     powershell -ExecutionPolicy Bypass -File automation\cs2-live.ps1 -Port 29010 -WebPort 8765
+    powershell -ExecutionPolicy Bypass -File automation\cs2-live.ps1 -Demo "F:\path\to\demo.dem"
 
   Stop with Ctrl+C in this window (or the Stop button on the page).
 ============================================================
@@ -28,9 +29,15 @@
 [CmdletBinding()]
 param(
     [int]$Port = 29010,     # CS2 netcon port
-    [int]$WebPort = 8765     # local web dashboard port
+    [int]$WebPort = 8765,    # local web dashboard port
+    [string]$Demo = ''       # optional demo to load when the dashboard connects
 )
 $ErrorActionPreference = 'Stop'
+
+function Quote-ConsoleArg([string]$value) {
+    if ($null -eq $value) { return '""' }
+    return '"' + ($value -replace '"', '\"') + '"'
+}
 
 # --- preflight ---------------------------------------------------------------
 $cs2 = Get-Process -Name 'cs2' -ErrorAction SilentlyContinue
@@ -92,7 +99,11 @@ $psReader = [powershell]::Create(); $psReader.Runspace = $rs
 [void]$psReader.AddScript($readerScript)
 $readerHandle = $psReader.BeginInvoke()
 
-# Prime the dashboard with current state.
+# Prime the dashboard with current state, optionally loading a specific demo first.
+if (-not [string]::IsNullOrWhiteSpace($Demo)) {
+    [void]$shared.lines.Add(@{ t = (Get-Date).ToString('HH:mm:ss'); s = '*** queued demo load: ' + $Demo + ' ***' })
+    $shared.cmds.Enqueue('playdemo ' + (Quote-ConsoleArg $Demo))
+}
 $shared.cmds.Enqueue('mirv_filmmaker marker list')
 
 # --- the dashboard page ------------------------------------------------------

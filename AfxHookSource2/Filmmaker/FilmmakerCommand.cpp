@@ -11,7 +11,6 @@
 #include "Panorama/CameraEditorHud.h"
 #include "Panorama/GraphEditorExperimentHud.h"
 #include "Platform/TextEncoding.h"
-#include "Movie/CameraBridge.h"
 #include "Movie/CameraPath.h"
 #include "Movie/FollowCamera.h"
 #include "Movie/MovieMode.h"
@@ -104,8 +103,9 @@ void PrintHelp(const char* cmd) {
 		"%s editor scale [on|off|toggle] - TRUE scaled preview viewport (whole frame shrunk, not a crop).\n"
 		"%s editor curveeditor [native|graph|timeline|camera|toggle] - bottom editor: native CS2 timeline, graph, or camera timeline.\n"
 		"%s editor hud [hidden|game|full|cycle] - game UI behind the editor: hide all, in-game (radar+HP/ammo, no spectator panel), or full.\n"
+		"%s editor debug [on|off|toggle] - viewport/HUD debug overlay (window/render-target/viewport numbers; compare vs normal game viewport).\n"
 		"%s follow [...] - place and control a Follow / Lock-On camera.\n"
-		, cmd, cmd, cmd, cmd, cmd, cmd, cmd
+		, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd
 	);
 }
 
@@ -121,6 +121,14 @@ void PlayCameraTimeline(Filmmaker::CameraPath& cp) {
 		cp.PlayFromEditor();
 	else
 		cp.PlayFromTimeline();
+}
+
+bool FocusEditorCameraIfAny() {
+	Filmmaker::CameraPath& cp = Filmmaker::CameraPathRef();
+	if (cp.Count() <= 0)
+		return false;
+	cp.SelectForEditor(cp.Selected() >= 0 ? cp.Selected() : 0);
+	return true;
 }
 
 void DoUiStatus() {
@@ -305,8 +313,7 @@ void DoCamTimeline(int argc, advancedfx::ICommandArgs* args, const char* cmd) {
 
 	if (0 == _stricmp(a, "open")) {
 		tl.SetVisible(true);
-		Filmmaker::CameraBridge_SetFreeCamEnabled(true);
-		if (cp.Count() > 0) cp.SelectForEditor(cp.Selected() >= 0 ? cp.Selected() : 0);
+		FocusEditorCameraIfAny();
 		advancedfx::Message("mirv_filmmaker: camera timeline shown (must be in a demo).\n");
 	}
 	else if (0 == _stricmp(a, "close")) { tl.SetVisible(false); cp.StopScrub(); }
@@ -314,8 +321,7 @@ void DoCamTimeline(int argc, advancedfx::ICommandArgs* args, const char* cmd) {
 		const bool opening = !tl.Visible();
 		tl.Toggle();
 		if (opening) {
-			Filmmaker::CameraBridge_SetFreeCamEnabled(true);
-			if (cp.Count() > 0) cp.SelectForEditor(cp.Selected() >= 0 ? cp.Selected() : 0);
+			FocusEditorCameraIfAny();
 		}
 		else if (!opening) cp.StopScrub();
 	}
@@ -772,9 +778,18 @@ CON_COMMAND(mirv_filmmaker, "Browse and play CS2 demos (filmmaker tool).") {
 			// Pick the bottom editor: native CS2 demo timeline, graph, or custom camera timeline.
 			const char* a2 = (argc >= 4) ? args->ArgV(3) : "toggle";
 			if (0 == _stricmp(a2, "native") || 0 == _stricmp(a2, "cs2") || 0 == _stricmp(a2, "off")) Filmmaker::CameraEditor_SetNativeTimeline();
-			else if (0 == _stricmp(a2, "timeline") || 0 == _stricmp(a2, "camera")) Filmmaker::CameraEditor_SetUseTimeline(true);
-			else if (0 == _stricmp(a2, "graph")) Filmmaker::CameraEditor_SetUseTimeline(false);
-			else Filmmaker::CameraEditor_ToggleUseTimeline();
+			else if (0 == _stricmp(a2, "timeline") || 0 == _stricmp(a2, "camera")) {
+				Filmmaker::CameraEditor_SetUseTimeline(true);
+				FocusEditorCameraIfAny();
+			}
+			else if (0 == _stricmp(a2, "graph")) {
+				Filmmaker::CameraEditor_SetUseTimeline(false);
+				FocusEditorCameraIfAny();
+			}
+			else {
+				Filmmaker::CameraEditor_ToggleUseTimeline();
+				FocusEditorCameraIfAny();
+			}
 		} else if (0 == _stricmp(arg, "hud")) {
 			// Game-HUD visibility behind the editor: hide all / in-game (radar + HP/ammo, no
 			// spectator observer panel) / show all (full spectator HUD).
@@ -788,6 +803,15 @@ CON_COMMAND(mirv_filmmaker, "Browse and play CS2 demos (filmmaker tool).") {
 				Filmmaker::CameraEditorHudRef().SetHudView(HV::ShowAll);
 			else Filmmaker::CameraEditorHudRef().CycleHudView();
 			advancedfx::Message("mirv_filmmaker: editor game-HUD = %s.\n", Filmmaker::CameraEditor_HudViewName());
+		} else if (0 == _stricmp(arg, "debug")) {
+			// Viewport/HUD debug overlay: on-screen window/render-target/viewport readout so the
+			// custom editor viewport can be compared 1:1 against the normal game viewport.
+			const char* a2 = (argc >= 4) ? args->ArgV(3) : "toggle";
+			if (0 == _stricmp(a2, "on") || 0 == _stricmp(a2, "1")) Filmmaker::CameraEditorHudRef().SetDebugOverlay(true);
+			else if (0 == _stricmp(a2, "off") || 0 == _stricmp(a2, "0")) Filmmaker::CameraEditorHudRef().SetDebugOverlay(false);
+			else Filmmaker::CameraEditorHudRef().ToggleDebugOverlay();
+			advancedfx::Message("mirv_filmmaker: editor debug overlay %s.\n",
+				Filmmaker::CameraEditorHudRef().DebugOverlay() ? "ON" : "off");
 		} else {
 			if (0 == _stricmp(arg, "on") || 0 == _stricmp(arg, "open") || 0 == _stricmp(arg, "1")) Filmmaker::CameraEditor_Set(true);
 			else if (0 == _stricmp(arg, "off") || 0 == _stricmp(arg, "close") || 0 == _stricmp(arg, "0")) Filmmaker::CameraEditor_Set(false);

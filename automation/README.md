@@ -7,6 +7,9 @@ Repository automation, verification harnesses, launchers, configs, screenshots, 
 - `AutomationCommon.ps1` creates isolated timestamped run directories and metadata.
 - `verify-followcam.ps1` runs the live CS2/netcon Follow Camera verification.
 - `verify-grenade-tracking.ps1` discovers a nearby grenade, seeks before its throw, and proves reacquisition.
+- `verify-editor-viewport-debug.ps1` is a static (no-launch) source check for the camera-editor viewport work: no auto free-cam/jump on open, HUD scales 1:1 with the world blit, and the `editor debug` overlay + render-layer instrumentation are wired end to end.
+- `verify-editor-viewport-live.ps1` runs the live HUD scaling check, prints per-HUD pixel bounds/areas, and writes closed-viewer vs camera-editor comparison JSON/CSV.
+- `live.bat "<demo.dem>"` launches CS2 plus the browser dashboard and optionally loads the supplied demo path.
 - `follow-camera-math-tests.cpp` is the deterministic Follow Camera math test driver built by CMake.
 
 Generated screenshots and logs are written to `automation/runs/<automation>/<timestamp>/`.

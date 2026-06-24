@@ -202,7 +202,37 @@ inline const char* kCameraTimelineJs = R"TLJS(
 
     // Legacy cleanup hook: if an older build hid native HUD siblings, restore them. The
     // camera timeline HUD toggle is disabled; this must not hide anything anymore.
-    var OURS = { 'CamTimelineRoot': 1, 'MarkerHudRoot': 1, 'MovieHudRoot': 1, 'CamEditorRoot': 1 };
+    var OURS = { 'CamTimelineRoot': 1, 'MarkerHudRoot': 1, 'MovieHudRoot': 1, 'CamEditorRoot': 1, 'GraphExpRoot': 1 };
+    var VIEWPORT_HUD_ROOTS = {
+      'HudBottomGradient': 1,
+      'HudInWorld': 1,
+      'HudTopCenter': 1,
+      'HudTopLeft': 1,
+      'HudLowerLeft': 1,
+      'HudBottomCenter': 1,
+      'HudBottomRight': 1,
+      'HudTopRight': 1,
+      'HudCompass': 1,
+      'HudChat': 1,
+      'HudRadar': 1,
+      'HudMoney': 1,
+      'HudHealthArmor': 1,
+      'jsHudHealthArmorAmmoMore': 1,
+      'HudWeaponSelection': 1,
+      'HudDeathNotice': 1,
+      'ScoreAndTimeAndBomb': 1,
+      'HudTeamCounter': 1,
+      'HudWinPanel': 1,
+      'HudSpectatorVignetting': 1,
+      'HudRadio': 1,
+      'HudInstructor': 1,
+      'HudVote': 1,
+      'HudRosettaSelector': 1,
+      'MapOverview': 1,
+      'HudPerfStatsBasics': 1,
+      'Scoreboard': 1,
+      'HudDeathPanel': 1
+    };
     // Spectator observer chrome stripped for the "in-game" look: the player name/clan/weapon
     // side bar, the centred player avatar, and the spectator vignette. Radar + HP/ammo stay.
     var SPEC_PANELS = ['jsHudSpecplayer__Bg', 'HudSpecplayer__Avatar', 'HudSpectatorVignetting'];
@@ -242,6 +272,9 @@ R"TLJS(
     function isOurPanel(p) {
       return !!(p && OURS[p.id]);
     }
+    function isViewportHudRoot(p) {
+      return !!(p && VIEWPORT_HUD_ROOTS[p.id]);
+    }
     function isNativeDemoBarPanel(p) {
       return !!(p && p.FindChildTraverse && (p.FindChildTraverse('SliderRow') || p.FindChildTraverse('ControlRow')));
     }
@@ -250,9 +283,18 @@ R"TLJS(
         var p = viewportHudPanels[i];
         try {
           if (!p || (p.IsValid && !p.IsValid())) continue;
+          // Snap the transform back with NO animation, then re-arm the panel's own transition on
+          // the next frame -- once the transform has already settled -- so toggling back to Hide All
+          // doesn't trigger an animated "slide out", and native HUD anims still work after we let go.
+          p.style.transition = 'none';
           p.style.transformOrigin = p.__camViewportOrigin || '50% 50%';
           p.style.transform = p.__camViewportTransform || 'none';
           p.__camViewportAdjusted = false;
+          (function (panel, trans) {
+            $.Schedule(0, function () {
+              try { if (!panel || (panel.IsValid && !panel.IsValid())) return; panel.style.transition = trans; } catch (e3) {}
+            });
+          })(p, p.__camViewportTransition || '');
         } catch (e) {}
       }
       viewportHudPanels = [];
@@ -262,6 +304,7 @@ R"TLJS(
       try {
         p.__camViewportTransform = p.style.transform || 'none';
         p.__camViewportOrigin = p.style.transformOrigin || '50% 50%';
+        p.__camViewportTransition = p.style.transition || '';
         p.__camViewportAdjusted = true;
         viewportHudPanels.push(p);
       } catch (e) {}
@@ -278,21 +321,33 @@ R"TLJS(
       if (!(isFinite(x0) && isFinite(y0) && isFinite(x1) && isFinite(y1) && x1 > x0 && y1 > y0)) {
         restoreHudViewport(); return;
       }
-      var x0p = x0 + (HUD_INSET_X / rw);
-      var x1p = x1 - (HUD_INSET_X / rw);
-      var y0p = y0 + (HUD_INSET_TOP / rh);
-      if (x1p <= x0p || y1 <= y0p) { restoreHudViewport(); return; }
-      var tx = x0p * rw, ty = y0p * rh, sx = x1p - x0p, sy = y1 - y0p;
-      var tr = 'translate3d(' + tx.toFixed(1) + 'px, ' + ty.toFixed(1) + 'px, 0px) scale3d('
-        + sx.toFixed(5) + ', ' + sy.toFixed(5) + ', 1)';
+      // Map the FULL screen 1:1 into the EXACT preview rect the world blit uses -- NO insets, so
+      // the HUD lines up pixel-for-pixel with the scaled game view (the rect already matches the
+      // game aspect, so sx == sy). x0*rw / y0*rh is the rect's top-left in virtual px.
+      var sx = x1 - x0, sy = y1 - y0;
+      var tx = x0 * rw, ty = y0 * rh;
       var n = ctx.GetChildCount ? ctx.GetChildCount() : 0;
       for (var i = 0; i < n; i++) {
         var c = ctx.GetChild(i);
-        if (!c || isOurPanel(c) || isNativeDemoBarPanel(c)) continue;
+        if (!c || isOurPanel(c) || isNativeDemoBarPanel(c) || !isViewportHudRoot(c)) continue;
         rememberHudViewportPanel(c);
         try {
+          // transform-origin stays '0% 0%' (each panel's OWN top-left) -- the only form Panorama
+          // reliably accepts; a 3-value/px origin throws and silently drops the whole transform.
+          // To still scale uniformly about the SCREEN origin (so RIGHT/BOTTOM-anchored panels like
+          // death notices / ammo land inside the rect, not under the inspector), we compensate in
+          // the translate: a panel laid out at screen (px,py) needs translate (tx-(1-sx)*px, ...).
+          // Full-screen panels have px=py=0 -> this reduces to the plain (tx,ty) mapping, and if an
+          // offset is unavailable it falls back to that same safe behaviour.
+          var px = (c.actualxoffset || 0) / rsx, py = (c.actualyoffset || 0) / rsy;
+          var ptx = tx - (1 - sx) * px, pty = ty - (1 - sy) * py;
+          // Panorama applies the listed translate before the scale for these HUD panels, so the
+          // translate itself gets scaled. Feed it pre-divided values to produce screen-pixel tx/ty.
+          var cssTx = ptx / sx, cssTy = pty / sy;
+          c.style.transition = 'none'; // snap into the preview rect; no animated slide/scale
           c.style.transformOrigin = '0% 0%';
-          c.style.transform = tr;
+          c.style.transform = 'translate3d(' + cssTx.toFixed(1) + 'px, ' + cssTy.toFixed(1) + 'px, 0px) scale3d('
+            + sx.toFixed(5) + ', ' + sy.toFixed(5) + ', 1)';
         } catch (e2) {}
       }
     }

@@ -78,6 +78,12 @@ public:
 	void CycleHudView() { m_hudView = (HudView)(((int)m_hudView + 1) % 3); }
 	HudView GetHudView() const { return m_hudView; }
 
+	// Viewport/HUD debug overlay: on-screen readout of window/render-target/viewport geometry so
+	// the custom editor viewport can be compared 1:1 against the normal game viewport.
+	void SetDebugOverlay(bool v) { m_debugOverlay = v; }
+	void ToggleDebugOverlay() { m_debugOverlay = !m_debugOverlay; }
+	bool DebugOverlay() const { return m_debugOverlay; }
+
 	// The scaled-preview rect (normalised window fractions, x0 y0 x1 y1) the world blit uses,
 	// plus whether the scaled viewport is live. The timeline HUD reads these to scale the native
 	// game HUD into the SAME rect so the HUD lines up with the shrunk world preview.
@@ -95,7 +101,7 @@ private:
 	bool BuildIfNeeded();
 	void Teardown();
 	std::string BuildStateJson();
-	void OnEnter(); // one-shot: host the timeline, hide MovieHud, enable freecam, select a key
+	void OnEnter(); // one-shot: host the timeline, hide MovieHud (no free-cam / no jump on open)
 	void OnExit();  // one-shot: un-host the timeline, restore MovieHud, stop scrub
 	void UpdateScaleRequest(); // publish the preview rect to the render-layer viewport scaler
 
@@ -104,11 +110,13 @@ private:
 	void* m_root = nullptr;     // #CamEditorRoot
 	short m_symState = -1;
 	short m_symPreviewRect = -1; // "previewrect" -- JS publishes the preview rect fractions
+	short m_symDebugPanels = -1; // "debugpanels" -- JS publishes measured HUD/editor rects
 	bool m_built = false;
 	bool m_enabled = false;     // Camera Editor Mode on/off
 	bool m_scaleEnabled = false; // true scaled-preview viewport (render-layer blit)
 	BottomMode m_bottomMode = BottomMode::Native;
 	HudView m_hudView = HudView::HideAll; // game-HUD visibility while the editor is open
+	bool m_debugOverlay = false;         // viewport/HUD debug readout overlay
 	// Last preview rect parsed from the JS-published "previewrect" (normalised window fractions).
 	float m_previewX0 = 0, m_previewY0 = 0, m_previewX1 = 0, m_previewY1 = 0;
 	bool m_previewValid = false;

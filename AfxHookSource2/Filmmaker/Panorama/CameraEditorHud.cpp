@@ -89,6 +89,7 @@ bool CameraEditorHud::BuildIfNeeded() {
 		return false;
 	m_symState = m_bridge.MakeSymbol("state");
 	m_symPreviewRect = m_bridge.MakeSymbol("previewrect");
+	m_symDebugPanels = m_bridge.MakeSymbol("debugpanels");
 	m_root = FindRoot();
 	m_built = (m_root != nullptr);
 	m_lastState.clear();
@@ -98,7 +99,7 @@ bool CameraEditorHud::BuildIfNeeded() {
 void CameraEditorHud::Teardown() {
 	if (m_built && m_hudPanel && m_bridge.ContextPanel()) {
 		m_bridge.RunScript(
-			"(function(){var e=$('#CamEditorRoot'); if(e) e.DeleteAsync(0); $.CamEditor=null;})();");
+			"(function(){var e=$('#CamEditorRoot'); if(e) e.DeleteAsync(0); var d=$('#CamEditorDebugRoot'); if(d) d.DeleteAsync(0); $.CamEditor=null;})();");
 	}
 	m_built = false;
 	m_root = nullptr;
@@ -135,7 +136,12 @@ void CameraEditorHud::OnEnter() {
 	// reverts to the crop. Auto-disables itself while recording (engine-side check).
 	m_scaleEnabled = true;
 
-	if (cp.Count() > 0) cp.SelectForEditor(cp.Selected() >= 0 ? cp.Selected() : 0);
+	// Do NOT hijack the camera on open. Opening the editor only shows the UI -- it must not
+	// enable free cam, pause, seek, or jump to a camera. Pre-select a key for the inspector
+	// read-out ONLY (no teleport), and only when nothing is already selected, so the current
+	// view and camera mode are left exactly as they were. Jumping to / previewing / editing a
+	// camera now requires an explicit action (nav arrows, preview, edit -> SelectForEditor).
+	if (cp.Count() > 0 && cp.Selected() < 0) cp.SelectIndex(0, /*teleport*/ false);
 }
 
 // One-shot exit: restore everything the enter step changed and tear down the chrome.
@@ -180,6 +186,26 @@ std::string CameraEditorHud::BuildStateJson() {
 	o << ",\"bottomMode\":\"" << (m_bottomMode == BottomMode::Graph ? "graph" :
 		(m_bottomMode == BottomMode::CameraTimeline ? "camera" : "native")) << "\"";
 	o << ",\"hudView\":\"" << CameraEditor_HudViewName() << "\""; // game-UI visibility picker
+	o << ",\"debug\":" << (m_debugOverlay ? "true" : "false");
+	if (m_debugOverlay) {
+		// Render-layer numbers for the viewport debug overlay: the ACTUAL world-blit rect (px) +
+		// the backbuffer/render-target size, so JS can compare them against the Panorama-side
+		// preview rect and prove the custom viewport matches the game viewport 1:1.
+		int bbW = 0, bbH = 0; float vx = 0, vy = 0, vw = 0, vh = 0;
+		const bool blitRan = AfxViewportScaler::GetLastBlit(bbW, bbH, vx, vy, vw, vh);
+		o << ",\"dbg\":{\"blitRan\":" << (blitRan ? "true" : "false")
+			<< ",\"bbW\":" << bbW << ",\"bbH\":" << bbH
+			<< ",\"vx\":" << r2(vx) << ",\"vy\":" << r2(vy) << ",\"vw\":" << r2(vw) << ",\"vh\":" << r2(vh)
+			<< ",\"scaleReq\":" << (m_scaleEnabled ? "true" : "false")
+			<< ",\"previewValid\":" << (m_previewValid ? "true" : "false");
+		std::string panelsJson = "[]";
+		if (m_root && m_symDebugPanels >= 0) {
+			std::string rawPanels = m_bridge.GetAttributeString(m_root, m_symDebugPanels, "[]");
+			if (!rawPanels.empty() && rawPanels[0] == '[')
+				panelsJson = rawPanels;
+		}
+		o << ",\"panels\":" << panelsJson << "}";
+	}
 	o << ",\"cursor\":" << (tl.Cursor() ? "true" : "false");
 	o << ",\"tick\":" << curTick;
 	o << ",\"time\":" << r2(curTime);
@@ -230,7 +256,28 @@ void CameraEditorHud::RunFrame() {
 	if (m_enabled && !m_wasEnabled) { OnEnter(); m_wasEnabled = true; }
 	else if (!m_enabled && m_wasEnabled) { OnExit(); m_wasEnabled = false; }
 
-	if (!m_enabled) {
+	if (!m_enabled && !m_debugOverlay) {
+		AfxViewportScaler::SetRequest(false, 0, 0, 0, 0);
+		return;
+	}
+
+	if (!m_enabled && m_debugOverlay) {
+		if (!BuildIfNeeded()) {
+			AfxViewportScaler::SetRequest(false, 0, 0, 0, 0);
+			return;
+		}
+		m_root = FindRoot();
+		if (!m_root) {
+			m_built = false;
+			AfxViewportScaler::SetRequest(false, 0, 0, 0, 0);
+			return;
+		}
+		std::string state = BuildStateJson();
+		if (state != m_lastState) {
+			m_bridge.SetAttributeString(m_root, m_symState, state.c_str());
+			m_lastState = state;
+		}
+		m_bridge.RunScript("$.CamEditor && $.CamEditor.render();");
 		AfxViewportScaler::SetRequest(false, 0, 0, 0, 0);
 		return;
 	}

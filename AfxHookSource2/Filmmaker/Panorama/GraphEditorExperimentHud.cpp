@@ -124,10 +124,11 @@ void GraphEditorExperimentHud::OnEnter() {
 
 	// The UI cursor is shown via our GraphEditorExperiment_WantsCursor() hook into MovieMode's
 	// suspend/consume chain (so we do NOT poke the timeline's cursor flag, which would otherwise
-	// stay stuck on after a standalone exit). Enable free cam so SetCameraPose's override applies,
-	// and make sure no stable-path scrub is fighting us for the view.
-	CameraBridge_SetFreeCamEnabled(true);
-	CameraPathRef().StopScrub();
+	// stay stuck on after a standalone exit). Do not force free cam here: opening/clicking an empty
+	// graph should leave the viewer in its current mode. DriveCameraThisFrame enables it only once
+	// there are graph keys to sample, and the editor command path focuses an existing camera marker.
+	if (m_model.TotalKeys() > 0)
+		CameraPathRef().StopScrub();
 }
 
 void GraphEditorExperimentHud::OnExit() {

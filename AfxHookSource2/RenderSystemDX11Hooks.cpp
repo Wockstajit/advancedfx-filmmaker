@@ -4292,6 +4292,13 @@ namespace AfxViewportScaler {
             });
     }
 
+    bool GetLastBlit(int& bbW, int& bbH, float& vx, float& vy, float& vw, float& vh) {
+        UINT w = 0, h = 0; float vp[4] = { 0, 0, 0, 0 };
+        bool ran = g_ViewportScaler.GetLastBlit(w, h, vp);
+        bbW = (int)w; bbH = (int)h; vx = vp[0]; vy = vp[1]; vw = vp[2]; vh = vp[3];
+        return ran;
+    }
+
 } // namespace AfxViewportScaler
 const wchar_t * AfxStreams_GetTakeDir() {
     return g_AfxStreams.GetTakeDir();

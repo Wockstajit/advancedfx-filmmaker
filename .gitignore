@@ -1,8 +1,40 @@
+# Build outputs
 /build
 /ipch
+/out
+/packages
+
+# IDE / editor
 /.vs
 /.vscode
-/*.VC.*
-/packages
-/out
 /.idea
+/*.VC.*
+*.user
+*.suo
+*.sdf
+*.opensdf
+
+# .NET (FilmmakerDemoInfo)
+FilmmakerDemoInfo/bin/
+FilmmakerDemoInfo/obj/
+
+# Rust
+lib/**/target/
+
+# Vendored SDK dumps (do not commit)
+ultralight-free-sdk-*/
+
+# Automation: scripts and configs stay tracked; only runtime artifacts are ignored
+automation/runs/
+automation/_diag.ps1
+
+# Local Panorama layout reference dump (not part of the build)
+panorama ref/
+
+# OS cruft
+Thumbs.db
+.DS_Store
+
+# Local agent / tooling state
+.agents/
+.claude/

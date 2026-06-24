@@ -39,6 +39,15 @@ public:
 	void Blit(ID3D11DeviceContext* pImmediateContext, ID3D11RenderTargetView* pTarget,
 		float x0, float y0, float x1, float y1);
 
+	// Debug overlay readout: copy the last successful blit's backbuffer size + viewport px rect
+	// (TopLeftX, TopLeftY, Width, Height). Returns whether a blit has run since device creation.
+	// Written on the render thread at the end of Blit, read on the main thread (benign data race).
+	bool GetLastBlit(UINT& bbW, UINT& bbH, float vp[4]) const {
+		bbW = m_LastBbWidth; bbH = m_LastBbHeight;
+		vp[0] = m_LastVp[0]; vp[1] = m_LastVp[1]; vp[2] = m_LastVp[2]; vp[3] = m_LastVp[3];
+		return m_LastBlitRan;
+	}
+
 private:
 	void ReleaseTemp();
 	// viewFormat is the TYPED format used for the temp texture + SRV (the backbuffer itself may
@@ -63,6 +72,11 @@ private:
 	UINT m_TempWidth = 0;
 	UINT m_TempHeight = 0;
 	DXGI_FORMAT m_TempFormat = DXGI_FORMAT_UNKNOWN;
+
+	// Last blit's actual numbers (debug overlay readout; see GetLastBlit).
+	UINT m_LastBbWidth = 0, m_LastBbHeight = 0;
+	float m_LastVp[4] = { 0, 0, 0, 0 }; // TopLeftX, TopLeftY, Width, Height (backbuffer px)
+	bool m_LastBlitRan = false;
 };
 
 // Free-function bridge used by the camera-editor host, which lives in the Filmmaker module and
@@ -79,5 +93,9 @@ namespace AfxViewportScaler {
 	// active, the device is ready and we are NOT recording, queue the BeforeUi2 scale-blit for
 	// this frame. No-op otherwise (zero overhead -> normal full-screen render / crop fallback).
 	void EngineThread_RunFrame();
+
+	// Debug overlay (main/UI thread): copy the last blit's backbuffer size + viewport px rect.
+	// Returns whether a blit has run (false -> not scaling / not in a demo / recording).
+	bool GetLastBlit(int& bbW, int& bbH, float& vx, float& vy, float& vw, float& vh);
 
 } // namespace AfxViewportScaler
