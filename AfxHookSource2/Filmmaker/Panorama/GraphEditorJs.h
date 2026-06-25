@@ -110,7 +110,8 @@ R"GEJS(
     // editor's inspector, lifted above the compact timeline bar. Size/offset are recomputed each
     // frame in computeGeom(); all editor children lay out relative to `dock`.
     var root = $.CreatePanel('Panel', ctx, 'GraphExpRoot', {});
-    root.hittest = false; root.style.width = '100%'; root.style.height = '100%'; root.style.zIndex = '60';
+    // z65: always-on-top experimental overlay. See the canonical z-layer map in PanoramaBridge.h.
+    root.hittest = false; root.style.width = '100%'; root.style.height = '100%'; root.style.zIndex = '65';
     root.style.fontFamily = S.font;
     var dock = mk('Panel', root); dock.hittest = false;
     dock.style.horizontalAlign = 'left'; dock.style.verticalAlign = 'bottom';

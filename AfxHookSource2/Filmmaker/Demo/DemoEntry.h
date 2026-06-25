@@ -30,7 +30,7 @@ struct ScoreboardPlayer {
 	int score = 0;
 	int mvps = 0;
 	int teamIndex = 0; // 0 = first team group, 1 = second team group
-	std::vector<RoundStat> perRound; // empty until a full demofile parse has run
+	std::vector<RoundStat> perRound; // empty until a full demo parse has run
 };
 
 // One recorded loadout event from the demo pre-scan (.fmjson v5): a weapon/C4 drop or
@@ -49,6 +49,7 @@ struct DemoEntry {
 	std::string map;          // map name from the .dem header (may be empty)
 	int durationSeconds = 0;  // playback length from the .dem header (0 = unknown)
 	int64_t dateModified = 0; // file last-write time, unix seconds
+	int64_t matchTime = 0;    // when the match was actually played (.dem.info matchtime), unix seconds; 0 = unknown
 
 	bool hasScoreboard = false;
 	bool hasRounds = false; // a full parse produced the per-round timeline

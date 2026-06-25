@@ -91,7 +91,7 @@ inline const char* kCameraEditorJs = R"EDJS(
 R"EDJS(
     // ---- root: full-screen, non-hittest. Children draw bottom -> top. ----
     var root = $.CreatePanel('Panel', ctx, 'CamEditorRoot', {});
-    root.hittest = false; root.style.width = '100%'; root.style.height = '100%'; root.style.zIndex = '53';
+    root.hittest = false; root.style.width = '100%'; root.style.height = '100%'; root.style.zIndex = '53'; // z-layer map: PanoramaBridge.h
 
     var confirmOverlay = mk('Panel', root); confirmOverlay.visible = false; confirmOverlay.hittest = true;
     confirmOverlay.style.width = '100%'; confirmOverlay.style.height = '100%'; confirmOverlay.style.zIndex = '200';
@@ -202,6 +202,11 @@ R"EDJS(
     inspector.style.paddingTop = '14px'; inspector.style.paddingBottom = '14px';
     inspector.style.paddingLeft = '14px'; inspector.style.paddingRight = '14px';
     inspector.style.fontFamily = S.font;
+    // Scroll the WHOLE inspector vertically. Without this, once the Follow panel grows
+    // (target dropdown / event list / advanced tracking open) the lower controls fall
+    // off the bottom of the screen with no way to reach them. 'squish scroll' = no
+    // horizontal scroll, vertical scrollbar + wheel when the content overflows.
+    inspector.style.overflow = 'squish scroll';
 
     // Aspect-ratio letterbox: the live preview is sized to the GAME's aspect ratio
     // (rootW/rootH) and CENTRED in the available area (screen minus the right inspector and
@@ -330,8 +335,11 @@ R"EDJS(
 
     var pickRow = row(followSec);
     var nearestBtn = btn(pickRow, 'Select Nearest', function () { cmd('mirv_filmmaker follow nearest'); }, S.value);
-    nearestBtn.style.width = 'fill-parent-flow(1.0)';
-    var refreshHint = lbl(pickRow, 'live list', S.dim, 10); refreshHint.style.verticalAlign = 'center';
+    nearestBtn.style.width = 'fit-children';   // small button; closest target is shown to its right
+    var nearestNameLbl = lbl(pickRow, '', S.value, 11);
+    nearestNameLbl.style.verticalAlign = 'center'; nearestNameLbl.style.marginLeft = '10px';
+    nearestNameLbl.style.width = 'fill-parent-flow(1.0)';
+    nearestNameLbl.style.whiteSpace = 'nowrap'; nearestNameLbl.style.textOverflow = 'ellipsis';
 
     var targetDropBtn = btn(followSec, 'Target  ▾', function () {
       targetDropdownOpen = !targetDropdownOpen;
@@ -343,9 +351,7 @@ R"EDJS(
     candidateList.style.width = '100%'; candidateList.style.marginTop = '7px';
     candidateList.style.paddingTop = '5px'; candidateList.style.paddingBottom = '5px';
     candidateList.style.paddingLeft = '5px'; candidateList.style.paddingRight = '5px';
-    candidateList.style.backgroundColor = S.bgSoft; candidateList.style.border = '1px solid ' + S.panelBorder;
-    // Cap the height and allow scrolling so a long grenade list (recent + nearby ticks) is browsable.
-    candidateList.style.maxHeight = '260px'; candidateList.style.overflow = 'squish scroll';
+    candidateList.style.backgroundColor = '#14181eff'; candidateList.style.border = '1px solid ' + S.panelBorder;
     candidateList.visible = false;
     var candidateSig = '';
     var pendingCandidate = null;
@@ -401,6 +407,8 @@ R"EDJS(
       })(list[j]);
     }
 
+)EDJS"
+R"EDJS(
     // ---- Weapon source: held vs dropped (Weapon type only) --------------
     var srcRow = row(followSec); srcRow.style.marginTop = '7px';
     var srcLabel = lbl(srcRow, 'Source', S.label, 10); srcLabel.style.width = '52px'; srcLabel.style.verticalAlign = 'center';
@@ -420,8 +428,7 @@ R"EDJS(
     attachMenu.style.width = '100%'; attachMenu.style.marginTop = '3px';
     attachMenu.style.paddingTop = '4px'; attachMenu.style.paddingBottom = '4px';
     attachMenu.style.paddingLeft = '4px'; attachMenu.style.paddingRight = '4px';
-    attachMenu.style.backgroundColor = S.bgSoft; attachMenu.style.border = '1px solid ' + S.panelBorder;
-    attachMenu.style.maxHeight = '200px'; attachMenu.style.overflow = 'squish scroll';
+    attachMenu.style.backgroundColor = '#14181eff'; attachMenu.style.border = '1px solid ' + S.panelBorder;
     attachMenu.visible = false;
     var attachSig = '';
     function renderAttachmentMenu(f) {
@@ -451,7 +458,6 @@ R"EDJS(
     eventList.style.paddingTop = '4px'; eventList.style.paddingBottom = '4px';
     eventList.style.paddingLeft = '4px'; eventList.style.paddingRight = '4px';
     eventList.style.backgroundColor = S.bgSoft; eventList.style.border = '1px solid ' + S.panelBorder;
-    eventList.style.maxHeight = '150px'; eventList.style.overflow = 'squish scroll';
     var eventSig = '';
     function renderEvents(f) {
       var list = (f && f.events) || [];
@@ -548,6 +554,8 @@ R"EDJS(
       var b = btn(parent, label, function () {
         var f = st && st.follow; cmd('mirv_filmmaker follow ' + command + ' ' + ((f && f[key]) ? 0 : 1));
       }, S.value);
+      // Full-width, stacked with breathing room (they were flush against each other).
+      b.style.width = '100%'; b.style.marginRight = '0px'; b.style.marginTop = '7px';
       optionBtns[key] = b; return b;
     }
     followToggle(advancedPanel, 'autoDead', 'Auto-disable on death', 'autodead');
@@ -1031,7 +1039,15 @@ R"EDJS(
       }
       modeHint.text = attachModeOn ? 'Attach: the camera rides the target (offset / rotation / FOV).'
                                    : 'Lock-on: a placed camera rotates to track the target.';
-      // Target-type presets (active = type + mode match).
+      // Target-type presets (active = type + mode match). Lock-on lists only the
+      // lock-on-able types (Player / Grenade / Weapon-C4); Attach lists the ride-along
+      // types (Player Bone / Weapon Attach). Hiding the rest keeps the row uncluttered
+      // and makes the two camera models read as distinct workflows.
+      typeBtns[0].visible = !attachModeOn;  // Player (lock-on)
+      typeBtns[1].visible = !attachModeOn;  // Grenade (lock-on)
+      typeBtns[2].visible = !attachModeOn;  // Weapon / C4 (lock-on)
+      typeBtns[3].visible = attachModeOn;   // Player Bone (attach)
+      typeBtns[4].visible = attachModeOn;   // Weapon Attach (attach)
       for (var ft = 0; ft < typeBtns.length; ft++) {
         var activeType = typeBtns[ft].__match(f.type, f.mode);
         typeBtns[ft].style.backgroundColor = activeType ? S.btnOn : S.btnBg;
@@ -1053,10 +1069,17 @@ R"EDJS(
         : (f.message ? f.message
         : (!attachModeOn && f.distanceLevel >= 3 ? 'Very far / likely outside the useful shot area.'
         : (!attachModeOn && f.distanceLevel >= 2 ? 'Selected target is far from this camera.' : '')));
-      // Target selector.
-      nearestBtn.__lbl.text = (f.type === 1 ? 'Select Nearest Throw' : 'Select Nearest') +
-        (f.targetName ? (' - ' + f.targetName) : '');
-      targetDropBtn.__lbl.text = 'Target: ' + (f.targetName || 'none');
+      // Target selector. Small "Select Nearest" button; the closest candidate (list is
+      // distance-sorted, so [0]) is named to its right.
+      nearestBtn.__lbl.text = (f.type === 1) ? 'Nearest Throw' : 'Select Nearest';
+      var nearestCand = (f.candidates && f.candidates.length) ? f.candidates[0] : null;
+      nearestNameLbl.text = nearestCand
+        ? ('closest: ' + nearestCand.name + (nearestCand.team && nearestCand.team !== '-' ? '  ·  ' + nearestCand.team : ''))
+        : 'closest: —';
+      nearestNameLbl.style.color = nearestCand ? S.value : S.dim;
+      // Caret reflects open/closed; show N/A (not "none"/"Missing player") when nothing valid.
+      var tName = (f.targetValid && f.targetName) ? f.targetName : 'N/A';
+      targetDropBtn.__lbl.text = 'Target: ' + tName + '   ' + (targetDropdownOpen ? '▴' : '▾');
       candidateList.visible = targetDropdownOpen;
       renderCandidates(f);
       // Weapon source (Weapon type only).
@@ -1070,7 +1093,9 @@ R"EDJS(
       attachRow.visible = attachModeOn;
       if (!attachModeOn) attachMenu.visible = false;
       renderAttachmentMenu(f);
-      attachSelect.__lbl.text = (f.attachment || 'head');
+      // Show the chosen point only once a target is selected; otherwise N/A (it used to
+      // always read "head").
+      attachSelect.__lbl.text = haveTarget ? (f.attachment || 'N/A') : 'N/A';
       // Events + Preview Tick (grenade throws / weapon-C4 drops).
       var eventsRelevant = (f.type === 1 || f.type === 2);
       eventsLabel.visible = eventsRelevant;

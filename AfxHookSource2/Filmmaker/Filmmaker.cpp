@@ -39,6 +39,7 @@ FilmmakerMenu g_menu;
 std::once_flag g_initOnce;
 std::atomic<bool> g_rescanRequested{ false };
 std::atomic<bool> g_pickerOpen{ false };
+std::atomic<bool> g_shuttingDown{ false }; // set by Shutdown(); picker thread checks before committing
 
 std::mutex g_pendingMutex;
 std::vector<std::wstring> g_pendingFolders;
@@ -114,10 +115,13 @@ void RequestAddFolder() {
 	if (!g_pickerOpen.compare_exchange_strong(expected, true))
 		return; // a picker is already open
 
+	// The folder dialog is modal and can't be cleanly joined on shutdown, so this stays
+	// detached; instead it checks g_shuttingDown before touching the shared queue so a quit
+	// while the picker is open can't push into (soon-to-be) torn-down state.
 	std::thread([] {
 		std::wstring picked;
 		const bool ok = PickFolderBlocking(picked);
-		if (ok && !picked.empty()) {
+		if (ok && !picked.empty() && !g_shuttingDown.load()) {
 			std::lock_guard<std::mutex> lock(g_pendingMutex);
 			g_pendingFolders.push_back(picked);
 		}
@@ -244,6 +248,8 @@ void RunMainThreadFrame() {
 }
 
 void Shutdown() {
+	g_shuttingDown.store(true);
+	FollowCameraRef().Shutdown(); // cancel + join the background loadout-event loader
 	g_library.Shutdown();
 }
 

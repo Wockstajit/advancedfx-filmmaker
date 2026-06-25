@@ -67,19 +67,21 @@ function Send([string]$cmd, [double]$seconds = $ReadSeconds) {
     return Drain $seconds
 }
 
-# Single-line Panorama JS (SINGLE quotes only) that locates the Watch page and
-# emits a parseable report line. Optionally clicks a navbar tab first.
-$reportJs = @'
-var r=$.GetContextPanel();while(r.GetParent())r=r.GetParent();var w=r.FindChildTraverse('JsWatchContent');if(!w){$.Msg('[VERIFY] nopage=1\n');}else{var dl=w.FindChildTraverse('JsDownloaded');var b=w.FindChildTraverse('FmDownloadedBody');var ym=w.FindChildTraverse('JsYourMatches');var list=w.FindChildTraverse('FmMatchList');var tiles=list?list.GetChildCount():-1;var first=list&&tiles>0?list.GetChild(0):null;var styled=first?(first.FindChildTraverse('mapname')?1:0):-1;var sb=b&&b.FindChildTraverse('Scoreboard')?1:0;var rows=b?( (b.FindChildTraverse('players-table-CT')?b.FindChildTraverse('players-table-CT').GetChildCount():0)+(b.FindChildTraverse('players-table-TERRORIST')?b.FindChildTraverse('players-table-TERRORIST').GetChildCount():0)):-1;$.Msg('[VERIFY] dlHide='+(dl&&dl.BHasClass('WatchMenu--Hide')?1:0)+' ymHide='+(ym&&ym.BHasClass('WatchMenu--Hide')?1:0)+' bodyExists='+(b?1:0)+' tiles='+tiles+' styledTile='+styled+' scoreboard='+sb+' playerRows='+rows+'\n');}
-'@ -replace "`r?`n", ' '
+# The netcon console truncates any single command at 256 bytes, so a long
+# inline ui_eval payload gets cut off mid-script and silently does nothing.
+# Instead we drive small helpers baked into the injected UI ($.Filmmaker.*),
+# which run with no length limit (see FilmmakerGuiJs.h "automation hooks").
+$reportJs = '$.Filmmaker.report()'
 
 function ClickTabJs([string]$which) {
-    # which = 'YourMatches' | 'Downloaded'
-    if ($which -eq 'YourMatches') {
-        return "var r=`$.GetContextPanel();while(r.GetParent())r=r.GetParent();var b=r.FindChildTraverse('WatchNavBarYourMatches');if(b){b.checked=true;`$.DispatchEvent('Activated',b);`$.Msg('[CLICK] YourMatches\n');}"
-    } else {
-        return "var r=`$.GetContextPanel();while(r.GetParent())r=r.GetParent();var w=r.FindChildTraverse('JsWatchContent');var nav=w&&w.FindChildTraverse('watch-navbar');var c=nav&&nav.GetChild(0);var b=c&&c.GetChild(1);if(b){b.checked=true;`$.DispatchEvent('Activated',b);`$.Msg('[CLICK] Downloaded\n');}"
-    }
+    # which = 'YourMatches' | 'Downloaded'.
+    # gotoTab performs the REAL native-equivalent navigation (toggles the
+    # WatchMenu--Hide class + runs our Downloaded takeover). A synthetic
+    # 'Activated' on the navbar RadioButton only highlights it; it does NOT
+    # trigger the native mainmenu_watch.NavigateToTab, so the tab body never
+    # actually switched -- that was the "only the button highlights" bug.
+    if ($which -eq 'YourMatches') { return "`$.Filmmaker.gotoTab('yourmatches')" }
+    return "`$.Filmmaker.gotoTab('downloaded')"
 }
 
 function Eval([string]$js, [double]$seconds = $ReadSeconds) {
@@ -158,9 +160,9 @@ Check 'Tabs stayed isolated across repeated toggling' $toggleOk
 #    checked row.
 Write-Host "`n--- Step 5: left-list stability (30s under a scan) ---" -ForegroundColor Cyan
 Eval (ClickTabJs 'Downloaded') 0.8 | Out-Null; Start-Sleep -Milliseconds 400
-$selJs = "var r=`$.GetContextPanel();while(r.GetParent())r=r.GetParent();var w=r.FindChildTraverse('JsWatchContent');var l=w&&w.FindChildTraverse('FmMatchList');var t=l&&l.GetChildCount()>1?l.GetChild(1):null;if(t){t.checked=true;`$.DispatchEvent('Activated',t);}l&&l.GetChildCount()>0&&l.GetChild(0).SetAttributeInt('fmtag',77);`$.Msg('[SEL] done\n');"
+$selJs = "`$.Filmmaker.tagFirst(77)"
 Eval $selJs 0.8 | Out-Null; Start-Sleep -Milliseconds 400
-$stabJs = "var r=`$.GetContextPanel();while(r.GetParent())r=r.GetParent();var w=r.FindChildTraverse('JsWatchContent');var l=w&&w.FindChildTraverse('FmMatchList');var n=l?l.GetChildCount():-1;var tag=(l&&n>0)?l.GetChild(0).GetAttributeInt('fmtag',-1):-1;var ck=-1;if(l)for(var i=0;i<n;i++){if(l.GetChild(i).checked){ck=i;break;}}`$.Msg('[STAB] tiles='+n+' tag='+tag+' checked='+ck+'\n');"
+$stabJs = "`$.Filmmaker.stab()"
 function StabParse([string]$txt) { $m=[regex]::Match($txt,'\[STAB\]\s+(.+)'); $h=@{}; if($m.Success){foreach($kv in ($m.Groups[1].Value -split '\s+')){$p=$kv -split '=',2; if($p.Count -eq 2){$h[$p[0]]=$p[1]}}}; return $h }
 $base = StabParse (Eval $stabJs 0.8)
 Shot '4_selected.png'
@@ -179,14 +181,17 @@ Check 'Tile count unchanged over 30s' ($stable)
 Check 'First row was NOT recreated (tag survived -> scroll preserved)' ($stable)
 Check 'Selected demo stayed selected over 30s' ($stable)
 
-# 6) Buttons: both present, visible, in the same flow row (so they cannot overlap).
-Write-Host "`n--- Step 6: refresh + add-demo buttons ---" -ForegroundColor Cyan
-$btnJs = "var r=`$.GetContextPanel();while(r.GetParent())r=r.GetParent();var w=r.FindChildTraverse('JsWatchContent');var ref=w&&w.FindChildTraverse('FmRefreshBtn');var add=w&&w.FindChildTraverse('FmAddFolderBtn');var bar=w&&w.FindChildTraverse('FmNavBtns');`$.Msg('[BTN] ref='+(ref?1:0)+' refVis='+(ref&&ref.visible?1:0)+' add='+(add?1:0)+' addVis='+(add&&add.visible?1:0)+' sameRow='+((bar&&ref&&add&&ref.GetParent()===bar&&add.GetParent()===bar)?1:0)+'\n');"
+# 6) Buttons: all present, visible, in the same flow row, with images passing
+# hover/click through to the full 40x40 Button hitbox.
+Write-Host "`n--- Step 6: demo toolbar buttons ---" -ForegroundColor Cyan
+$btnJs = "`$.Filmmaker.btnReport()"
 $btn = Parse (Eval $btnJs 0.8)
 Shot '6_buttons.png'
+Check 'Search button present + visible' ($btn['search'] -eq '1' -and $btn['searchVis'] -eq '1')
 Check 'Refresh button present + visible' ($btn['ref'] -eq '1' -and $btn['refVis'] -eq '1')
 Check 'Add Demo button present + visible' ($btn['add'] -eq '1' -and $btn['addVis'] -eq '1')
-Check 'Both buttons share the flow row (cannot overlap)' ($btn['sameRow'] -eq '1')
+Check 'All buttons share the flow row (cannot overlap)' ($btn['sameRow'] -eq '1')
+Check 'Toolbar icons do not steal hover/click hit testing' ($btn['searchImgNoHit'] -eq '1' -and $btn['refImgNoHit'] -eq '1' -and $btn['addImgNoHit'] -eq '1')
 
 $client.Close()
 

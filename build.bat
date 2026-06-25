@@ -11,8 +11,8 @@ REM Some hardened shells set this, which stops cmd from finding ShaderBuilder.ex
 REM in its own working directory during the shader build step. Clear it.
 set "NoDefaultCurrentDirectoryInExePath="
 
-REM Ensure Rust/Cargo and gettext are reachable for the build.
-set "PATH=%USERPROFILE%\.cargo\bin;%LOCALAPPDATA%\Programs\gettext-iconv\bin;%PATH%"
+REM Ensure Rust/Cargo, gettext and Go are reachable for the build.
+set "PATH=%USERPROFILE%\.cargo\bin;%LOCALAPPDATA%\Programs\gettext-iconv\bin;%ProgramFiles%\Go\bin;%PATH%"
 
 echo === Locating Visual Studio 2022 ===
 set "VSWHERE=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe"
@@ -58,18 +58,33 @@ if errorlevel 1 (
 )
 
 echo.
-echo === Publishing FilmmakerDemoInfo helper (.dem -^> scoreboard JSON) ===
-REM The filmmaker demo browser shells out to this .NET tool for player names.
-REM Published next to AfxHookSource2.dll so it is found at runtime.
-dotnet publish "%~dp0FilmmakerDemoInfo\FilmmakerDemoInfo.csproj" -c Release -o "%~dp0build\staging-release\bin\x64\FilmmakerDemoInfo"
+echo === Building FilmmakerDemoInfo helper (.dem -^> scoreboard JSON, Go/demoinfocs) ===
+REM The filmmaker demo browser shells out to this tool for real player names, the
+REM correct end-of-match team sides, MVPs and the per-round timeline. It is a single
+REM self-contained Go binary (no .NET runtime needed) built next to AfxHookSource2.dll.
+where go >nul 2>nul
 if errorlevel 1 (
     echo.
-    echo WARNING: FilmmakerDemoInfo helper failed to publish; demo names will be
-    echo unavailable but the rest of HLAE built fine.
+    echo WARNING: 'go' not found on PATH; the demo-info helper was NOT rebuilt.
+    echo Install Go ^(https://go.dev/dl/^) so build.bat can produce FilmmakerDemoInfo.exe.
+) else (
+    set "FM_HELPER_DIR=%~dp0build\staging-release\bin\x64\FilmmakerDemoInfo"
+    if exist "!FM_HELPER_DIR!" rmdir /s /q "!FM_HELPER_DIR!"
+    mkdir "!FM_HELPER_DIR!"
+    pushd "%~dp0FilmmakerDemoInfoGo"
+    go build -o "!FM_HELPER_DIR!\FilmmakerDemoInfo.exe" .
+    if errorlevel 1 (
+        echo.
+        echo WARNING: FilmmakerDemoInfo helper failed to build; demo names/sides/MVPs
+        echo will be unavailable but the rest of HLAE built fine.
+    )
+    popd
 )
 
 echo.
 echo === BUILD OK ===
 echo Output: %~dp0build\staging-release\bin\HLAE.exe
-echo Run launch.bat to start it.
-exit /b 0
+echo Starting live dashboard / CS2 in 1 second...
+timeout /t 1 /nobreak >nul
+call "%~dp0automation\live.bat"
+exit /b %ERRORLEVEL%

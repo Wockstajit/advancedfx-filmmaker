@@ -8,8 +8,8 @@ assert every mode over the netconsole **without the physical mouse**. Drive with
 
 1. **Build** — `build.bat` from the repo root → `BUILD OK`. Confirms:
    - `build\staging-release\bin\HLAE.exe` + `build\staging-release\bin\x64\AfxHookSource2.dll`
-   - `build\staging-release\bin\x64\FilmmakerDemoInfo\FilmmakerDemoInfo.exe` (the v5 helper —
-     publish must succeed, not just warn).
+   - `build\staging-release\bin\x64\FilmmakerDemoInfo\FilmmakerDemoInfo.exe` (the Go demo-info
+     helper — the `go build` step must succeed, not just warn).
 2. **A demo** with players, grenades, weapon drops and a C4 (any competitive demo).
 3. PowerShell 5+ (the harness scripts are cross-version).
 

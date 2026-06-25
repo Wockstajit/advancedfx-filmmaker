@@ -71,7 +71,7 @@ inline const char* kMovieHudJs = R"MHJS(
     root.hittest = false;
     root.style.width = '100%';
     root.style.height = '100%';
-    root.style.zIndex = '50';
+    root.style.zIndex = '50'; // z-layer map: PanoramaBridge.h
 
     // Card factory: a scoreboard-look panel with a soft bottom edge. Position
     // (align/margins) is set by the caller. `origin` is the transform-origin the

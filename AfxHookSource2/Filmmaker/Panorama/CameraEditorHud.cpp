@@ -11,7 +11,7 @@
 #include "../../DeathMsg.h" // AfxHookSource2_GetPanoramaHudPanel + PanoramaUIPanel offsets
 #include "../../MirvTime.h"
 #include "../../ViewportScaler.h" // AfxViewportScaler scaled-preview bridge
-#include "../../WrpConsole.h" // advancedfx::Message (temporary diagnostics)
+#include "../../WrpConsole.h" // advancedfx::Message (debug-overlay-gated [vpscale] diagnostics)
 
 #include "../../../deps/release/prop/AfxHookSource/SourceSdkShared.h"
 #include "../../../deps/release/prop/cs2/sdk_src/public/cdll_int.h"
@@ -349,13 +349,15 @@ void CameraEditorHud::UpdateScaleRequest() {
 
 	const bool active = m_scaleEnabled && valid;
 
-	// Diagnostics: log only when the decision inputs CHANGE (no per-frame spam).
+	// Diagnostics: only while the debug overlay is on, and only when the decision inputs
+	// CHANGE (no per-frame spam, silent in normal use).
 	static int s_prev = -1;
 	int now = (m_scaleEnabled ? 1 : 0) | (valid ? 2 : 0);
 	if (now != s_prev) {
 		s_prev = now;
-		advancedfx::Message("[vpscale] req: scaleOn=%d raw='%s' parsed=%d valid=%d\n",
-			(int)m_scaleEnabled, pr.c_str(), (int)parsed, (int)valid);
+		if (m_debugOverlay)
+			advancedfx::Message("[vpscale] req: scaleOn=%d raw='%s' parsed=%d valid=%d\n",
+				(int)m_scaleEnabled, pr.c_str(), (int)parsed, (int)valid);
 	}
 
 	AfxViewportScaler::SetRequest(active, x0, y0, x1, y1);

@@ -1,28 +1,29 @@
-# Demo Event Pre-scan — `.fmjson` v5
+# Demo Event Pre-scan — `.fmjson` v6
 
 The Follow camera's **Events** list (weapon/C4 drops + pickups) comes from a one-time demo
 pre-scan, cached next to the demo as `<demo>.dem.fmjson`. CS2 demos have no random access
-to game events, so the tool parses the whole demo once (in the C# helper) and reads the
+to game events, so the tool parses the whole demo once (in the Go helper) and reads the
 cached JSON thereafter.
 
 ## Schema version
 
-`SchemaVersion` / `kSchemaVersion` = **5**. The writer and reader must agree:
+`schemaVersion` / `kSchemaVersion` = **6**. The writer and reader must agree:
 
-- C# writer: [Program.cs:70](../FilmmakerDemoInfo/Program.cs:70) (`const int SchemaVersion = 5;`)
-- C++ reader: [DemoInfoHelper.cpp:16](../AfxHookSource2/Filmmaker/Demo/DemoInfoHelper.cpp:16) (`constexpr int kSchemaVersion = 5;`)
+- Go writer: [main.go:35](../FilmmakerDemoInfoGo/main.go:35) (`const schemaVersion = 6`)
+- C++ reader: [DemoInfoHelper.cpp:20](../AfxHookSource2/Filmmaker/Demo/DemoInfoHelper.cpp:20) (`constexpr int kSchemaVersion = 6;`)
 
 A cached file with a different `v` is treated as stale and re-parsed
-([DemoInfoHelper.cpp:224](../AfxHookSource2/Filmmaker/Demo/DemoInfoHelper.cpp:224)). **If you
+([DemoInfoHelper.cpp:281](../AfxHookSource2/Filmmaker/Demo/DemoInfoHelper.cpp:281)). **If you
 change the schema, bump both constants together.**
 
-> v4 → v5 added the top-level `"events"` array. Existing v4 caches auto-regenerate on next
-> read (no manual migration).
+> The top-level `"events"` array was added in v5; v6 switched the parser to
+> demoinfocs-golang. A cache with an older `v` auto-regenerates on next read (no manual
+> migration).
 
 ## Event JSON shape
 
-The `.fmjson` gains a top-level array
-([Program.cs:312](../FilmmakerDemoInfo/Program.cs:312)):
+The `.fmjson` carries a top-level array
+([main.go:374](../FilmmakerDemoInfoGo/main.go:374)):
 
 ```json
 "events": [
@@ -35,26 +36,26 @@ The `.fmjson` gains a top-level array
 
 | Field | Meaning |
 |---|---|
-| `tick` | `demo.CurrentDemoTick` when the event fired — the seek target. |
+| `tick` | the in-game tick when the event fired — the seek target. |
 | `type` | `weapon_drop` · `bomb_dropped` · `bomb_pickup` · `bomb_planted` · `item_pickup`. |
 | `item` | e.g. `weapon_ak47`, `c4`, or `""`. |
 | `accountId` | Steam account id (32-bit) of the player involved; `0` = unknown. |
 
-### Event sources (C#)
+### Event sources (Go)
 
-Subscribed on `demo.Source1GameEvents` inside the full-parse block (skipped in
-names-fast mode), [Program.cs:247–251](../FilmmakerDemoInfo/Program.cs:247):
+Registered with `p.RegisterEventHandler` during the full parse,
+[main.go:231–307](../FilmmakerDemoInfoGo/main.go:231):
 
-| Recorded type | demofile-net event | Notes |
+| Recorded type | demoinfocs event | Notes |
 |---|---|---|
-| `weapon_drop` | `PlayerDeath` | CS2 has **no** `weapon_drop` game event, so the victim's death tick is used as the dominant drop moment. |
-| `item_pickup` | `ItemPickup` | Only non-`Silent` pickups. |
-| `bomb_dropped` | `BombDropped` | Player via `.Player`. |
-| `bomb_pickup` | `BombPickup` | `Source1BombPickupEvent` exposes no `.Player`; the controller is reached via `e.PlayerPawn?.Controller`. |
-| `bomb_planted` | `BombPlanted` | — |
+| `weapon_drop` | `events.Kill` | CS2 has **no** `weapon_drop` game event, so the victim's death tick is used as the dominant drop moment. |
+| `item_pickup` | `events.ItemPickup` | Skipped during freezetime (the automatic round-start weapon grants), so only real mid-round ground pickups are kept. |
+| `bomb_dropped` | `events.BombDropped` | Player via `e.Player`. |
+| `bomb_pickup` | `events.BombPickup` | Player via `e.Player`. |
+| `bomb_planted` | `events.BombPlanted` | Player via `e.Player`. |
 
-`AddEvent` ([Program.cs:104](../FilmmakerDemoInfo/Program.cs:104)) stamps each with
-`demo.CurrentDemoTick` and the account id.
+`addEvent` ([main.go:182](../FilmmakerDemoInfoGo/main.go:182)) stamps each with
+`p.GameState().IngameTick()` and the account id.
 
 ## C++ side
 
@@ -62,7 +63,7 @@ names-fast mode), [Program.cs:247–251](../FilmmakerDemoInfo/Program.cs:247):
   ([DemoEntry.h:38](../AfxHookSource2/Filmmaker/Demo/DemoEntry.h:38)); `DemoEntry` /
   `DemoHelperResult` carry a `std::vector<DemoEvent> events`.
 - Parsed from the `"events"` array in
-  [DemoInfoHelper.cpp:184](../AfxHookSource2/Filmmaker/Demo/DemoInfoHelper.cpp:184).
+  [DemoInfoHelper.cpp:229](../AfxHookSource2/Filmmaker/Demo/DemoInfoHelper.cpp:229).
 - The Follow camera loads them lazily on a background thread keyed on the engine's
   `GetDemoFilePath()`
   ([FollowCamera.cpp:1290 `EnsureEventsLoaded`](../AfxHookSource2/Filmmaker/Movie/FollowCamera.cpp:1290)),
@@ -79,7 +80,7 @@ background load):
 del "<path-to-demo>.dem.fmjson"
 ```
 
-The helper exe must be the freshly published one — it ships to
+The helper exe must be the freshly built one — it ships to
 `build\staging-release\bin\x64\FilmmakerDemoInfo\FilmmakerDemoInfo.exe` via `build.bat`
-(the `dotnet publish` step). A names-fast run (scoreboard names only) deliberately skips
-events, so the event list requires the full parse.
+(the `go build` step). The Go helper always does a full parse, so the event list is always
+populated.

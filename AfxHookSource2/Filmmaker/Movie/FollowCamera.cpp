@@ -116,6 +116,75 @@ std::string GrenadeTypeName(const std::string& className) {
 	return "Grenade";
 }
 
+// Friendly weapon name from an engine class (C_AK47, C_WeaponM4A1, ...) so the UI
+// reads "AK-47" / "M4A4" / "M4A1-S" instead of the raw class. Order matters: test the
+// more specific variants (silencer) before the base token they contain.
+std::string PrettyWeaponName(const std::string& className) {
+	const std::string s = Lower(className);
+	auto has = [&](const char* t) { return s.find(t) != std::string::npos; };
+	if (has("m4a1_silencer") || has("m4a1s")) return "M4A1-S";
+	if (has("m4a1") || has("m4a4"))           return "M4A4";
+	if (has("usp"))                            return "USP-S";
+	if (has("hkp2000") || has("p2000"))        return "P2000";
+	if (has("ak47"))                           return "AK-47";
+	if (has("awp"))                            return "AWP";
+	if (has("ssg08"))                          return "SSG 08";
+	if (has("scar20"))                         return "SCAR-20";
+	if (has("g3sg1"))                          return "G3SG1";
+	if (has("sg556") || has("sg553"))          return "SG 553";
+	if (has("aug"))                            return "AUG";
+	if (has("galil"))                          return "Galil AR";
+	if (has("famas"))                          return "FAMAS";
+	if (has("deagle") || has("deserteagle"))   return "Desert Eagle";
+	if (has("revolver"))                       return "R8 Revolver";
+	if (has("elite"))                          return "Dual Berettas";
+	if (has("fiveseven"))                      return "Five-SeveN";
+	if (has("glock"))                          return "Glock-18";
+	if (has("p250"))                           return "P250";
+	if (has("cz75"))                           return "CZ75-Auto";
+	if (has("tec9"))                           return "Tec-9";
+	if (has("p90"))                            return "P90";
+	if (has("bizon"))                          return "PP-Bizon";
+	if (has("mac10"))                          return "MAC-10";
+	if (has("mp5sd"))                          return "MP5-SD";
+	if (has("mp7"))                            return "MP7";
+	if (has("mp9"))                            return "MP9";
+	if (has("ump"))                            return "UMP-45";
+	if (has("nova"))                           return "Nova";
+	if (has("xm1014"))                         return "XM1014";
+	if (has("sawedoff"))                       return "Sawed-Off";
+	if (has("mag7"))                           return "MAG-7";
+	if (has("m249"))                           return "M249";
+	if (has("negev"))                          return "Negev";
+	if (has("taser") || has("zeus"))           return "Zeus x27";
+	if (has("knife") || has("bayonet"))        return "Knife";
+	if (has("c4"))                             return "C4";
+	// Fallback: drop the engine prefix and show whatever class remains.
+	std::string base = className;
+	if (s.rfind("c_weapon", 0) == 0)      base = className.substr(8);
+	else if (s.rfind("c_", 0) == 0)       base = className.substr(2);
+	return base.empty() ? "Weapon" : base;
+}
+
+// Human-readable name for any followed entity: the player's name for a pawn, a friendly
+// weapon/grenade name otherwise. Used for the "Target:" label so it reads "jOAO" or
+// "AK-47" instead of "CSPlayerPawn" / "C_AK47".
+std::string EntityFriendlyName(CEntityInstance* entity) {
+	if (!entity) return "";
+	if (entity->IsPlayerPawn()) {
+		const auto ch = entity->GetPlayerControllerHandle();
+		CEntityInstance* controller = ch.IsValid() ? EntityAt(ch.GetEntryIndex()) : nullptr;
+		const char* name = controller ? controller->GetPlayerName() : nullptr;
+		return (name && *name) ? name : "Player";
+	}
+	const std::string cls = EntityClass(entity);
+	if (cls.empty()) return "Entity";
+	if (IsBombClass(cls)) return "C4";
+	if (IsGrenadeClass(cls)) return GrenadeTypeName(cls);
+	if (IsWeaponClass(cls)) return PrettyWeaponName(cls);
+	return cls;
+}
+
 void ResolveOwner(CEntityInstance* entity, int& ownerIndex, std::string& ownerName, int& ownerTeam) {
 	ownerIndex = -1;
 	ownerName.clear();
@@ -239,7 +308,9 @@ public:
 	}
 	std::string GetDisplayName() override {
 		const std::string cls = EntityClass(EntityAt(m_index));
-		return cls.empty() ? "Entity" : cls;
+		if (cls.empty()) return "Entity";
+		if (m_type == FollowTargetType::Grenade) return GrenadeTypeName(cls);
+		return PrettyWeaponName(cls);
 	}
 	FollowTargetStatus GetStatus() override {
 		return IsValid() ? FollowTargetStatus::Active : FollowTargetStatus::Missing;
@@ -254,10 +325,12 @@ class AttachmentTargetProvider final : public EntityTargetProvider {
 public:
 	AttachmentTargetProvider(int index, const std::string& attachment)
 		: EntityTargetProvider(index, FollowTargetType::Weapon), m_attachment(attachment) {}
-	bool IsValid() override {
-		CEntityInstance* entity = EntityAt(m_index);
-		return entity && entity->LookupAttachment(m_attachment.c_str()) != 0;
-	}
+	// Attach rides whatever entity is selected (a player pawn OR a weapon), so validity
+	// is simply "the entity still exists" -- NOT a weapon-class check (that broke Player
+	// Bone attach) and NOT a strict attachment lookup (world weapon models often lack
+	// muzzle/shell points, which made Live Preview bail with "target disappeared"). The
+	// exact point is resolved in GetWorldTransform, with an origin fallback.
+	bool IsValid() override { return EntityAt(m_index) != nullptr; }
 	FollowVec3 GetWorldPosition() override {
 		FollowVec3 pos; FollowAngles ang;
 		GetWorldTransform(pos, ang);
@@ -275,10 +348,15 @@ public:
 			ang = FollowQuatToAngles(q.x, q.y, q.z, q.w);
 			return true;
 		}
+		// Attachment point not on this model -- fall back to the weapon origin so the
+		// camera still rides it (caller orients from motion). Better than dropping.
+		ReadOrigin(entity, pos);
 		return false;
 	}
+	// Just the entity name (player or weapon); the attach point is shown separately in the
+	// "Attach pt" row, so appending "/ head" here only made the Target label noisy.
 	std::string GetDisplayName() override {
-		return EntityTargetProvider::GetDisplayName() + " / " + m_attachment;
+		return EntityFriendlyName(EntityAt(m_index));
 	}
 private:
 	std::string m_attachment;
@@ -302,8 +380,9 @@ public:
 		if (wi < 0) return false;
 		CEntityInstance* weapon = EntityAt(wi);
 		if (!weapon) return false;
-		if (m_attachment.empty()) return true;
-		return weapon->LookupAttachment(m_attachment.c_str()) != 0;
+		// Attachment is optional: GetWorldTransform rides the weapon origin when the named
+		// point (muzzle/etc.) isn't on the model, so don't invalidate on a missing point.
+		return true;
 	}
 	FollowVec3 GetWorldPosition() override {
 		FollowVec3 pos; FollowAngles ang;
@@ -332,7 +411,7 @@ public:
 	std::string GetDisplayName() override {
 		CEntityInstance* weapon = EntityAt(ActiveWeaponIndex());
 		const std::string cls = EntityClass(weapon);
-		std::string base = cls.empty() ? "Held weapon" : cls;
+		std::string base = cls.empty() ? "Held weapon" : PrettyWeaponName(cls);
 		return m_attachment.empty() ? base : (base + " / " + m_attachment);
 	}
 	FollowTargetStatus GetStatus() override {
@@ -487,6 +566,10 @@ void FollowCamera::SetTargetType(FollowTargetType type) {
 	m_state.targetHandle = 0;
 	m_grenadeTrackPending = false;
 	m_selectedEvent = -1;
+	// Sensible default attach point per type so the Attach-pt label never shows a
+	// mismatched bone (e.g. "head" on a rifle): weapons -> muzzle, players -> head.
+	if (type == FollowTargetType::Weapon) m_state.attachmentName = "muzzle";
+	else if (type == FollowTargetType::Player) m_state.attachmentName = "head";
 	ResetMotion();
 }
 
@@ -622,7 +705,7 @@ std::vector<FollowTargetCandidate> FollowCamera::Candidates() const {
 			ResolveOwner(entity, candidate.ownerIndex, candidate.ownerName, candidate.team);
 			candidate.held = candidate.ownerIndex >= 0;
 			candidate.dropped = !candidate.held;
-			candidate.name = candidate.isBomb ? "C4" : (cls.empty() ? "Weapon" : cls);
+			candidate.name = candidate.isBomb ? "C4" : (cls.empty() ? "Weapon" : PrettyWeaponName(cls));
 			candidate.alive = true;
 			if (candidate.held)
 				candidate.status = (candidate.isBomb ? "C4 carried by " : "held by ")
@@ -864,6 +947,13 @@ void FollowCamera::RunFrame(bool cameraEditorActive) {
 		return;
 
 	const double dt = WallDt();
+	// Is the demo actually advancing this frame? When it's paused/frozen the entity still
+	// micro-jitters from interpolation; dividing that by the (tiny) wall-clock dt yields a
+	// huge bogus velocity that drives the "face travel" path and makes an attached camera
+	// spin/jitter in place. Detect a frozen tick so we can zero velocity below.
+	int frameTick = 0; g_MirvTime.GetCurrentDemoTick(frameTick);
+	const bool demoAdvancing = (frameTick != m_lastFrameTick);
+	m_lastFrameTick = frameTick;
 	if (m_state.targetType == FollowTargetType::Grenade && m_grenadeTrackPending) {
 		UpdateGrenadeCache();
 		int currentTick = 0;
@@ -961,7 +1051,10 @@ void FollowCamera::RunFrame(bool cameraEditorActive) {
 			StopPreview("target position invalid");
 			return;
 		}
-		if (m_haveLastRawTarget && dt > 0.0001) {
+		if (!demoAdvancing) {
+			// Frozen demo: hold still. No velocity (so no spurious prediction / face-travel).
+			m_targetVelocity = {};
+		} else if (m_haveLastRawTarget && dt > 0.0001) {
 			const double distance = FollowDistance(m_lastRawTarget, rawTarget);
 			if (distance > kTeleportDistance) {
 				m_motionInitialized = false;
@@ -994,8 +1087,13 @@ void FollowCamera::RunFrame(bool cameraEditorActive) {
 			if (speed > 40.0)
 				baseAng = FollowLookAt(FollowVec3{}, m_targetVelocity); // face travel
 			else
-				baseAng = m_motionInitialized ? m_outputAngles : m_state.cameraAngles;
+				// Hold the offset-FREE base, NOT m_outputAngles. m_outputAngles already has the
+				// rotation trim folded in, so using it here re-added the trim every frame ->
+				// the camera spun continuously (faster at low smoothing). m_baseAngles excludes
+				// the trim, so a stationary target produces a stable desired angle.
+				baseAng = m_motionInitialized ? m_baseAngles : m_state.cameraAngles;
 		}
+		m_baseAngles = baseAng; // remember the trim-free base for the next stationary hold
 		const FollowVec3 worldOffset = FollowRotateVector(m_state.offset, baseAng);
 		const FollowVec3 desiredPos{
 			rawTarget.x + worldOffset.x + m_targetVelocity.x * m_state.prediction,
@@ -1292,19 +1390,32 @@ void FollowCamera::EnsureEventsLoaded() const {
 	std::string path = p ? p : "";
 	if (path.empty()) return;
 
-	std::lock_guard<std::mutex> lock(m_eventMutex);
-	const int status = m_eventStatus.load();
-	if (m_eventDemoPath == path && status == (int)EventStatus::Ready) return;
-	if (m_eventLoadingPath == path && status == (int)EventStatus::Loading) return;
+	{
+		std::lock_guard<std::mutex> lock(m_eventMutex);
+		const int status = m_eventStatus.load();
+		if (m_eventDemoPath == path && status == (int)EventStatus::Ready) return;
+		if (m_eventLoadingPath == path && status == (int)EventStatus::Loading) return;
 
-	m_eventLoadingPath = path;
-	m_eventStatus.store((int)EventStatus::Loading);
+		m_eventLoadingPath = path;
+		m_eventStatus.store((int)EventStatus::Loading);
+	}
 
-	// Full parse on a detached worker (multi-second); the demo path is keyed so a demo
-	// change relaunches. ReadDemoInfoViaHelper reuses/refreshes the "<demo>.fmjson" cache.
-	std::thread([this, path]() {
+	// Join any previous worker before starting a new one (done OUTSIDE m_eventMutex so the
+	// old worker's final commit, which takes that lock, can't deadlock the join). Cancelling
+	// aborts its in-flight helper process promptly so the join is bounded.
+	if (m_eventThread.joinable()) {
+		m_eventCancel.store(true);
+		m_eventThread.join();
+	}
+	m_eventCancel.store(false);
+
+	// Full parse on a joinable worker (multi-second); the demo path is keyed so a demo
+	// change relaunches. ReadDemoInfoViaHelper reuses/refreshes the "<demo>.fmjson" cache
+	// and honors m_eventCancel so Shutdown() can stop it.
+	m_eventThread = std::thread([this, path]() {
 		const std::wstring wpath = Utf8ToWide(path);
-		DemoHelperResult result = ReadDemoInfoViaHelper(wpath);
+		DemoHelperResult result = ReadDemoInfoViaHelper(wpath, {}, &m_eventCancel);
+		if (m_eventCancel.load()) return; // shutdown / superseded: don't touch shared state
 		std::unordered_map<uint32_t, std::string> names;
 		for (const auto& pl : result.players) names[pl.accountId] = pl.name;
 		std::vector<FollowEventRecord> evs;
@@ -1322,7 +1433,13 @@ void FollowCamera::EnsureEventsLoaded() const {
 			m_eventDemoPath = path;
 			m_eventStatus.store(result.ok ? (int)EventStatus::Ready : (int)EventStatus::Failed);
 		}
-	}).detach();
+	});
+}
+
+void FollowCamera::Shutdown() {
+	m_eventCancel.store(true);
+	if (m_eventThread.joinable())
+		m_eventThread.join();
 }
 
 std::vector<FollowEventRecord> FollowCamera::EventsSnapshot() const {

@@ -1394,17 +1394,6 @@ fn afx_is_demo_paused() -> bool {
     return result;
 }
 
-fn afx_get_demo_file_path() -> Option<String> {
-    let result: *const c_char;
-    unsafe {
-        result = afx_hook_source2_get_demo_file_path();
-    }
-    if result.is_null() {
-         return None;
-    }
-    return Some(unsafe { CStr::from_ptr(result) }.to_str().unwrap().to_string());
-}
-
 
 
 #[derive(Debug, Trace, Finalize)]

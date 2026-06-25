@@ -3,17 +3,24 @@
 #include "../Platform/JsonParser.h"
 
 #include <Windows.h>
+#include <atomic>
 #include <fstream>
 #include <sstream>
+#include <vector>
 
 namespace Filmmaker {
 
 namespace {
 
-// Must match FilmmakerDemoInfo's DemoInfo.SchemaVersion. A cached "<demo>.fmjson"
-// whose "v" differs was produced by an older helper and is discarded.
+// Must match FilmmakerDemoInfo's schemaVersion. A cached "<demo>.fmjson" whose
+// "v" differs was produced by an older helper and is discarded.
 // v5: added top-level "events" (weapon/C4 drop + pickup ticks) for Follow Camera.
-constexpr int kSchemaVersion = 5;
+// v6: parser switched to demoinfocs-golang; "team" is the real end-of-match side
+//     and MVPs / per-round MVP+side are populated for every parsed demo.
+// v7: per-round MVP is now attributed to the round that actually ended (the
+//     m_iMVPs delta is read AFTER the round commits), fixing stars that were
+//     shifted one round too early on the round-performance timeline.
+constexpr int kSchemaVersion = 7;
 
 // Directory containing this DLL (HLAE's bin\x64 when injected from staging).
 std::wstring SelfModuleDir() {
@@ -86,7 +93,14 @@ void WriteFileUtf8(const std::wstring& path, const std::string& data) {
 
 // Runs exe with one or two arguments, returns its stdout. Empty on failure.
 // arg2 is appended (quoted) only when non-empty.
-std::string RunCaptureStdout(const std::wstring& exe, const std::wstring& arg, const std::wstring& arg2) {
+//
+// The drain is bounded and poll-based: a demo the helper can't handle must never block
+// the caller forever (the scan pool and DemoLibrary::Shutdown() join these threads). We
+// cap the total run time and also abort promptly when the caller is cancelling. The
+// child's stderr is sent to NUL so a stray .NET runtime message can't be interleaved
+// into the JSON we capture on stdout.
+std::string RunCaptureStdout(const std::wstring& exe, const std::wstring& arg,
+	const std::wstring& arg2, const std::atomic<bool>* cancel) {
 	SECURITY_ATTRIBUTES sa{};
 	sa.nLength = sizeof(sa);
 	sa.bInheritHandle = TRUE;
@@ -95,6 +109,12 @@ std::string RunCaptureStdout(const std::wstring& exe, const std::wstring& arg, c
 	if (!CreatePipe(&readPipe, &writePipe, &sa, 0))
 		return std::string();
 	SetHandleInformation(readPipe, HANDLE_FLAG_INHERIT, 0);
+
+	// Separate inheritable handle to the NUL device for the child's stderr, so runtime
+	// warnings/exception text never corrupt the JSON on stdout. If NUL can't be opened
+	// (never expected on Windows) we fall back to the stdout pipe as before.
+	HANDLE nulHandle = CreateFileW(L"NUL", GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
+		&sa, OPEN_EXISTING, 0, nullptr);
 
 	std::wstring cmd = L"\"" + exe + L"\" \"" + arg + L"\"";
 	if (!arg2.empty())
@@ -107,25 +127,53 @@ std::string RunCaptureStdout(const std::wstring& exe, const std::wstring& arg, c
 	si.dwFlags = STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW;
 	si.wShowWindow = SW_HIDE;
 	si.hStdOutput = writePipe;
-	si.hStdError = writePipe;
+	si.hStdError = (nulHandle != INVALID_HANDLE_VALUE) ? nulHandle : writePipe;
 	si.hStdInput = nullptr;
 
 	PROCESS_INFORMATION pi{};
 	BOOL ok = CreateProcessW(exe.c_str(), cmdBuf.data(), nullptr, nullptr, TRUE,
 		CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi);
 	CloseHandle(writePipe); // parent keeps only the read end
+	if (nulHandle != INVALID_HANDLE_VALUE)
+		CloseHandle(nulHandle);
 	if (!ok) {
 		CloseHandle(readPipe);
 		return std::string();
 	}
 
+	constexpr ULONGLONG kMaxRunMs = 120000; // hard ceiling against a hung/runaway helper
+	const ULONGLONG start = GetTickCount64();
 	std::string out;
 	char buf[4096];
-	DWORD got = 0;
-	while (ReadFile(readPipe, buf, sizeof(buf), &got, nullptr) && got > 0)
-		out.append(buf, got);
+	bool aborted = false;
+	for (;;) {
+		if (cancel && cancel->load()) { aborted = true; break; }
+		if (GetTickCount64() - start > kMaxRunMs) { aborted = true; break; }
 
-	WaitForSingleObject(pi.hProcess, INFINITE);
+		// PeekNamedPipe so a stuck child (no output, not exited) can't block ReadFile.
+		DWORD avail = 0, got = 0;
+		if (PeekNamedPipe(readPipe, nullptr, 0, nullptr, &avail, nullptr) && avail > 0) {
+			if (ReadFile(readPipe, buf, sizeof(buf), &got, nullptr) && got > 0) {
+				out.append(buf, got);
+				continue; // drain everything buffered before waiting again
+			}
+		}
+
+		if (WaitForSingleObject(pi.hProcess, 50) == WAIT_OBJECT_0) {
+			// Child exited: drain any final buffered output, then stop.
+			while (PeekNamedPipe(readPipe, nullptr, 0, nullptr, &avail, nullptr) && avail > 0
+				&& ReadFile(readPipe, buf, sizeof(buf), &got, nullptr) && got > 0)
+				out.append(buf, got);
+			break;
+		}
+	}
+
+	if (aborted) {
+		TerminateProcess(pi.hProcess, 1);
+		WaitForSingleObject(pi.hProcess, 2000); // let the kill settle before closing handles
+		out.clear(); // a partial/aborted parse is not trustworthy JSON
+	}
+
 	CloseHandle(readPipe);
 	CloseHandle(pi.hThread);
 	CloseHandle(pi.hProcess);
@@ -199,7 +247,8 @@ bool ParseJson(const std::string& json, DemoHelperResult& out) {
 } // namespace
 
 DemoHelperResult ReadDemoInfoViaHelper(const std::wstring& demoPath,
-	const std::vector<uint32_t>& wantedAccountIds) {
+	const std::vector<uint32_t>& wantedAccountIds,
+	const std::atomic<bool>* cancel) {
 	DemoHelperResult result;
 
 	const bool wantNamesFast = !wantedAccountIds.empty();
@@ -218,12 +267,24 @@ DemoHelperResult ReadDemoInfoViaHelper(const std::wstring& demoPath,
 	if (GetWriteTime(cachePath, cacheTime)
 		&& (!haveDemoTime || cacheTime >= demoTime)
 		&& (!haveHelperTime || cacheTime >= helperTime)) {
-		DemoHelperResult cached;
 		std::string cachedJson = ReadFileUtf8(cachePath);
-		if (!cachedJson.empty() && ParseJson(cachedJson, cached)
-			&& cached.schemaVersion == kSchemaVersion
-			&& (wantNamesFast || !cached.namesOnly)) {
-			return cached;
+		JsonValue cachedRoot;
+		if (!cachedJson.empty() && JsonParse(cachedJson, cachedRoot)
+			&& cachedRoot.type == JsonValue::Type::Object) {
+			const JsonValue* okv = cachedRoot.Find("ok");
+			if (!okv || !okv->AsBool(false)) {
+				// Cached NEGATIVE: the helper ran but couldn't parse this demo. The
+				// freshness gate above already discards it once the demo or helper exe
+				// changes, so honoring it here stops us re-launching the (slow, external)
+				// helper on every scan for a permanently unparseable demo.
+				return result; // ok == false
+			}
+			DemoHelperResult cached;
+			if (ParseJson(cachedJson, cached)
+				&& cached.schemaVersion == kSchemaVersion
+				&& (wantNamesFast || !cached.namesOnly)) {
+				return cached;
+			}
 		}
 	}
 
@@ -240,7 +301,7 @@ DemoHelperResult ReadDemoInfoViaHelper(const std::wstring& demoPath,
 		idsArg.assign(ids.begin(), ids.end()); // decimal digits/commas: ASCII-safe
 	}
 
-	std::string json = RunCaptureStdout(exe, demoPath, idsArg);
+	std::string json = RunCaptureStdout(exe, demoPath, idsArg, cancel);
 	if (json.empty())
 		return result;
 

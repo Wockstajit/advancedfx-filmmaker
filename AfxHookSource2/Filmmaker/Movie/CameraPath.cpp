@@ -869,6 +869,11 @@ void CameraPath::RunFrame() {
 	// from our Downloaded tab, CS2's native Your Matches tab, or a console playdemo.
 	std::wstring cur = PlayingDemoPath();
 	if (cur != m_demoPath) {
+		// Flush any unsaved edits to the OUTGOING demo's sidecar before we wipe the markers.
+		// Per-frame autosave (end of RunFrame) almost always beats us here, but an edit and a
+		// demo switch in the same frame would otherwise silently drop the edit. Save() keys off
+		// m_demoPath, so this must run while it still points at the previous demo.
+		if (m_dirty) { Save(); m_dirty = false; }
 		m_demoPath = cur;
 		m_data.DeleteAll();
 		m_curveUndo.clear(); m_curveRedo.clear();

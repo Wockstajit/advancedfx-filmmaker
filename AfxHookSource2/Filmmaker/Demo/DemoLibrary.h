@@ -43,7 +43,7 @@ public:
 	// Resolves the on-disk path for an entry index in the current list.
 	bool PathByIndex(size_t index, std::wstring& outPath) const;
 
-	// Requests the per-round timeline for one demo (a full demofile parse) on a
+	// Requests the per-round timeline for one demo (a full demo parse) on a
 	// background thread, if not already present/queued. Cheap + idempotent; the
 	// list version bumps when the data lands so the UI fills in live.
 	void EnsureRounds(size_t index);

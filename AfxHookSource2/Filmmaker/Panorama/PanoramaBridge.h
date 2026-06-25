@@ -16,6 +16,25 @@
 
 namespace Filmmaker {
 
+// ===========================================================================
+// CANONICAL PANORAMA Z-LAYER MAP (single source of truth)
+//
+// Every in-game filmmaker HUD root is created as a child of the SAME context panel
+// (AfxHookSource2_GetPanoramaHudPanel()), so all of these z-index values compete in
+// ONE stacking context. Keep them DISTINCT and in this documented order. The literal
+// values live in each *Js.h root-creation line; if you change one, update it here too.
+//
+//   50  MovieHud root          (MovieHudJs.h)            - director help/status cards
+//   53  CameraEditor root      (CameraEditorJs.h)        - editor chrome/backdrop (below timeline)
+//   55  CameraTimeline root    (CameraTimelineJs.h)      - timeline bar (sits on the editor backdrop)
+//   60  MarkerHud root         (MarkerHudJs.h)           - BO2-style marker-edit menu
+//   65  GraphEditor root       (GraphEditorJs.h)         - experimental graph overlay (always on top)
+//
+// In-root local layers (children, scoped to their own root - do NOT collide cross-root):
+//   150 CameraEditor debug overlay,  200 CameraEditor "clear all" confirm modal,
+//   100 FilmmakerGui search popup (main-menu context, separate panel).
+// ===========================================================================
+
 class PanoramaBridge {
 public:
 	// Grabs the engine + RunScript pointers and (in auto mode) the HUD context.

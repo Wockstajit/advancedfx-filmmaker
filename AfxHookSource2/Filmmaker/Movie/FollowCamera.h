@@ -7,6 +7,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -125,6 +126,10 @@ class FollowCamera {
 public:
 	void RunFrame(bool cameraEditorActive);
 
+	// Cancels and joins the background loadout-event loader so a DLL unload can't leave
+	// a detached worker writing into freed singleton state. Called from Filmmaker::Shutdown.
+	void Shutdown();
+
 	void PlaceCamera();
 	void BeginReposition();
 	void PlaceReposition();
@@ -198,6 +203,9 @@ private:
 
 	FollowCameraState m_state;
 	FollowAngles m_outputAngles;
+	FollowAngles m_baseAngles;   // attach: orientation WITHOUT the rotation trim, so holding it
+	                             // while stationary doesn't re-add the trim each frame (spin fix)
+	int m_lastFrameTick = -1;    // last demo tick seen in RunFrame; used to detect a paused demo
 	FollowVec3 m_smoothedTarget;
 	FollowVec3 m_smoothedCamPos; // attach mode: smoothed camera position
 	FollowVec3 m_lastRawTarget;
@@ -238,6 +246,10 @@ private:
 	mutable std::string m_eventLoadingPath;  // path of the in-flight background load
 	mutable std::atomic<int> m_eventStatus{ (int)EventStatus::Idle };
 	mutable std::vector<FollowEventRecord> m_events;
+	// The background loader is joinable (not detached) so it can be cancelled + joined on
+	// shutdown; m_eventCancel aborts the in-flight helper process within ~50ms.
+	mutable std::thread m_eventThread;
+	mutable std::atomic<bool> m_eventCancel{ false };
 };
 
 FollowCamera& FollowCameraRef();

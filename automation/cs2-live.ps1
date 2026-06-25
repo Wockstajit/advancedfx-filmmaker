@@ -252,6 +252,7 @@ $listener = New-Object System.Net.HttpListener
 $listener.Prefixes.Add("http://localhost:$WebPort/")
 try { $listener.Start() }
 catch { Write-Host "[FAIL] Could not bind http://localhost:$WebPort/ : $($_.Exception.Message)" -ForegroundColor Red; $shared.stop = $true; exit 1 }
+$sawCs2Process = [bool](Get-Process -Name 'cs2' -ErrorAction SilentlyContinue)
 
 Write-Host "=== CS2 live dashboard ===" -ForegroundColor Cyan
 Write-Host ("  netcon : 127.0.0.1:{0}" -f $Port)
@@ -269,7 +270,20 @@ function Write-Text($resp, $text, $type) {
 
 try {
     while ($listener.IsListening) {
-        $ctx = $listener.GetContext()
+        $pending = $listener.BeginGetContext($null, $null)
+        while (-not $pending.AsyncWaitHandle.WaitOne(500)) {
+            $cs2Now = Get-Process -Name 'cs2' -ErrorAction SilentlyContinue
+            if ($cs2Now) { $sawCs2Process = $true }
+            if ($sawCs2Process -and -not $cs2Now) {
+                [void]$shared.lines.Add(@{ t = (Get-Date).ToString('HH:mm:ss'); s = '*** cs2.exe closed; stopping dashboard server ***' })
+                Write-Host "`ncs2.exe closed; stopping dashboard server..." -ForegroundColor Yellow
+                break
+            }
+        }
+        $cs2Now = Get-Process -Name 'cs2' -ErrorAction SilentlyContinue
+        if ($cs2Now) { $sawCs2Process = $true }
+        if ($sawCs2Process -and -not $cs2Now) { break }
+        $ctx = $listener.EndGetContext($pending)
         $req = $ctx.Request; $resp = $ctx.Response
         $path = $req.Url.AbsolutePath
         if ($path -eq '/') {

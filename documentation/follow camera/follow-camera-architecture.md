@@ -11,7 +11,7 @@
 | UI | `CameraEditorJs.h` (Panorama JS) | The editor's Follow inspector. Reads the pushed state JSON, issues console commands back. |
 | State bridge | `CameraEditorHud.cpp` | Embeds the follow state JSON into the editor's `state` attribute each frame and calls `render()`. |
 | Pose application | `CameraBridge.h` | `CameraBridge_SetCameraPose` pushes an absolute pose; `CameraBridge_GetCurrentCamera` reads the free cam. |
-| Demo pre-scan | `FilmmakerDemoInfo/Program.cs` (C#) → `DemoInfoHelper.{h,cpp}` (C++) | Writes / reads `<demo>.dem.fmjson` (v5), including the weapon/C4 event list. |
+| Demo pre-scan | `FilmmakerDemoInfoGo/main.go` (Go) → `DemoInfoHelper.{h,cpp}` (C++) | Writes / reads `<demo>.dem.fmjson` (v6), including the weapon/C4 event list. |
 
 ## Internal model
 
@@ -113,8 +113,8 @@ the state JSON only for the Weapon type, nearest-the-playhead first
 | [CameraEditorJs.h](../AfxHookSource2/Filmmaker/Panorama/CameraEditorJs.h) | follow section 259–487 · mode toggle 284 · `FOLLOW_TYPES` 298 · attach-pt 395 · events/Preview-Tick 425 · advanced 496 · `render()` follow block 711–790 | UI |
 | [CameraEditorHud.cpp](../AfxHookSource2/Filmmaker/Panorama/CameraEditorHud.cpp) | `BuildStateJson` 159, embeds follow 196, push 266 | state bridge |
 | [DemoEntry.h](../AfxHookSource2/Filmmaker/Demo/DemoEntry.h) | `DemoEvent` 38 | event record |
-| [DemoInfoHelper.cpp](../AfxHookSource2/Filmmaker/Demo/DemoInfoHelper.cpp) | `kSchemaVersion=5` 16, parse `events` 184 | reader |
-| [Program.cs](../FilmmakerDemoInfo/Program.cs) | `SchemaVersion=5` 70, event list 102, `AddEvent` 104, subscriptions 247–251, emit 322 | writer |
+| [DemoInfoHelper.cpp](../AfxHookSource2/Filmmaker/Demo/DemoInfoHelper.cpp) | `kSchemaVersion=6` 20, parse `events` 229 | reader |
+| [main.go](../FilmmakerDemoInfoGo/main.go) | `schemaVersion=6` 35, `addEvent` 182, event handlers 231–307, emit 374 | writer |
 
 > Raw-string note: the embedded Panorama JS in `CameraEditorJs.h` is split into adjacent
 > `R"EDJS(…)EDJS"` literals because MSVC caps a single string literal at ~16 KB (error

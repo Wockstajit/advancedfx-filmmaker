@@ -14,10 +14,6 @@
 *.sdf
 *.opensdf
 
-# .NET (FilmmakerDemoInfo)
-FilmmakerDemoInfo/bin/
-FilmmakerDemoInfo/obj/
-
 # Rust
 lib/**/target/
 

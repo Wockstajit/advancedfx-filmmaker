@@ -44,12 +44,13 @@ Running log of what the rebuild added/changed, with file:line references for rev
   `selectedEvent`, and an `events[]` array
   ([FollowCamera.cpp:1149](../AfxHookSource2/Filmmaker/Movie/FollowCamera.cpp:1149)).
 
-### Demo event pre-scan (`.fmjson` v4 → v5)
-- C# writer emits a top-level `events[]` (weapon/C4 drop + pickup ticks);
-  `SchemaVersion = 5` ([Program.cs:70](../FilmmakerDemoInfo/Program.cs:70), events :102, subs :247).
-- C++ `DemoEvent` struct + `events` parse; `kSchemaVersion = 5`
+### Demo event pre-scan (`.fmjson` events, v6)
+- Go writer emits a top-level `events[]` (weapon/C4 drop + pickup ticks);
+  `schemaVersion = 6` ([main.go:35](../FilmmakerDemoInfoGo/main.go:35), `addEvent` :182,
+  handlers :231–307).
+- C++ `DemoEvent` struct + `events` parse; `kSchemaVersion = 6`
   ([DemoEntry.h:38](../AfxHookSource2/Filmmaker/Demo/DemoEntry.h:38),
-  [DemoInfoHelper.cpp:16](../AfxHookSource2/Filmmaker/Demo/DemoInfoHelper.cpp:16), parse :184).
+  [DemoInfoHelper.cpp:20](../AfxHookSource2/Filmmaker/Demo/DemoInfoHelper.cpp:20), parse :229).
 - Lazy background load keyed on `GetDemoFilePath()`
   ([FollowCamera.cpp:1290](../AfxHookSource2/Filmmaker/Movie/FollowCamera.cpp:1290)).
 
@@ -64,16 +65,12 @@ Running log of what the rebuild added/changed, with file:line references for rev
 
 ## Build-completion fixes (this pass)
 
-These two issues blocked a clean `build.bat`; both are fixed and the build is green.
+This issue blocked a clean `build.bat`; it is fixed and the build is green.
 
 1. **MSVC C2026 "string too big"** — the embedded Panorama JS raw-string literal in
    `CameraEditorJs.h` exceeded MSVC's ~16 KB single-literal cap after the follow-section
    rebuild. Split the oversized chunk into two adjacent `R"EDJS(…)EDJS"` literals at a line
    boundary (CameraEditorJs.h ~807); all chunks now < 16 KB.
-2. **C# `Source1BombPickupEvent` has no `.Player`** — `dotnet publish` of the v5 helper
-   failed (CS1061), and `build.bat` only *warns* on that, so the helper exe was silently
-   stale. Fixed by reaching the controller via `e.PlayerPawn?.Controller`
-   ([Program.cs:250](../FilmmakerDemoInfo/Program.cs:250)).
 
-**Verification:** `build.bat` → `BUILD OK` (HLAE x64 DLL + v5 `FilmmakerDemoInfo` helper
-both published); `FollowCameraMathTests` → "all checks passed".
+**Verification:** `build.bat` → `BUILD OK` (HLAE x64 DLL + `FilmmakerDemoInfo` Go helper
+built); `FollowCameraMathTests` → "all checks passed".

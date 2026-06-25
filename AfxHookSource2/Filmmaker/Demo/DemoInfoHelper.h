@@ -1,6 +1,6 @@
 #pragma once
 
-// Runs the FilmmakerDemoInfo .NET helper (demofile-net) on a .dem to obtain a
+// Runs the FilmmakerDemoInfo helper (Go / demoinfocs-golang) on a .dem to obtain a
 // scoreboard WITH player names + map/duration, which the .dem.info matchmaking
 // sidecar cannot provide (it has account ids only).
 //
@@ -10,6 +10,7 @@
 
 #include "DemoEntry.h"
 
+#include <atomic>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -36,7 +37,13 @@ struct DemoHelperResult {
 // (e.g. from the .dem.info matchmaking sidecar) and only needs player NAMES: the
 // helper runs in "names-fast" mode and cancels the parse as soon as every wanted
 // account id has a name, which is dramatically faster than a full decode.
+//
+// cancel (optional) lets a caller abort an in-flight helper process promptly (e.g.
+// the scan thread when a new scan supersedes it); regardless of cancel, the helper
+// is also bounded by an internal hard timeout so a hung/runaway parse can never block
+// the caller forever.
 DemoHelperResult ReadDemoInfoViaHelper(const std::wstring& demoPath,
-	const std::vector<uint32_t>& wantedAccountIds = {});
+	const std::vector<uint32_t>& wantedAccountIds = {},
+	const std::atomic<bool>* cancel = nullptr);
 
 } // namespace Filmmaker

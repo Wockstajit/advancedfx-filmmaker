@@ -236,22 +236,55 @@ inline const char* kCameraTimelineJs = R"TLJS(
     // Spectator observer chrome stripped for the "in-game" look: the player name/clan/weapon
     // side bar, the centred player avatar, and the spectator vignette. Radar + HP/ammo stay.
     var SPEC_PANELS = ['jsHudSpecplayer__Bg', 'HudSpecplayer__Avatar', 'HudSpectatorVignetting'];
-    var hiddenNatives = null; // [{p, v}] captured while ANY panel is hidden; null while fully shown
+    var hiddenNatives = null; // [{p, v, id}] captured while ANY panel is hidden; null while fully shown
+    var hiddenNativeIds = {};
     var curHudView = 'full';
     function restoreGameHud() {
-      if (!hiddenNatives) return;
-      for (var j = 0; j < hiddenNatives.length; j++) { try { hiddenNatives[j].p.visible = hiddenNatives[j].v; } catch (e2) {} }
+      if (hiddenNatives) {
+        for (var j = 0; j < hiddenNatives.length; j++) {
+          var h = hiddenNatives[j];
+          try { if (h.p && !(h.p.IsValid && !h.p.IsValid())) h.p.visible = h.v; } catch (e2) {}
+          // The native HUD can rebuild while the editor is open. Restore by id too so panels hidden
+          // by an older JS closure do not stay hidden after leaving the camera editor.
+          try {
+            if (h.id) {
+              var cur = ctx.FindChildTraverse && ctx.FindChildTraverse(h.id);
+              if (cur) cur.visible = h.v;
+            }
+          } catch (e3) {}
+        }
+      }
       hiddenNatives = null;
+      hiddenNativeIds = {};
     }
-    function hideIfVisible(c) {
-      if (c && c.visible) { hiddenNatives.push({ p: c, v: true }); try { c.visible = false; } catch (e) {} }
+    function forceFullHudPanels() {
+      // Defensive restore for the spectator HUD pieces that "In-Game" mode hides. If the script was
+      // rebuilt while those panels were already hidden, hiddenNatives may not contain them.
+      for (var i = 0; i < SPEC_PANELS.length; i++) {
+        try {
+          var p = ctx.FindChildTraverse && ctx.FindChildTraverse(SPEC_PANELS[i]);
+          if (p) p.visible = true;
+        } catch (e) {}
+      }
+    }
+    function hidePanel(c, forceRestoreVisible) {
+      if (!c) return;
+      var id = '';
+      try { id = c.id || ''; } catch (eid) {}
+      if (!hiddenNatives) hiddenNatives = [];
+      var key = id || ('__panel_' + hiddenNatives.length);
+      if ((forceRestoreVisible || c.visible) && !hiddenNativeIds[key]) {
+        hiddenNativeIds[key] = 1;
+        hiddenNatives.push({ p: c, v: forceRestoreVisible ? true : !!c.visible, id: id });
+      }
+      try { c.visible = false; } catch (e) {}
     }
     // view: 'full' (show everything) | 'hidden' (hide the whole gameplay HUD) | 'game' (keep
     // radar + HP/ammo, drop the spectator observer panel). Called every frame so a panel the
     // game re-shows (round start, etc.) gets re-hidden; a mode change restores the baseline first.
     function applyHudView(view) {
       if (view !== curHudView) { restoreGameHud(); curHudView = view; }
-      if (view === 'full') return;
+      if (view === 'full') { forceFullHudPanels(); return; }
       if (!hiddenNatives) hiddenNatives = [];
       if (view === 'hidden') {
         var nk = ctx.GetChildCount ? ctx.GetChildCount() : 0;
@@ -259,11 +292,11 @@ inline const char* kCameraTimelineJs = R"TLJS(
           var c = ctx.GetChild(i);
           if (!c || OURS[c.id]) continue;
           if ((c.FindChildTraverse && (c.FindChildTraverse('SliderRow') || c.FindChildTraverse('ControlRow')))) continue;
-          hideIfVisible(c);
+          if (c.visible) hidePanel(c, false);
         }
       } else { // 'game'
         for (var s = 0; s < SPEC_PANELS.length; s++)
-          hideIfVisible(ctx.FindChildTraverse && ctx.FindChildTraverse(SPEC_PANELS[s]));
+          hidePanel(ctx.FindChildTraverse && ctx.FindChildTraverse(SPEC_PANELS[s]), true);
       }
     }
 )TLJS"
@@ -298,6 +331,27 @@ R"TLJS(
         } catch (e) {}
       }
       viewportHudPanels = [];
+      forceClearViewportTransforms();
+    }
+    // Defensive: the tracked viewportHudPanels list lives in THIS script closure, but the native
+    // HUD (and so this whole timeline script) can rebuild while the editor is open. After such a
+    // rebuild the live HUD roots still carry the editor's scale3d/translate3d + __camViewportAdjusted
+    // from the PREVIOUS closure, yet the new closure's tracked list is empty -- so the loop above
+    // restores nothing and the gameplay HUD stays shrunk/offset (not lined up with the now full-screen
+    // world) after leaving the camera editor. Sweep the live HUD roots by their own flag and clear any
+    // orphaned transform. Mirrors the visibility-side forceFullHudPanels() guard.
+    function forceClearViewportTransforms() {
+      var n = ctx.GetChildCount ? ctx.GetChildCount() : 0;
+      for (var i = 0; i < n; i++) {
+        var c = ctx.GetChild(i);
+        if (!c || !isViewportHudRoot(c) || !c.__camViewportAdjusted) continue;
+        try {
+          c.style.transition = 'none';
+          c.style.transformOrigin = c.__camViewportOrigin || '50% 50%';
+          c.style.transform = c.__camViewportTransform || 'none';
+          c.__camViewportAdjusted = false;
+        } catch (e) {}
+      }
     }
     function rememberHudViewportPanel(p) {
       if (!p || p.__camViewportAdjusted) return;
@@ -354,7 +408,7 @@ R"TLJS(
 
     // ---- root + hit catcher + panel ------------------------------------
     var root = $.CreatePanel('Panel', ctx, 'CamTimelineRoot', {});
-    root.hittest = false; root.style.width = '100%'; root.style.height = '100%'; root.style.zIndex = '55';
+    root.hittest = false; root.style.width = '100%'; root.style.height = '100%'; root.style.zIndex = '55'; // z-layer map: PanoramaBridge.h
     var catcher = mk('Panel', root); catcher.hittest = true; catcher.visible = false;
     catcher.style.width = '100%'; catcher.style.height = '100%';
     catcher.SetPanelEvent('onactivate', function () { /* swallow stray clicks */ });
@@ -579,7 +633,7 @@ R"TLJS(
     var api = {};
     api.render = function () {
       var raw = root.GetAttributeString('state', '');
-      if (!raw) { root.visible = false; setNativeHidden(false); applyHudView('full'); return; }
+      if (!raw) { root.visible = false; setNativeHidden(false); applyHudView('full'); restoreHudViewport(); return; }
       try { st = JSON.parse(raw); } catch (e) { return; }
 
       patchNativeBar(); // keep the native demo bar de-cluttered + our button present

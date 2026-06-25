@@ -1,0 +1,6 @@
+[campath] 0 marker(s), selected #-1, speed=Manual, timing=Live, interp=Linear.
+filmmaker Panorama UI:
+  engine resolved   : yes
+  RunScript resolved: yes
+  context panel     : 000005F992848000 
+  built             : yes

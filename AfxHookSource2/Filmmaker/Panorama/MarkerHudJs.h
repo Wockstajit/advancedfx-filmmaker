@@ -43,7 +43,7 @@ inline const char* kMarkerHudJs = R"MKJS(
     root.hittest = false;
     root.style.width = '100%';
     root.style.height = '100%';
-    root.style.zIndex = '60';
+    root.style.zIndex = '60'; // z-layer map: PanoramaBridge.h
 
     // Full-screen hit-test CATCHER, shown only while the settings card is open. It sits
     // BEHIND the card (created first) and absorbs any click that misses the card, so CS2's

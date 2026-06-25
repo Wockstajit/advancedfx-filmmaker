@@ -55,6 +55,53 @@ std::string DateText(int64_t unixSeconds) {
 	return buf;
 }
 
+// Merge a full helper parse into an entry. The .dem.info matchmaking sidecar is
+// authoritative for per-player K/A/D/score, but it splits the roster at the
+// halfway index (wrong CT/T side) and has no MVPs or per-round timeline; take
+// all of those - plus the CT/T-aligned team scores - from the helper's full parse.
+void MergeHelper(DemoEntry& e, const DemoHelperResult& helper) {
+	if (!helper.map.empty())
+		e.map = helper.map;
+	if (helper.durationSeconds > 0)
+		e.durationSeconds = helper.durationSeconds;
+
+	bool helperHasRounds = false;
+	for (const auto& hp : helper.players)
+		if (!hp.perRound.empty()) { helperHasRounds = true; break; }
+
+	if (e.hasScoreboard && !e.players.empty()) {
+		// Correct the sidecar roster from the full parse, matched by account id.
+		for (auto& sp : e.players) {
+			for (const auto& hp : helper.players) {
+				if (hp.accountId != 0 && hp.accountId == sp.accountId) {
+					if (!hp.name.empty() && hp.name != "[unknown]")
+						sp.name = hp.name;
+					sp.teamIndex = hp.teamIndex; // real end-of-match side (fixes CT/T)
+					sp.mvps = hp.mvps;
+					if (!hp.perRound.empty())
+						sp.perRound = hp.perRound;
+					break;
+				}
+			}
+		}
+		// Team scores from the full parse are aligned to the real CT/T sides, so the
+		// score shown above each side's block matches the players grouped there.
+		if (helper.teamScore0 + helper.teamScore1 > 0) {
+			e.teamScore0 = helper.teamScore0;
+			e.teamScore1 = helper.teamScore1;
+		}
+	} else if (helper.hasScoreboard && !helper.players.empty()) {
+		// No sidecar: the helper's full parse is the only source.
+		e.hasScoreboard = true;
+		e.teamScore0 = helper.teamScore0;
+		e.teamScore1 = helper.teamScore1;
+		e.players = helper.players;
+	}
+
+	if (helperHasRounds)
+		e.hasRounds = true;
+}
+
 } // namespace
 
 DemoLibrary::~DemoLibrary() {
@@ -116,7 +163,7 @@ void DemoLibrary::ScanWorker() {
 	std::vector<std::wstring> files = DemoScanner::Scan(roots, m_cancel);
 
 	// Phase 1 - fast metadata (.dem header + .dem.info sidecar). Published first so
-	// the list appears immediately, before the (slow) demofile-net name parse.
+	// the list appears immediately, before the (slow) helper name parse.
 	std::vector<DemoEntry> entries;
 	entries.reserve(files.size());
 	for (const auto& file : files) {
@@ -141,30 +188,25 @@ void DemoLibrary::ScanWorker() {
 			e.hasScoreboard = true;
 			e.teamScore0 = info.teamScore0;
 			e.teamScore1 = info.teamScore1;
+			if (info.matchTime > 0)
+				e.matchTime = info.matchTime; // the real match date, not the download date
 			e.players = std::move(info.players);
 		}
 
 		entries.push_back(std::move(e));
 	}
 
-	std::sort(entries.begin(), entries.end(), [](const DemoEntry& a, const DemoEntry& b) {
-		return a.dateModified > b.dateModified;
+	// Sort newest-first by the date the card actually shows (real match time when
+	// known, else the file's modified time) so the list order matches the labels.
+	auto effectiveDate = [](const DemoEntry& e) { return e.matchTime > 0 ? e.matchTime : e.dateModified; };
+	std::sort(entries.begin(), entries.end(), [&](const DemoEntry& a, const DemoEntry& b) {
+		return effectiveDate(a) > effectiveDate(b);
 	});
 
 	std::vector<std::wstring> paths;
-	std::vector<std::vector<uint32_t>> sidecarIds; // account ids already known per demo
 	paths.reserve(entries.size());
-	sidecarIds.reserve(entries.size());
-	for (const auto& e : entries) {
+	for (const auto& e : entries)
 		paths.push_back(e.path);
-		std::vector<uint32_t> ids;
-		if (e.hasScoreboard) {
-			for (const auto& p : e.players)
-				if (p.accountId)
-					ids.push_back(p.accountId);
-		}
-		sidecarIds.push_back(std::move(ids));
-	}
 
 	{
 		std::lock_guard<std::mutex> lock(m_mutex);
@@ -172,19 +214,20 @@ void DemoLibrary::ScanWorker() {
 	}
 	m_version.fetch_add(1);
 
-	// Phase 2 - enrich each demo with real player names + scoreboard via the
-	// demofile-net helper (cached as <demo>.fmjson). Demos are parsed in parallel
-	// (each helper is its own process) with a bounded pool; results land in place
-	// and the version is bumped per demo so the UI fills in live (RunFrame coalesces
-	// the bumps into at most one render per frame).
+	// Phase 2 - enrich each demo with real player names, the correct end-of-match
+	// team sides, MVPs and the per-round timeline via the demoinfocs-golang helper
+	// (cached as <demo>.fmjson). Demos are FULL-parsed in parallel (each helper is
+	// its own process) with a bounded pool; results land in place and the version
+	// is bumped per demo so the UI fills in live (RunFrame coalesces the bumps into
+	// at most one render per frame).
 	//
-	// When a demo already has a scoreboard from its .dem.info sidecar we pass the
-	// known account ids so the helper runs in names-fast mode (cancels as soon as
-	// every name is known) - much faster than a full decode - and we merge only the
-	// NAMES back in, keeping the sidecar's roster + team grouping intact.
+	// A full parse (not the old names-fast hint) is required because the .dem.info
+	// matchmaking sidecar splits the roster at the halfway index - so it reports the
+	// wrong CT/T side - and has no MVP or per-round data at all. MergeHelper keeps
+	// the sidecar's authoritative K/A/D/score and takes the rest from the helper.
 	{
 		std::atomic<size_t> next{ 0 };
-		auto worker = [this, &paths, &sidecarIds, &next]() {
+		auto worker = [this, &paths, &next]() {
 			for (;;) {
 				if (m_cancel.load())
 					return;
@@ -192,7 +235,7 @@ void DemoLibrary::ScanWorker() {
 				if (i >= paths.size())
 					return;
 
-				DemoHelperResult helper = ReadDemoInfoViaHelper(paths[i], sidecarIds[i]);
+				DemoHelperResult helper = ReadDemoInfoViaHelper(paths[i], {}, &m_cancel);
 				if (!helper.ok)
 					continue;
 
@@ -200,37 +243,7 @@ void DemoLibrary::ScanWorker() {
 					std::lock_guard<std::mutex> lock(m_mutex);
 					if (i >= m_entries.size() || m_entries[i].path != paths[i])
 						continue; // a newer scan replaced the list; abandon
-					DemoEntry& e = m_entries[i];
-					if (!helper.map.empty())
-						e.map = helper.map;
-					if (helper.durationSeconds > 0)
-						e.durationSeconds = helper.durationSeconds;
-
-					if (e.hasScoreboard && !e.players.empty()) {
-						// Sidecar roster is authoritative; fill in names (and the
-						// per-round timeline, if the helper did a full parse) by id.
-						for (auto& sp : e.players) {
-							for (const auto& hp : helper.players) {
-								if (hp.accountId != 0 && hp.accountId == sp.accountId) {
-									if (!hp.name.empty() && hp.name != "[unknown]")
-										sp.name = hp.name;
-									if (!hp.perRound.empty()) {
-										sp.perRound = hp.perRound;
-										e.hasRounds = true;
-									}
-									break;
-								}
-							}
-						}
-					} else if (helper.hasScoreboard && !helper.players.empty()) {
-						// No sidecar: the helper's full parse is the only source.
-						e.hasScoreboard = true;
-						e.teamScore0 = helper.teamScore0;
-						e.teamScore1 = helper.teamScore1;
-						for (const auto& hp : helper.players)
-							if (!hp.perRound.empty()) { e.hasRounds = true; break; }
-						e.players = std::move(helper.players);
-					}
+					MergeHelper(m_entries[i], helper);
 				}
 				m_version.fetch_add(1);
 			}
@@ -310,8 +323,11 @@ std::string DemoLibrary::BuildJson() const {
 		j.StringField("map", e.map);
 		j.IntField("duration", e.durationSeconds);
 		j.StringField("durationText", DurationText(e.durationSeconds));
-		j.IntField("date", e.dateModified);
-		j.StringField("dateText", DateText(e.dateModified));
+		// Prefer the real match date (.dem.info matchtime) over the file's
+		// download/modified time so the card shows when the match was played.
+		int64_t dateUnix = e.matchTime > 0 ? e.matchTime : e.dateModified;
+		j.IntField("date", dateUnix);
+		j.StringField("dateText", DateText(dateUnix));
 		j.BoolField("hasScoreboard", e.hasScoreboard);
 		j.BoolField("hasRounds", e.hasRounds);
 		j.IntField("teamScore0", e.teamScore0);
@@ -400,33 +416,11 @@ void DemoLibrary::MergeRoundsForPath(const std::wstring& path) {
 	if (!helper.ok || helper.players.empty())
 		return;
 
-	bool gotRounds = false;
-	for (const auto& hp : helper.players)
-		if (!hp.perRound.empty()) { gotRounds = true; break; }
-
 	std::lock_guard<std::mutex> lock(m_mutex);
 	for (auto& e : m_entries) {
 		if (e.path != path)
 			continue;
-		if (e.hasScoreboard && !e.players.empty()) {
-			// Keep the existing roster; fill names + per-round timeline by account id.
-			for (auto& sp : e.players)
-				for (const auto& hp : helper.players)
-					if (hp.accountId != 0 && hp.accountId == sp.accountId) {
-						if (!hp.name.empty() && hp.name != "[unknown]")
-							sp.name = hp.name;
-						if (!hp.perRound.empty())
-							sp.perRound = hp.perRound;
-						break;
-					}
-		} else {
-			e.hasScoreboard = helper.hasScoreboard;
-			e.teamScore0 = helper.teamScore0;
-			e.teamScore1 = helper.teamScore1;
-			e.players = helper.players;
-		}
-		if (gotRounds)
-			e.hasRounds = true;
+		MergeHelper(e, helper);
 		break;
 	}
 }

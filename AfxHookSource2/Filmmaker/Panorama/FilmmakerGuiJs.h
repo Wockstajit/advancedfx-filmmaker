@@ -77,6 +77,14 @@ inline const char* kFilmmakerGuiJs = R"FMJS(
       f = f.replace(/^.*[\\/]/, '').replace(/\.dem$/i, '');
       return f || mapDisplay(demo && demo.map);
     }
+    // Middle-ellipsis crop for long demo/match names so search rows stay one line.
+    // Keeps the head AND tail (the tail digits are what distinguish match730_ demos)
+    // e.g. 'match730_003827583940474962026_0709708846_125' -> 'match730_00382…846_125'.
+    function cropName(s, head, tail) {
+      s = '' + (s || ''); head = head || 16; tail = tail || 7;
+      if (s.length <= head + tail + 1) return s;
+      return s.substr(0, head) + '…' + s.substr(s.length - tail);
+    }
     function setMapIcon(img, map) {
       if (!img) return;
       try { $.RegisterEventHandler('ImageFailedLoad', img, function () { try { img.SetImage('s2r://panorama/images/map_icons/map_icon_none_png.vtex'); } catch (e) {} }); } catch (e) {}
@@ -95,7 +103,10 @@ inline const char* kFilmmakerGuiJs = R"FMJS(
     } catch (e) {}
 
     function outcomeOf(demo) {
-      // 1 win, 0 tie, -1 loss, or null if my player isn't in this demo
+      // 1 win, 0 tie, -1 loss, or null if my player isn't in this demo.
+      // Coloring is tied to the CURRENTLY logged-in Steam account: a demo you
+      // aren't a player in (e.g. recorded on a different account) stays grey --
+      // that is expected, not a bug.
       if (!demo.hasScoreboard || !myAccount || !demo.players) return null;
       var mine = null;
       for (var i = 0; i < demo.players.length; ++i) if (demo.players[i].accountId === myAccount) { mine = demo.players[i]; break; }
@@ -145,15 +156,46 @@ R"FMJS(
     function applyWatchIcon() {
       var btn = root3.FindChildTraverse('MainMenuNavBarWatch');
       if (!btn) return;
-      for (var i = 0; i < btn.GetChildCount(); ++i) { try { btn.GetChild(i).SetImage(FILM); break; } catch (e) {} }
-      // Rename the section to "Movie Making". The nav button is icon-only, so its
-      // HOVER TOOLTIP is effectively its name -- override the native "Watch matches
-      // and tournaments" tooltip with our movie-making purpose. SetPanelEvent
-      // replaces the native tooltip handler, so the old text no longer shows.
-      if (!btn.__fmTip) {
-        btn.__fmTip = true;
-        btn.SetPanelEvent('onmouseover', function () { try { UiToolkitAPI.ShowTextTooltipOnPanel(btn, 'Movie Making'); } catch (e) {} });
-        btn.SetPanelEvent('onmouseout', function () { try { UiToolkitAPI.HideTextTooltip(); } catch (e) {} });
+      var iconImg = null;
+      for (var i = 0; i < btn.GetChildCount(); ++i) { try { btn.GetChild(i).SetImage(FILM); iconImg = btn.GetChild(i); break; } catch (e) {} }
+      // One-time: brand this nav button as "Movie Making" and give it the matchmaking
+      // GO-button treatment recolored YELLOW -- the same animated line-map video the
+      // green "GO" button uses, tinted gold via wash-color, behind the film icon,
+      // with a gold glow that blooms brighter on hover. The film icon is kept as-is.
+      // SetPanelEvent REPLACES handlers, so the tooltip + glow share one callback.
+      if (!btn.__fmMovie) {
+        btn.__fmMovie = true;
+        // Gold animated background BEHIND the icon. The button is flow-children:none
+        // + overflow:noclip (32x32), so this stacks cleanly and the glow is not
+        // clipped. linemap.webm is the same native asset the GO button uses; if it
+        // ever fails to load, the solid gold fill + border + glow still read as a
+        // highlighted, lit-up button.
+        var bg = $.CreatePanel('Panel', btn, 'FmMovieBg', {});
+        bg.style.width = '100%'; bg.style.height = '100%';
+        bg.style.zIndex = '0'; bg.style.borderRadius = '3px';
+        bg.style.backgroundColor = 'rgba(49,40,9,0.65)';
+        bg.style.border = '1px solid rgba(240,179,35,0.45)';
+        bg.style.washColor = '#f0b323';            // tints the moving lines gold
+        bg.style.brightness = '1.5';
+        bg.style.backgroundImage = 'url("file://{resources}/videos/linemap.webm")';
+        bg.style.backgroundRepeat = 'repeat';
+        bg.style.backgroundPosition = '20% 60%';
+        bg.style.backgroundSize = 'auto auto';
+        bg.style.backgroundImgOpacity = '0.55';
+        bg.style.boxShadow = 'rgba(240,179,35,0.45) 0px 0px 10px 2px';
+        bg.style.transitionProperty = 'brightness, box-shadow';
+        bg.style.transitionDuration = '0.2s';
+        bg.style.transitionTimingFunction = 'ease-in-out';
+        bg.hittest = false;
+        if (iconImg) { iconImg.style.zIndex = '2'; }   // keep the film icon on top
+        btn.SetPanelEvent('onmouseover', function () {
+          try { UiToolkitAPI.ShowTextTooltipOnPanel(btn, 'Movie Making'); } catch (e) {}
+          try { bg.style.brightness = '2.2'; bg.style.boxShadow = 'rgba(240,179,35,0.8) 0px 0px 24px 7px'; } catch (e) {}
+        });
+        btn.SetPanelEvent('onmouseout', function () {
+          try { UiToolkitAPI.HideTextTooltip(); } catch (e) {}
+          try { bg.style.brightness = '1.5'; bg.style.boxShadow = 'rgba(240,179,35,0.45) 0px 0px 10px 2px'; } catch (e) {}
+        });
       }
     }
 
@@ -170,45 +212,82 @@ R"FMJS(
     }
 
     function addNavButtons(page) {
+      // MatchmakingReconnectPanel is a top-right main-menu overlay (~404px wide,
+      // y 0..107, visible+hittest even when it shows nothing here). It paints
+      // ABOVE the watch navbar and swallows pointer events over the navbar's top
+      // ~36px (y 71..107) -- exactly where our Search/Refresh/Add folder buttons
+      // sit. That made only the BOTTOM half of each button hover. Matchmaking
+      // reconnect is meaningless in this movie-making fork, so drop its hittest
+      // (leave it visible) to free the navbar's top strip. Without this the
+      // earlier full-height/centered button fix still can't beat the overlay.
+      var reconnect = root3.FindChildTraverse('MatchmakingReconnectPanel');
+      if (reconnect) reconnect.hittest = false;
+
+      // Hide native right-side controls (the lone refresh IconButton) if present.
       var right = navButtonsHost(page);
       if (!right) return;
-      // Hide native right-side controls (the lone refresh IconButton); keep ours.
-      // Skip anything we created (ids start with 'Fm') so our button row survives
-      // repeated applyWatchEdits() passes.
       for (var i = 0; i < right.GetChildCount(); ++i) {
         var c = right.GetChild(i);
         if (('' + c.id).indexOf('Fm') !== 0) c.visible = false;
       }
-      // Put both buttons in a left-right flow row so they sit SIDE BY SIDE
-      // instead of stacking on top of each other at the right edge of the
-      // (non-flowing) native container -- that overlap hid the Refresh button.
+      // Button row is the FULL navbar-row height (52px) with its children centered,
+      // so the whole row is one continuous hover zone. The buttons themselves are
+      // compact 32px pills centered inside it (set in mkNavBtn). The old top-strip
+      // dead zone that forced full-height buttons is now killed upstream by dropping
+      // MatchmakingReconnectPanel's hittest, so the pills hover edge-to-edge.
+      // Explicit pixel height (not 100%) because the host sizes to fit its children
+      // -- a 100% child would collapse it to zero (the old "buttons missing" bug).
       var bar = page.FindChildTraverse('FmNavBtns');
-      if (!bar) bar = $.CreatePanel('Panel', right, 'FmNavBtns', { class: 'left-right-flow vertical-center' });
-      // Search button (same magnifying-glass icon as the settings UI). Sits left of
-      // Refresh; toggles the demo search input + suggestion dropdown.
-      if (!page.FindChildTraverse('FmSearchBtn')) {
-        var srb = $.CreatePanel('Button', bar, 'FmSearchBtn', { class: 'IconButton' });
-        srb.style.marginRight = '4px';
-        $.CreatePanel('Image', srb, '', { src: 's2r://panorama/images/icons/ui/search.vsvg' });
-        srb.SetPanelEvent('onactivate', function () { toggleSearch(page); });
-        srb.SetPanelEvent('onmouseover', function () { UiToolkitAPI.ShowTextTooltipOnPanel(srb, 'Search demos'); });
-        srb.SetPanelEvent('onmouseout', function () { UiToolkitAPI.HideTextTooltip(); });
+      if (!bar) bar = $.CreatePanel('Panel', right, 'FmNavBtns', {});
+      bar.style.flowChildren = 'right';
+      bar.style.horizontalAlign = 'right'; bar.style.verticalAlign = 'center';
+      bar.style.height = '52px'; bar.hittest = true;
+
+      function mkNavBtn(id, icon, text, onClick) {
+        if (page.FindChildTraverse(id)) return;
+        var b = $.CreatePanel('Button', bar, id, {});
+        b.style.flowChildren = 'right';
+        b.style.width = 'fit-children';   // size to icon+label; never stretch full-width (that overlap let only the last button hover)
+        b.style.height = '32px';          // pill height; sits centered in the 52px hover row
+        b.style.paddingLeft = '12px'; b.style.paddingRight = '12px';
+        b.style.marginLeft = '6px';
+        b.style.borderRadius = '4px';
+        b.style.verticalAlign = 'center';
+        b.hittest = true;
+        // Icon + label are vertically centered as a unit; align the label baseline to
+        // the icon centre so text never rides high above the glyph.
+        var im = $.CreatePanel('Image', b, '', { src: icon });
+        im.style.width = '15px'; im.style.height = '15px'; im.style.marginRight = '8px';
+        im.style.verticalAlign = 'center'; im.style.washColor = '#c7ced6';
+        im.hittest = false;
+        var label = $.CreatePanel('Label', b, '', { text: text });
+        label.style.verticalAlign = 'center'; label.style.fontSize = '14px';
+        label.style.fontWeight = 'medium'; label.style.letterSpacing = '0.3px';
+        label.style.color = '#c7ced6ff';
+        label.hittest = false;
+        b.SetPanelEvent('onactivate', onClick);
+        // OBVIOUS hover feedback: solid gold fill + dark text/icon. A faint white
+        // overlay was invisible against the blue navbar, so flip the foreground
+        // colors too -- there's no mistaking when the hover is live.
+        b.SetPanelEvent('onmouseover', function () {
+          try {
+            b.style.backgroundColor = '#f0b323ff';
+            label.style.color = '#0d0f12ff';
+            im.style.washColor = '#0d0f12';
+          } catch (e) {}
+        });
+        b.SetPanelEvent('onmouseout', function () {
+          try {
+            b.style.backgroundColor = 'rgba(0,0,0,0)';
+            label.style.color = '#c7ced6ff';
+            im.style.washColor = '#c7ced6';
+          } catch (e) {}
+        });
       }
-      if (!page.FindChildTraverse('FmRefreshBtn')) {
-        var refb = $.CreatePanel('Button', bar, 'FmRefreshBtn', { class: 'IconButton' });
-        refb.style.marginRight = '4px';
-        $.CreatePanel('Image', refb, '', { src: 's2r://panorama/images/icons/ui/refresh.vsvg' });
-        refb.SetPanelEvent('onactivate', function () { api.addCommand('refresh'); });
-        refb.SetPanelEvent('onmouseover', function () { UiToolkitAPI.ShowTextTooltipOnPanel(refb, 'Refresh demos'); });
-        refb.SetPanelEvent('onmouseout', function () { UiToolkitAPI.HideTextTooltip(); });
-      }
-      if (!page.FindChildTraverse('FmAddFolderBtn')) {
-        var addb = $.CreatePanel('Button', bar, 'FmAddFolderBtn', { class: 'IconButton' });
-        $.CreatePanel('Image', addb, '', { src: 's2r://panorama/images/icons/ui/plus.vsvg' });
-        addb.SetPanelEvent('onactivate', function () { api.addCommand('addfolder'); });
-        addb.SetPanelEvent('onmouseover', function () { UiToolkitAPI.ShowTextTooltipOnPanel(addb, 'Add demo folder'); });
-        addb.SetPanelEvent('onmouseout', function () { UiToolkitAPI.HideTextTooltip(); });
-      }
+      // Order (left->right): Search, Refresh, Add folder.
+      mkNavBtn('FmSearchBtn', 's2r://panorama/images/icons/ui/search.vsvg', 'Search', function () { toggleSearch(page); });
+      mkNavBtn('FmRefreshBtn', 's2r://panorama/images/icons/ui/refresh.vsvg', 'Refresh', function () { api.addCommand('refresh'); });
+      mkNavBtn('FmAddFolderBtn', 's2r://panorama/images/icons/ui/plus.vsvg', 'Add folder', function () { api.addCommand('addfolder'); });
     }
 
     // The Downloaded navbar RadioButton. Order in the center container is
@@ -490,8 +569,14 @@ R"FMJS(
       var stats = $.CreatePanel('Panel', row, '', { class: 'left-right-flow' });
 
       var avCell = $.CreatePanel('Panel', stats, '', {});
-      avCell.AddClass('sb-row__cell'); avCell.AddClass('sb-row__cell--avatar'); avCell.AddClass('sb-row__cell--avatar--' + TEAMS[teamId]);
+      avCell.AddClass('sb-row__cell'); avCell.AddClass('sb-row__cell--avatar');
       var av = $.CreatePanel('CSGOAvatarImage', avCell, '', {});
+      // Native (matchinfo.js) puts the team class on the AVATAR IMAGE, not the
+      // cell. That class carries a team-colored placeholder background-image which
+      // the loaded Steam avatar then covers. Putting it on the cell instead left
+      // the placeholder showing through the cell's 2px padding as a "border"
+      // framing every avatar -- which the native scoreboard does not have.
+      av.AddClass('sb-row__cell--avatar--' + TEAMS[teamId]);
       var sid = steamId64(p.accountId);
       if (sid) { try { av.PopulateFromSteamID(sid); } catch (e) { try { av.steamid = sid; } catch (e2) {} } }
 
@@ -572,6 +657,44 @@ R"FMJS(
       if (title) { info.SetDialogVariable('playerNameTitle', p ? (p.name || '[unknown]') : ''); title.text = $.Localize('#MatchInfo_RoundDataTitle', info); }
       if (!pr.length) return;
 
+      // Native CS2's round-stats axis (matchinfo.js _FillRoundStats): mark each
+      // side-swap with a "<>" between the two halves, number the major/minor ticks,
+      // and style each bar's little tick mark. We DETECT the swaps straight from the
+      // per-round side data (the half-time swap, plus any overtime swaps) instead of
+      // recomputing the schedule, so it stays correct regardless of format/overtime.
+      function sideSwap(i) { return i > 0 && pr[i].side !== pr[i - 1].side; }
+      var firstSwap = -1;
+      for (var s = 1; s < pr.length; ++s) { if (sideSwap(s)) { firstSwap = s; break; } }
+      var maxRounds = firstSwap > 0 ? firstSwap * 2 : pr.length; // regulation rounds (swap at maxRounds/2)
+      function isMajorTick(n) { return n === 1 || n === maxRounds || n === pr.length || (n > maxRounds && (n - maxRounds) % 6 === 0); }
+      function isMinorTick(n) {
+        if (n >= maxRounds) return false;
+        if (maxRounds % 5 === 0) return n % 5 === 0;
+        if (maxRounds % 4 === 0) return n % 4 === 0;
+        if (maxRounds <= 12 && maxRounds % 3 === 0) return n % 3 === 0;
+        if (maxRounds <= 8 && maxRounds % 2 === 0) return n % 2 === 0;
+        return false;
+      }
+      function tickStyle(idx) { // idx is 0-based; n is 1-based round number
+        var n = idx + 1;
+        if (sideSwap(idx)) return 'mi-round-tick--right-of-team-switch';
+        if (idx + 1 < pr.length && sideSwap(idx + 1)) return 'mi-round-tick--left-of-team-switch';
+        if (isMajorTick(n)) return 'mi-round-tick--major';
+        if (isMinorTick(n)) return 'mi-round-tick--minor';
+        return 'mi-round-tick--sub';
+      }
+      function tickLabel(idx) {
+        var n = idx + 1;
+        if (sideSwap(idx)) return '<>';
+        // Native _GetLabelForTick suppresses the number on the round immediately
+        // LEFT of a side swap (the round before halftime/overtime swaps), so the
+        // '<>' marker isn't crowded by a number. We were missing this, which is
+        // why round 12 (left of the round-13 swap) printed "12" before the '<>'.
+        if (idx + 1 < pr.length && sideSwap(idx + 1)) return '';
+        if (isMajorTick(n) || isMinorTick(n)) return String(n);
+        return '';
+      }
+
       for (var i = 0; i < pr.length; ++i) {
         var r = pr[i];
         var side = TEAMS[r.side === 1 ? 1 : 0];
@@ -585,6 +708,8 @@ R"FMJS(
         var winBar = roundBar.GetChild(0).GetChild(0);
         var border = roundBar.GetChild(1);
         var lossBar = roundBar.GetChild(2).GetChild(0);
+        var tickMark = roundBar.GetChild(2).GetChild(1); // the little major/minor/swap mark under the bar
+        if (tickMark) { tickMark.RemoveClass('mi-round-tick--sub'); tickMark.AddClass(tickStyle(i)); }
         var winIcons = bar.FindChildTraverse('id-mi-eliminations-win');
 
         winBar.AddClass('sb-tint--' + side); border.AddClass('sb-tint--' + side); if (winIcons) winIcons.AddClass('sb-tint--' + side);
@@ -609,8 +734,11 @@ R"FMJS(
 
         if (tickLabels) {
           var tk = $.CreatePanel('Panel', tickLabels, '', { class: 'mi-tick' });
-          var show = ((i + 1) % 5 === 0) || (i === 0) || (i === pr.length - 1);
-          $.CreatePanel('Label', tk, '', { class: 'mi-tick-label', text: show ? String(i + 1) : '' });
+          var label = tickLabel(i);
+          // The "<>" swap marker straddles the gap between halves (native aligns it
+          // with the mi-tick-class-halftime-align class).
+          tk.SetHasClass('mi-tick-class-halftime-align', label === '<>');
+          $.CreatePanel('Label', tk, '', { class: 'mi-tick-label', text: label });
         }
       }
     }
@@ -697,30 +825,42 @@ R"FMJS(
     // it does not depend on the settings stylesheet being in scope on this page.
     function buildSearch(page) {
       if (searchWrap && searchWrap.IsValid && searchWrap.IsValid()) return;
-      var hostPanel = page.FindChildTraverse('main-content') || page;
+      // Parent to the PAGE root (JsWatchContent, no flow), NOT main-content (top-bottom-flow):
+      // a flow parent inserts the search panel into the layout and shoves the navbar/tabs down
+      // every time it opens. The page root lets it float by align+margins with no reflow.
+      var hostPanel = page;
       searchWrap = $.CreatePanel('Panel', hostPanel, 'FmSearchWrap', {});
       searchWrap.style.flowChildren = 'down';
       searchWrap.style.horizontalAlign = 'right'; searchWrap.style.verticalAlign = 'top';
-      searchWrap.style.marginTop = '52px'; searchWrap.style.marginRight = '72px';
-      searchWrap.style.width = '340px'; searchWrap.style.zIndex = '100';
-      searchWrap.visible = false;
+      searchWrap.style.marginTop = '62px'; searchWrap.style.marginRight = '72px';
+      searchWrap.style.width = '360px';
+      // High zIndex so the search floats ABOVE the demo detail (the long match name
+      // sits right under here and used to show through / overlap it).
+      searchWrap.style.zIndex = '1000';
+      // hittest follows visibility: a hidden-but-laid-out high-zIndex overlay would
+      // otherwise keep eating pointer events over the area it covers.
+      searchWrap.visible = false; searchWrap.hittest = false;
 
       searchInput = $.CreatePanel('TextEntry', searchWrap, 'FmSearchInput', { placeholder: 'Search map, player or demo name' });
-      searchInput.style.width = '100%'; searchInput.style.height = '34px';
-      searchInput.style.backgroundColor = 'rgba(0,0,0,0.65)';
-      searchInput.style.border = '1px solid rgba(255,255,255,0.12)';
-      searchInput.style.borderRadius = '3px'; searchInput.style.color = '#eef2f6ff';
-      searchInput.style.paddingLeft = '10px'; searchInput.style.paddingRight = '10px';
+      searchInput.style.width = '100%'; searchInput.style.height = '36px';
+      // OPAQUE fill -- nothing behind the box should be visible through it.
+      searchInput.style.backgroundColor = '#15181dff';
+      searchInput.style.border = '1px solid rgba(255,255,255,0.16)';
+      searchInput.style.borderRadius = '4px'; searchInput.style.color = '#eef2f6ff';
+      searchInput.style.paddingLeft = '11px'; searchInput.style.paddingRight = '11px';
       searchInput.style.fontSize = '15px';
+      searchInput.style.boxShadow = 'rgba(0,0,0,0.55) 0px 8px 22px 0px';
       searchInput.SetPanelEvent('ontextentrychange', function () { updateSuggestions(); });
       try { $.RegisterEventHandler('TextEntryChanged', searchInput, function () { updateSuggestions(); }); } catch (e) {}
 
       searchResults = $.CreatePanel('Panel', searchWrap, 'FmSearchResults', {});
       searchResults.style.flowChildren = 'down'; searchResults.style.width = '100%';
-      searchResults.style.marginTop = '2px'; searchResults.style.maxHeight = '320px';
+      searchResults.style.marginTop = '4px'; searchResults.style.maxHeight = '340px';
       searchResults.style.overflow = 'squish scroll';
-      searchResults.style.backgroundColor = 'rgba(14,16,20,0.98)';
-      searchResults.style.border = '1px solid rgba(255,255,255,0.10)';
+      searchResults.style.backgroundColor = '#0e1014ff';   // fully opaque dropdown
+      searchResults.style.border = '1px solid rgba(255,255,255,0.12)';
+      searchResults.style.borderRadius = '4px';
+      searchResults.style.boxShadow = 'rgba(0,0,0,0.6) 0px 10px 26px 0px';
       searchResults.visible = false;
     }
 
@@ -728,7 +868,7 @@ R"FMJS(
       buildSearch(page);
       if (!searchWrap) return;
       var show = !searchWrap.visible;
-      searchWrap.visible = show;
+      searchWrap.visible = show; searchWrap.hittest = show;
       if (show) { try { searchInput.SetFocus(); } catch (e) {} updateSuggestions(); }
       else { try { searchInput.text = ''; } catch (e) {} if (searchResults) searchResults.visible = false; }
     }
@@ -754,12 +894,19 @@ R"FMJS(
         (function (demo, why) {
           var rowBtn = $.CreatePanel('Button', searchResults, '', {});
           rowBtn.style.flowChildren = 'down'; rowBtn.style.width = '100%';
-          rowBtn.style.paddingTop = '6px'; rowBtn.style.paddingBottom = '6px';
-          rowBtn.style.paddingLeft = '10px'; rowBtn.style.paddingRight = '10px';
-          var t = $.CreatePanel('Label', rowBtn, '', { text: mapDisplay(demo.map) + '  -  ' + demoName(demo) });
+          rowBtn.style.paddingTop = '7px'; rowBtn.style.paddingBottom = '7px';
+          rowBtn.style.paddingLeft = '12px'; rowBtn.style.paddingRight = '12px';
+          rowBtn.style.borderBottom = '1px solid rgba(255,255,255,0.05)';
+          // Line 1: map name (accent) + cropped demo name, forced to a single line so a
+          // long match730_ name can never wrap or overflow the dropdown width.
+          var t = $.CreatePanel('Label', rowBtn, '', { text: mapDisplay(demo.map) + '  ·  ' + cropName(demoName(demo)) });
           t.style.color = '#eef2f6ff'; t.style.fontSize = '14px';
-          var sub = $.CreatePanel('Label', rowBtn, '', { text: why }); // gray hint of WHY it matched
+          t.style.whiteSpace = 'nowrap'; t.style.textOverflow = 'ellipsis'; t.style.width = '100%';
+          var sub = $.CreatePanel('Label', rowBtn, '', { text: cropName(why, 30, 8) }); // gray hint of WHY it matched
           sub.style.color = '#8a93a0ff'; sub.style.fontSize = '12px';
+          sub.style.whiteSpace = 'nowrap'; sub.style.textOverflow = 'ellipsis'; sub.style.width = '100%';
+          rowBtn.SetPanelEvent('onmouseover', (function (r) { return function () { try { r.style.backgroundColor = 'rgba(240,179,35,0.16)'; } catch (e) {} }; })(rowBtn));
+          rowBtn.SetPanelEvent('onmouseout', (function (r) { return function () { try { r.style.backgroundColor = 'rgba(0,0,0,0)'; } catch (e) {} }; })(rowBtn));
           rowBtn.SetPanelEvent('onactivate', (function (key) { return function () { revealDemo(key); }; })(tileKey(demo)));
         })(demos[i], why);
         ++shown;
@@ -815,6 +962,108 @@ R"FMJS(
       };
       $.Schedule(0.05, tick);
     };
+
+    // ---- automation hooks (used by automation\verify-watch-ui.ps1) ----
+    // The netcon console truncates a single command at 256 bytes, so the
+    // verifier cannot ship a long ui_eval payload. These helpers keep the heavy
+    // logic in the injected script (RunScript has no length limit); automation
+    // drives them with short calls like  $.Filmmaker.gotoTab('downloaded').
+    api.tabBodyId = function (name) {
+      name = ('' + (name || '')).toLowerCase();
+      if (name.indexOf('your') >= 0 || name === 'ym' || name === 'matches') return 'JsYourMatches';
+      if (name.indexOf('tourn') >= 0) return 'JsTournaments';
+      return 'JsDownloaded';
+    };
+    // Switch Watch sub-tabs the way native NavigateToTab does (toggle the
+    // WatchMenu--Hide class on the tab bodies) -- the native handler lives in the
+    // mainmenu_watch module, which is NOT in this script's JS scope, and a
+    // synthetic 'Activated' on the navbar RadioButton only highlights it without
+    // navigating. For Downloaded we then run our normal takeover so our body
+    // shows and native siblings stay hidden.
+    api.gotoTab = function (name) {
+      var page = watchPage();
+      if (!page) { $.Msg('[GOTO] nopage=1\n'); return false; }
+      var targetId = api.tabBodyId(name);
+      var dl = page.FindChildTraverse('JsDownloaded');
+      var container = dl ? dl.GetParent() : null;
+      if (container) {
+        for (var i = 0; i < container.GetChildCount(); ++i) {
+          var c = container.GetChild(i);
+          if (!c.BHasClass('WatchMenu')) continue;
+          if (c.id === targetId) c.RemoveClass('WatchMenu--Hide');
+          else c.AddClass('WatchMenu--Hide');
+        }
+      }
+      // Reflect the selection on the navbar radio buttons ([Your Matches,
+      // Downloaded, Tournaments]) so the highlight matches the visible tab.
+      var nav = page.FindChildTraverse('watch-navbar');
+      var center = nav && nav.GetChild(0);
+      if (center && center.GetChildCount() >= 2) {
+        try { center.GetChild(0).checked = (targetId === 'JsYourMatches'); } catch (e) {}
+        try { center.GetChild(1).checked = (targetId === 'JsDownloaded'); } catch (e) {}
+      }
+      if (targetId === 'JsDownloaded') takeoverDownloaded(page);
+      $.Msg('[GOTO] ' + targetId + '\n');
+      return true;
+    };
+    // Emit a single parseable [VERIFY] line describing the live tab + body state
+    // (mirrors what verify-watch-ui.ps1 used to inline as one giant ui_eval).
+    api.report = function () {
+      var page = watchPage();
+      if (!page) { $.Msg('[VERIFY] nopage=1\n'); return; }
+      var dl = page.FindChildTraverse('JsDownloaded');
+      var ym = page.FindChildTraverse('JsYourMatches');
+      var b = page.FindChildTraverse('FmDownloadedBody');
+      var list = page.FindChildTraverse('FmMatchList');
+      var tiles = list ? list.GetChildCount() : -1;
+      var first = (list && tiles > 0) ? list.GetChild(0) : null;
+      var styled = first ? (first.FindChildTraverse('mapname') ? 1 : 0) : -1;
+      var sb = (b && b.FindChildTraverse('Scoreboard')) ? 1 : 0;
+      var ctT = b && b.FindChildTraverse('players-table-CT');
+      var tT = b && b.FindChildTraverse('players-table-TERRORIST');
+      var rows = b ? ((ctT ? ctT.GetChildCount() : 0) + (tT ? tT.GetChildCount() : 0)) : -1;
+      $.Msg('[VERIFY] dlHide=' + (dl && dl.BHasClass('WatchMenu--Hide') ? 1 : 0) +
+        ' ymHide=' + (ym && ym.BHasClass('WatchMenu--Hide') ? 1 : 0) +
+        ' bodyExists=' + (b ? 1 : 0) + ' tiles=' + tiles + ' styledTile=' + styled +
+        ' scoreboard=' + sb + ' playerRows=' + rows + '\n');
+    };
+    // Step-5 helper: select the 2nd tile and tag the 1st so the verifier can
+    // prove rows are not recreated (tag survives -> scroll preserved) under churn.
+    api.tagFirst = function (tag) {
+      var page = watchPage(); var l = page && page.FindChildTraverse('FmMatchList');
+      if (!l) { $.Msg('[SEL] nolist\n'); return; }
+      if (l.GetChildCount() > 1) { var t = l.GetChild(1); try { t.checked = true; $.DispatchEvent('Activated', t); } catch (e) {} }
+      if (l.GetChildCount() > 0) l.GetChild(0).SetAttributeInt('fmtag', tag | 0);
+      $.Msg('[SEL] done\n');
+    };
+    // Step-5 helper: emit list-stability snapshot (tile count / first-row tag / checked row).
+    api.stab = function () {
+      var page = watchPage(); var l = page && page.FindChildTraverse('FmMatchList');
+      var n = l ? l.GetChildCount() : -1;
+      var tag = (l && n > 0) ? l.GetChild(0).GetAttributeInt('fmtag', -1) : -1;
+      var ck = -1; if (l) for (var i = 0; i < n; i++) { if (l.GetChild(i).checked) { ck = i; break; } }
+      $.Msg('[STAB] tiles=' + n + ' tag=' + tag + ' checked=' + ck + '\n');
+    };
+    // Step-6 helper: emit nav-button presence/visibility/shared-row report.
+    api.btnReport = function () {
+      var page = watchPage();
+      var search = page && page.FindChildTraverse('FmSearchBtn');
+      var ref = page && page.FindChildTraverse('FmRefreshBtn');
+      var add = page && page.FindChildTraverse('FmAddFolderBtn');
+      var bar = page && page.FindChildTraverse('FmNavBtns');
+      function firstChildHittestOff(p) {
+        var im = p && p.GetChildCount && p.GetChildCount() > 0 ? p.GetChild(0) : null;
+        return im && im.hittest === false ? 1 : 0;
+      }
+      var same = (bar && search && ref && add && search.GetParent() === bar && ref.GetParent() === bar && add.GetParent() === bar) ? 1 : 0;
+      $.Msg('[BTN] search=' + (search ? 1 : 0) + ' searchVis=' + (search && search.visible ? 1 : 0) +
+        ' searchImgNoHit=' + firstChildHittestOff(search) +
+        ' ref=' + (ref ? 1 : 0) + ' refVis=' + (ref && ref.visible ? 1 : 0) +
+        ' refImgNoHit=' + firstChildHittestOff(ref) +
+        ' add=' + (add ? 1 : 0) + ' addVis=' + (add && add.visible ? 1 : 0) +
+        ' addImgNoHit=' + firstChildHittestOff(add) + ' sameRow=' + same + '\n');
+    };
+
     $.Filmmaker = api;
 
     var watchNav = root3.FindChildTraverse('MainMenuNavBarWatch');

@@ -12,6 +12,7 @@
 
 #include "DemoEntry.h"
 
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -21,6 +22,7 @@ struct DemoInfoResult {
 	bool ok = false;
 	int teamScore0 = 0;
 	int teamScore1 = 0;
+	int64_t matchTime = 0; // CDataGCCStrike15_v2_MatchInfo.matchtime (field 2), unix seconds; 0 = unknown
 	std::vector<ScoreboardPlayer> players;
 };
 

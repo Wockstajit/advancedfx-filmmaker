@@ -21,8 +21,9 @@ constexpr uint32_t k_RsTeamScores = 12;
 // Field number inside CMsgGCCStrike15_v2_MatchmakingGG2GServerReserve.
 constexpr uint32_t k_ReservationAccountIds = 1;
 
-// Field number inside CDataGCCStrike15_v2_MatchInfo.
-constexpr uint32_t k_MatchInfoRoundStatsAll = 5;
+// Field numbers inside CDataGCCStrike15_v2_MatchInfo.
+constexpr uint32_t k_MatchInfoMatchTime = 2;     // uint32 unix seconds (when the match was played)
+constexpr uint32_t k_MatchInfoRoundStatsAll = 5; // repeated; the LAST entry holds final totals
 
 // Collects all repeated varint values for a given field number, plus (optionally)
 // the last length-delimited bytes for a sub-message field.
@@ -94,13 +95,19 @@ DemoInfoResult ReadDemoInfo(const std::wstring& demoPath) {
 	if (data.empty())
 		return result;
 
-	// Find the last roundstatsall entry (cumulative final totals).
+	// Find the last roundstatsall entry (cumulative final totals) and the match
+	// time (the wall-clock date the match was actually played).
 	const uint8_t* lastRoundPtr = nullptr;
 	size_t lastRoundLen = 0;
+	int64_t matchTime = 0;
 	{
 		ProtobufReader r(data.data(), data.size());
 		uint32_t field; PbWire wire;
 		while (r.ReadTag(field, wire)) {
+			if (field == k_MatchInfoMatchTime && wire == PbWire::Varint) {
+				matchTime = (int64_t)r.ReadVarint();
+				continue;
+			}
 			if (field == k_MatchInfoRoundStatsAll && wire == PbWire::LengthDelimited) {
 				const uint8_t* p; size_t l;
 				if (r.ReadBytes(p, l)) {
@@ -112,6 +119,8 @@ DemoInfoResult ReadDemoInfo(const std::wstring& demoPath) {
 			r.SkipField(wire);
 		}
 	}
+
+	result.matchTime = matchTime;
 
 	if (!lastRoundPtr)
 		return result;

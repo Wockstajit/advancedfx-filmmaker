@@ -28,7 +28,7 @@ net console. That makes it verifiable without the physical mouse (see the QA han
 | Understand the components + data flow | [follow-camera-architecture.md](follow-camera-architecture.md) |
 | Drive the feature from the console (the automation surface) | [follow-camera-commands.md](follow-camera-commands.md) |
 | Find a control in the editor UI / map state→control | [follow-camera-ui.md](follow-camera-ui.md) |
-| Understand the `.fmjson` v5 weapon/C4 event pre-scan | [demo-event-prescan.md](demo-event-prescan.md) |
+| Understand the `.fmjson` v6 weapon/C4 event pre-scan | [demo-event-prescan.md](demo-event-prescan.md) |
 | See what changed, with file:line refs | [changelog.md](changelog.md) |
 | Run the automated verification (no mouse) | [qa-automation-handoff.md](qa-automation-handoff.md) |
 
@@ -41,13 +41,14 @@ build.bat
 ```
 
 `build.bat` builds the win32 + x64 HLAE staging release to
-`build\staging-release\bin\HLAE.exe` and publishes the `FilmmakerDemoInfo` .NET helper
-(the `.dem` → scoreboard/event JSON pre-scanner) next to `AfxHookSource2.dll`. The
+`build\staging-release\bin\HLAE.exe` and builds the `FilmmakerDemoInfo` helper
+(Go / demoinfocs-golang — the `.dem` → scoreboard/event JSON pre-scanner) next to
+`AfxHookSource2.dll`. The
 shader-build env-var fix is baked in. A standalone math test target,
 `FollowCameraMathTests` (driver: [automation/follow-camera-math-tests.cpp](../automation/follow-camera-math-tests.cpp)),
 is built by CMake and registered with CTest.
 
-> **Schema sync:** the demo pre-scan format is at **v5**. The C# writer
-> (`FilmmakerDemoInfo`) and the C++ reader (`DemoInfoHelper`) must agree on the version —
-> if you change one, change the other and bump both. See
+> **Schema sync:** the demo pre-scan format is at **v6**. The Go writer
+> (`FilmmakerDemoInfoGo/main.go`) and the C++ reader (`DemoInfoHelper`) must agree on the
+> version — if you change one, change the other and bump both. See
 > [demo-event-prescan.md](demo-event-prescan.md).
