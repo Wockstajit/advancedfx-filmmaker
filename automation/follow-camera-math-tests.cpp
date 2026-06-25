@@ -47,6 +47,20 @@ int main() {
 	Check(Near(p.x, 5.0) && Near(p.y, 10.0) && Near(p.z, 15.0), "position smoothing");
 	Check(Near(FollowDistance({0, 0, 0}, {3, 4, 0}), 5.0), "distance");
 
+	const FollowVec3 front = FollowRotateVector({72, 0, 8}, {0, 0, 0});
+	Check(Near(front.x, 72.0) && Near(front.y, 0.0) && Near(front.z, 8.0), "local front offset");
+	const FollowVec3 yawedFront = FollowRotateVector({72, 0, 0}, {0, 90, 0});
+	Check(Near(yawedFront.x, 0.0, 1e-5) && Near(yawedFront.y, 72.0, 1e-5), "local offset follows yaw");
+	const FollowVec3 target{100, 20, 60};
+	const FollowVec3 camera{172, 20, 68};
+	const FollowAngles backAtTarget = FollowLookAt(camera, target);
+	Check(Near(backAtTarget.yaw, 180.0) && backAtTarget.pitch > 0.0, "front camera looks back at target");
+
+	const FollowVec3 frozen = FollowSmoothPosition({10, 20, 30}, {100, 200, 300}, 0.0, 0.25);
+	Check(Near(frozen.x, 10.0) && Near(frozen.y, 20.0) && Near(frozen.z, 30.0), "zero-dt position hold");
+	const FollowAngles frozenAngles = FollowSmoothAngles({4, 5, 6}, {40, 50, 60}, 0.0, 0.25, 0.0, 0.0);
+	Check(Near(frozenAngles.pitch, 4.0) && Near(frozenAngles.yaw, 5.0), "zero-dt angle hold");
+
 	std::cout << "FollowCameraMathTests: all checks passed\n";
 	return 0;
 }

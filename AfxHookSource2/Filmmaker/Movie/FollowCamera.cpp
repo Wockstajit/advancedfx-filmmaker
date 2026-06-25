@@ -209,16 +209,171 @@ void ResolveOwner(CEntityInstance* entity, int& ownerIndex, std::string& ownerNa
 		ownerName = owner->IsPlayerPawn() ? "Player pawn" : "Entity";
 }
 
-std::vector<std::string> AvailableAttachments(CEntityInstance* entity, bool weapon) {
-	std::vector<std::string> out;
+uint64_t EntityHandleValue(CEntityInstance* entity) {
+	if (!entity) return 0;
+	const auto h = entity->GetHandle();
+	return h.IsValid() ? (uint64_t)(uint32_t)h.ToInt() : 0;
+}
+
+FollowAttachPoint MakeAttachPoint(const char* id, const char* label, const char* kind,
+	bool valid, int index, const char* source) {
+	FollowAttachPoint out;
+	out.id = id ? id : "";
+	out.label = label ? label : out.id;
+	out.kind = kind ? kind : "";
+	out.valid = valid;
+	out.index = index;
+	out.source = source ? source : "";
+	return out;
+}
+
+void AddAttachmentIfValid(std::vector<FollowAttachPoint>& out, CEntityInstance* entity,
+	const char* id, const char* label, const char* kind) {
+	if (!entity || !id || !*id) return;
+	const uint8_t idx = entity->LookupAttachment(id);
+	if (idx != 0)
+		out.push_back(MakeAttachPoint(id, label, kind, true, idx, "model-attachment"));
+}
+
+std::vector<FollowAttachPoint> AvailableAttachPoints(CEntityInstance* entity, FollowTargetType type, bool weapon, bool bomb) {
+	std::vector<FollowAttachPoint> out;
 	if (!entity) return out;
-	const char* playerNames[] = { "head", "eyes", "weapon_hand_R", "weapon_hand_L" };
-	const char* weaponNames[] = { "muzzle_flash", "muzzle", "shell_eject" };
-	const char** names = weapon ? weaponNames : playerNames;
-	const size_t count = weapon ? _countof(weaponNames) : _countof(playerNames);
-	for (size_t i = 0; i < count; ++i)
-		if (entity->LookupAttachment(names[i]) != 0)
-			out.emplace_back(names[i]);
+	out.push_back(MakeAttachPoint("entity", "Entity", "entity", true, 0, "entity-origin"));
+
+	if (type == FollowTargetType::Player) {
+		out.push_back(MakeAttachPoint("eyes", "Eyes", "virtual", true, -1, "player-render-eye"));
+		out.push_back(MakeAttachPoint("head", "Head", "virtual", true, -1, "player-virtual"));
+		out.push_back(MakeAttachPoint("chest", "Chest", "virtual", true, -1, "player-virtual"));
+		out.push_back(MakeAttachPoint("pelvis", "Pelvis", "virtual", true, -1, "player-virtual"));
+		out.push_back(MakeAttachPoint("feet", "Feet", "virtual", true, -1, "player-virtual"));
+		AddAttachmentIfValid(out, entity, "weapon_hand_R", "Right hand", "attachment");
+		AddAttachmentIfValid(out, entity, "weapon_hand_L", "Left hand", "attachment");
+		return out;
+	}
+
+	if (type == FollowTargetType::Grenade || bomb)
+		return out;
+
+	if (weapon) {
+		AddAttachmentIfValid(out, entity, "muzzle", "Muzzle", "attachment");
+		AddAttachmentIfValid(out, entity, "muzzle_flash", "Muzzle flash", "attachment");
+		AddAttachmentIfValid(out, entity, "shell_eject", "Shell eject", "attachment");
+		AddAttachmentIfValid(out, entity, "eject", "Eject", "attachment");
+		AddAttachmentIfValid(out, entity, "magazine", "Magazine", "attachment");
+		AddAttachmentIfValid(out, entity, "mag", "Magazine", "attachment");
+		AddAttachmentIfValid(out, entity, "clip", "Magazine", "attachment");
+		AddAttachmentIfValid(out, entity, "bolt", "Bolt", "attachment");
+		AddAttachmentIfValid(out, entity, "slide", "Slide", "attachment");
+	}
+	return out;
+}
+
+std::vector<std::string> AttachPointIds(const std::vector<FollowAttachPoint>& points) {
+	std::vector<std::string> out;
+	out.reserve(points.size());
+	for (const auto& point : points)
+		if (point.valid)
+			out.push_back(point.id);
+	return out;
+}
+
+struct AttachTransformResult {
+	bool valid = false;
+	bool oriented = false;
+	int entityIndex = -1;
+	uint64_t entityHandle = 0;
+	std::string entityType;
+	std::string className;
+	std::string modelName;
+	std::string attachId;
+	std::string attachKind;
+	int attachIndex = -1;
+	std::string source;
+	FollowVec3 pos;
+	FollowAngles ang;
+};
+
+bool ResolvePlayerVirtualPoint(CEntityInstance* pawn, const std::string& id,
+	AttachTransformResult& out) {
+	if (!pawn || !pawn->IsPlayerPawn()) return false;
+	FollowVec3 origin;
+	if (!ReadOrigin(pawn, origin)) return false;
+	float eye[3] = {};
+	float a[3] = {};
+	pawn->GetRenderEyeOrigin(eye);
+	pawn->GetRenderEyeAngles(a);
+	const FollowVec3 eyes{ eye[0], eye[1], eye[2] };
+	const FollowAngles eyeAngles{ a[0], a[1], a[2] };
+	out.valid = true;
+	out.oriented = true;
+	out.attachKind = "virtual";
+	out.attachIndex = -1;
+	out.source = id == "eyes" ? "player-render-eye" : "player-virtual";
+	out.ang = eyeAngles;
+	if (id == "eyes") {
+		out.pos = eyes;
+	} else if (id == "head") {
+		out.pos = FollowVec3{ eyes.x, eyes.y, eyes.z - 3.0 };
+	} else if (id == "chest") {
+		out.pos = FollowVec3{
+			origin.x + (eyes.x - origin.x) * 0.55,
+			origin.y + (eyes.y - origin.y) * 0.55,
+			origin.z + (eyes.z - origin.z) * 0.55
+		};
+		out.ang.pitch = 0.0;
+	} else if (id == "pelvis") {
+		out.pos = FollowVec3{
+			origin.x + (eyes.x - origin.x) * 0.25,
+			origin.y + (eyes.y - origin.y) * 0.25,
+			origin.z + (eyes.z - origin.z) * 0.25
+		};
+		out.ang.pitch = 0.0;
+	} else if (id == "feet") {
+		out.pos = origin;
+		out.ang.pitch = 0.0;
+	} else {
+		return false;
+	}
+	return true;
+}
+
+AttachTransformResult ResolveAttachTransform(CEntityInstance* entity, int entityIndex,
+	FollowTargetType type, const std::string& requestedAttachId) {
+	AttachTransformResult out;
+	out.entityIndex = entityIndex;
+	out.entityHandle = EntityHandleValue(entity);
+	out.entityType = FollowTargetTypeName(type);
+	out.className = EntityClass(entity);
+	out.attachId = requestedAttachId.empty() ? "entity" : requestedAttachId;
+	if (!entity) {
+		out.source = "missing-entity";
+		return out;
+	}
+
+	if (type == FollowTargetType::Player && ResolvePlayerVirtualPoint(entity, out.attachId, out))
+		return out;
+
+	if (out.attachId != "entity") {
+		const uint8_t idx = entity->LookupAttachment(out.attachId.c_str());
+		SOURCESDK::Vector origin;
+		SOURCESDK::Quaternion q;
+		if (idx && entity->GetAttachment(idx, origin, q)) {
+			out.valid = true;
+			out.oriented = true;
+			out.attachKind = "attachment";
+			out.attachIndex = idx;
+			out.source = "model-attachment";
+			out.pos = FollowVec3{ origin.x, origin.y, origin.z };
+			out.ang = FollowQuatToAngles(q.x, q.y, q.z, q.w);
+			return out;
+		}
+	}
+
+	out.attachKind = "entity";
+	out.attachIndex = 0;
+	out.source = out.attachId == "entity" ? "entity-origin" : "fallback-entity-origin";
+	out.valid = ReadOrigin(entity, out.pos);
+	out.oriented = false;
 	return out;
 }
 
@@ -237,6 +392,15 @@ std::string JsonEscape(const std::string& value) {
 		}
 	}
 	return out.str();
+}
+
+void AppendAttachPointJson(std::ostringstream& o, const FollowAttachPoint& point) {
+	o << "{\"id\":\"" << JsonEscape(point.id) << "\""
+		<< ",\"label\":\"" << JsonEscape(point.label) << "\""
+		<< ",\"kind\":\"" << JsonEscape(point.kind) << "\""
+		<< ",\"valid\":" << (point.valid ? "true" : "false")
+		<< ",\"index\":" << point.index
+		<< ",\"source\":\"" << JsonEscape(point.source) << "\"}";
 }
 
 const char* TeamName(int team) {
@@ -323,8 +487,8 @@ protected:
 
 class AttachmentTargetProvider final : public EntityTargetProvider {
 public:
-	AttachmentTargetProvider(int index, const std::string& attachment)
-		: EntityTargetProvider(index, FollowTargetType::Weapon), m_attachment(attachment) {}
+	AttachmentTargetProvider(int index, FollowTargetType type, const std::string& attachment)
+		: EntityTargetProvider(index, type), m_attachment(attachment) {}
 	// Attach rides whatever entity is selected (a player pawn OR a weapon), so validity
 	// is simply "the entity still exists" -- NOT a weapon-class check (that broke Player
 	// Bone attach) and NOT a strict attachment lookup (world weapon models often lack
@@ -337,21 +501,10 @@ public:
 		return pos;
 	}
 	bool GetWorldTransform(FollowVec3& pos, FollowAngles& ang) override {
-		pos = {};
-		CEntityInstance* entity = EntityAt(m_index);
-		if (!entity) return false;
-		const uint8_t attachment = entity->LookupAttachment(m_attachment.c_str());
-		SOURCESDK::Vector origin;
-		SOURCESDK::Quaternion q;
-		if (attachment && entity->GetAttachment(attachment, origin, q)) {
-			pos = FollowVec3{ origin.x, origin.y, origin.z };
-			ang = FollowQuatToAngles(q.x, q.y, q.z, q.w);
-			return true;
-		}
-		// Attachment point not on this model -- fall back to the weapon origin so the
-		// camera still rides it (caller orients from motion). Better than dropping.
-		ReadOrigin(entity, pos);
-		return false;
+		AttachTransformResult resolved = ResolveAttachTransform(EntityAt(m_index), m_index, m_type, m_attachment);
+		pos = resolved.pos;
+		ang = resolved.ang;
+		return resolved.valid && resolved.oriented;
 	}
 	// Just the entity name (player or weapon); the attach point is shown separately in the
 	// "Attach pt" row, so appending "/ head" here only made the Target label noisy.
@@ -369,7 +522,7 @@ class HeldWeaponProvider final : public IFollowTargetProvider {
 public:
 	HeldWeaponProvider(int playerIndex, std::string attachment)
 		: m_playerIndex(playerIndex), m_attachment(std::move(attachment)) {}
-	int ActiveWeaponIndex() {
+	int ActiveWeaponIndex() const {
 		CEntityInstance* pawn = EntityAt(m_playerIndex);
 		if (!pawn || !pawn->IsPlayerPawn()) return -1;
 		const auto weapon = pawn->GetActiveWeaponHandle();
@@ -392,21 +545,10 @@ public:
 	bool GetWorldTransform(FollowVec3& pos, FollowAngles& ang) override {
 		pos = {};
 		const int wi = ActiveWeaponIndex();
-		CEntityInstance* weapon = EntityAt(wi);
-		if (!weapon) return false;
-		if (!m_attachment.empty()) {
-			const uint8_t attachment = weapon->LookupAttachment(m_attachment.c_str());
-			SOURCESDK::Vector origin; SOURCESDK::Quaternion q;
-			if (attachment && weapon->GetAttachment(attachment, origin, q)) {
-				pos = FollowVec3{ origin.x, origin.y, origin.z };
-				ang = FollowQuatToAngles(q.x, q.y, q.z, q.w);
-				return true;
-			}
-		}
-		float x = FLT_MAX, y = FLT_MAX, z = FLT_MAX;
-		weapon->GetOrigin(x, y, z);
-		pos = FollowVec3{ x, y, z };
-		return false; // position only; caller orients from motion / placement
+		AttachTransformResult resolved = ResolveAttachTransform(EntityAt(wi), wi, FollowTargetType::Weapon, m_attachment);
+		pos = resolved.pos;
+		ang = resolved.ang;
+		return resolved.valid && resolved.oriented;
 	}
 	std::string GetDisplayName() override {
 		CEntityInstance* weapon = EntityAt(ActiveWeaponIndex());
@@ -420,7 +562,7 @@ public:
 		if (pawn->GetHealth() <= 0) return FollowTargetStatus::Dead;
 		return IsValid() ? FollowTargetStatus::Active : FollowTargetStatus::Missing;
 	}
-	int EntityIndex() const override { return m_playerIndex; }
+	int EntityIndex() const override { return ActiveWeaponIndex(); }
 private:
 	int m_playerIndex;
 	std::string m_attachment;
@@ -460,6 +602,8 @@ void FollowCamera::ResetMotion() {
 	m_retargetElapsed = 0.0;
 	m_deathRetargetElapsed = 0.0;
 	m_lastQpc = 0;
+	m_attachDebug = AttachDebugSnapshot();
+	m_havePrevDebug = false;
 }
 
 void FollowCamera::PlaceCamera() {
@@ -566,9 +710,10 @@ void FollowCamera::SetTargetType(FollowTargetType type) {
 	m_state.targetHandle = 0;
 	m_grenadeTrackPending = false;
 	m_selectedEvent = -1;
-	// Sensible default attach point per type so the Attach-pt label never shows a
-	// mismatched bone (e.g. "head" on a rifle): weapons -> muzzle, players -> head.
-	if (type == FollowTargetType::Weapon) m_state.attachmentName = "muzzle";
+	// Start from safe defaults. Candidate selection upgrades these to validated
+	// model/player points (for example muzzle) only when the selected target exposes them.
+	if (type == FollowTargetType::Weapon) m_state.attachmentName = "entity";
+	else if (type == FollowTargetType::Grenade) m_state.attachmentName = "entity";
 	else if (type == FollowTargetType::Player) m_state.attachmentName = "head";
 	ResetMotion();
 }
@@ -576,6 +721,12 @@ void FollowCamera::SetTargetType(FollowTargetType type) {
 void FollowCamera::SetMode(FollowMode mode) {
 	if (m_state.mode == mode) return;
 	m_state.mode = mode;
+	if (mode == FollowMode::Attach
+		&& std::fabs(m_state.offset.x) < 0.001
+		&& std::fabs(m_state.offset.y) < 0.001
+		&& std::fabs(m_state.offset.z) < 0.001) {
+		m_state.offset = FollowVec3{ 72.0, 0.0, 8.0 };
+	}
 	ResetMotion();
 }
 
@@ -662,9 +813,15 @@ std::vector<FollowTargetCandidate> FollowCamera::Candidates() const {
 			candidate.status = record.active ? "active projectile" : "recorded nearby";
 			candidate.alive = record.active;
 			if (record.active) {
+				CEntityInstance* grenade = EntityAt(record.entityIndex);
+				candidate.attachPoints = AvailableAttachPoints(grenade, FollowTargetType::Grenade, false, false);
+				candidate.attachments = AttachPointIds(candidate.attachPoints);
 				FollowVec3 position;
-				if (ReadOrigin(EntityAt(record.entityIndex), position))
+				if (ReadOrigin(grenade, position))
 					candidate.distance = m_state.hasCamera ? FollowDistance(m_state.cameraPosition, position) : 0.0;
+			} else {
+				candidate.attachPoints.push_back(MakeAttachPoint("entity", "Entity", "entity", true, 0, "recorded-grenade"));
+				candidate.attachments = AttachPointIds(candidate.attachPoints);
 			}
 			out.push_back(std::move(candidate));
 		}
@@ -693,8 +850,10 @@ std::vector<FollowTargetCandidate> FollowCamera::Candidates() const {
 			candidate.team = target->GetTeam();
 			candidate.alive = target->GetHealth() > 0;
 			candidate.status = candidate.alive ? "alive" : "dead";
-			if (m_state.mode == FollowMode::Attach)
-				candidate.attachments = AvailableAttachments(target, false);
+			if (m_state.mode == FollowMode::Attach) {
+				candidate.attachPoints = AvailableAttachPoints(target, FollowTargetType::Player, false, false);
+				candidate.attachments = AttachPointIds(candidate.attachPoints);
+			}
 		} else { // Weapon: dropped + held weapons and the C4
 			const std::string cls = EntityClass(entity);
 			if (!IsWeaponOrBomb(cls)) continue;
@@ -712,8 +871,10 @@ std::vector<FollowTargetCandidate> FollowCamera::Candidates() const {
 					+ (candidate.ownerName.empty() ? "player" : candidate.ownerName);
 			else
 				candidate.status = candidate.isBomb ? "C4 on the ground" : "dropped on floor";
-			if (m_state.mode == FollowMode::Attach)
-				candidate.attachments = AvailableAttachments(entity, candidate.isWeapon);
+			if (m_state.mode == FollowMode::Attach) {
+				candidate.attachPoints = AvailableAttachPoints(entity, FollowTargetType::Weapon, candidate.isWeapon, candidate.isBomb);
+				candidate.attachments = AttachPointIds(candidate.attachPoints);
+			}
 		}
 
 		FollowVec3 position;
@@ -752,6 +913,30 @@ bool FollowCamera::SelectCandidate(const FollowTargetCandidate& candidate) {
 	// the owner so the camera survives weapon switches. Dropped items have no owner.
 	if (m_state.targetType == FollowTargetType::Weapon)
 		m_state.weaponPlayerIndex = candidate.held ? candidate.ownerIndex : -1;
+	if (m_state.mode == FollowMode::Attach && !candidate.attachPoints.empty()) {
+		bool currentValid = false;
+		for (const auto& point : candidate.attachPoints) {
+			if (point.valid && point.id == m_state.attachmentName) {
+				currentValid = true;
+				break;
+			}
+		}
+		if (!currentValid) {
+			const char* preferred = m_state.targetType == FollowTargetType::Player ? "head"
+				: (m_state.targetType == FollowTargetType::Weapon ? "muzzle" : "entity");
+			const FollowAttachPoint* fallback = nullptr;
+			for (const auto& point : candidate.attachPoints) {
+				if (point.valid && point.id == preferred) { fallback = &point; break; }
+			}
+			if (!fallback) {
+				for (const auto& point : candidate.attachPoints) {
+					if (point.valid) { fallback = &point; break; }
+				}
+			}
+			if (fallback)
+				m_state.attachmentName = fallback->id;
+		}
+	}
 	m_haveLastRawTarget = false;
 	m_lastMessage = "Selected " + candidate.name + ".";
 	advancedfx::Message("[followcam] target selected: type=%s entity=%d name=%s distance=%.1f.\n",
@@ -889,9 +1074,11 @@ std::unique_ptr<IFollowTargetProvider> FollowCamera::MakeProvider() const {
 	switch (m_state.targetType) {
 	case FollowTargetType::Player:
 		if (attach)
-			return std::make_unique<AttachmentTargetProvider>(m_state.targetEntityIndex, m_state.attachmentName);
+			return std::make_unique<AttachmentTargetProvider>(m_state.targetEntityIndex, FollowTargetType::Player, m_state.attachmentName);
 		return std::make_unique<PlayerTargetProvider>(m_state.targetEntityIndex);
 	case FollowTargetType::Grenade:
+		if (attach)
+			return std::make_unique<AttachmentTargetProvider>(m_state.targetEntityIndex, FollowTargetType::Grenade, m_state.attachmentName);
 		return std::make_unique<EntityTargetProvider>(m_state.targetEntityIndex, FollowTargetType::Grenade);
 	case FollowTargetType::Weapon: {
 		const bool held = (m_state.weaponSource == WeaponSource::Held)
@@ -900,7 +1087,7 @@ std::unique_ptr<IFollowTargetProvider> FollowCamera::MakeProvider() const {
 			return std::make_unique<HeldWeaponProvider>(m_state.weaponPlayerIndex,
 				attach ? m_state.attachmentName : std::string());
 		if (attach && !m_state.attachmentName.empty())
-			return std::make_unique<AttachmentTargetProvider>(m_state.targetEntityIndex, m_state.attachmentName);
+			return std::make_unique<AttachmentTargetProvider>(m_state.targetEntityIndex, FollowTargetType::Weapon, m_state.attachmentName);
 		return std::make_unique<EntityTargetProvider>(m_state.targetEntityIndex, FollowTargetType::Weapon);
 	}
 	default:
@@ -946,13 +1133,21 @@ void FollowCamera::RunFrame(bool cameraEditorActive) {
 	if (m_state.mode == FollowMode::LockOn && !m_state.hasCamera)
 		return;
 
-	const double dt = WallDt();
+	double dt = WallDt();
 	// Is the demo actually advancing this frame? When it's paused/frozen the entity still
 	// micro-jitters from interpolation; dividing that by the (tiny) wall-clock dt yields a
 	// huge bogus velocity that drives the "face travel" path and makes an attached camera
 	// spin/jitter in place. Detect a frozen tick so we can zero velocity below.
 	int frameTick = 0; g_MirvTime.GetCurrentDemoTick(frameTick);
-	const bool demoAdvancing = (frameTick != m_lastFrameTick);
+	const int previousFrameTick = m_lastFrameTick;
+	const bool demoAdvancing = (previousFrameTick >= 0 && frameTick != previousFrameTick);
+	if (demoAdvancing) {
+		float interval = g_MirvTime.interval_per_tick_get();
+		if (!(interval > 0.00001f)) interval = 1.0f / 64.0f;
+		const int tickDelta = std::abs(frameTick - previousFrameTick);
+		if (tickDelta > 0 && tickDelta < 128)
+			dt = std::clamp((double)tickDelta * (double)interval, 0.0001, 0.1);
+	}
 	m_lastFrameTick = frameTick;
 	if (m_state.targetType == FollowTargetType::Grenade && m_grenadeTrackPending) {
 		UpdateGrenadeCache();
@@ -995,6 +1190,48 @@ void FollowCamera::RunFrame(bool cameraEditorActive) {
 
 	auto provider = MakeProvider();
 	if (!provider) return;
+
+	if (m_state.mode == FollowMode::Attach) {
+		const int activeEntityIndex = provider->EntityIndex();
+		CEntityInstance* activeEntity = EntityAt(activeEntityIndex);
+		bool isWeapon = false, isBomb = false;
+		if (activeEntity) {
+			const std::string cls = EntityClass(activeEntity);
+			isWeapon = IsWeaponClass(cls);
+			isBomb = IsBombClass(cls);
+		}
+		auto points = AvailableAttachPoints(activeEntity, m_state.targetType, isWeapon, isBomb);
+		bool currentValid = false;
+		for (const auto& point : points) {
+			if (point.valid && point.id == m_state.attachmentName) {
+				currentValid = true;
+				break;
+			}
+		}
+		if (!points.empty() && !currentValid) {
+			const char* preferred = m_state.targetType == FollowTargetType::Player ? "head"
+				: (m_state.targetType == FollowTargetType::Weapon ? "muzzle" : "entity");
+			const FollowAttachPoint* fallback = nullptr;
+			for (const auto& point : points) {
+				if (point.valid && point.id == preferred) { fallback = &point; break; }
+			}
+			if (!fallback) {
+				for (const auto& point : points) {
+					if (point.valid) { fallback = &point; break; }
+				}
+			}
+			if (fallback) {
+				const std::string old = m_state.attachmentName;
+				m_state.attachmentName = fallback->id;
+				m_lastMessage = "Attach point '" + old + "' is not valid on this target; using '" + fallback->id + "'.";
+				advancedfx::Warning("[followcam] attach point '%s' invalid for entity %d; using '%s'.\n",
+					old.c_str(), activeEntityIndex, fallback->id.c_str());
+				ResetMotion();
+				provider = MakeProvider();
+				if (!provider) return;
+			}
+		}
+	}
 
 	if (m_state.targetType == FollowTargetType::Player) {
 		CEntityInstance* pawn = EntityAt(m_state.targetEntityIndex);
@@ -1100,9 +1337,12 @@ void FollowCamera::RunFrame(bool cameraEditorActive) {
 			rawTarget.y + worldOffset.y + m_targetVelocity.y * m_state.prediction,
 			rawTarget.z + worldOffset.z + m_targetVelocity.z * m_state.prediction
 		};
+		FollowAngles faceTarget = FollowDistance(desiredPos, rawTarget) > 1.0
+			? FollowLookAt(desiredPos, rawTarget)
+			: baseAng;
 		const FollowAngles desiredAng{
-			FollowWrapDegrees(baseAng.pitch + m_state.rotationOffset.pitch),
-			FollowWrapDegrees(baseAng.yaw + m_state.rotationOffset.yaw),
+			FollowWrapDegrees(faceTarget.pitch + m_state.rotationOffset.pitch),
+			FollowWrapDegrees(faceTarget.yaw + m_state.rotationOffset.yaw),
 			FollowWrapDegrees(baseAng.roll + m_state.rotationOffset.roll)
 		};
 		if (!m_motionInitialized) {
@@ -1119,17 +1359,66 @@ void FollowCamera::RunFrame(bool cameraEditorActive) {
 		m_lastCamPos = m_smoothedCamPos;
 		m_lastCamAng = m_outputAngles;
 		m_lastTargetPos = rawTarget;
+		const FollowAngles idealAim = FollowDistance(m_smoothedCamPos, rawTarget) > 1.0
+			? FollowLookAt(m_smoothedCamPos, rawTarget)
+			: m_outputAngles;
+		const double pitchErr = FollowWrapDegrees(idealAim.pitch - m_outputAngles.pitch);
+		const double yawErr = FollowWrapDegrees(idealAim.yaw - m_outputAngles.yaw);
+		AttachTransformResult resolved = ResolveAttachTransform(
+			EntityAt(provider->EntityIndex()), provider->EntityIndex(), m_state.targetType, m_state.attachmentName);
+		m_attachDebug.active = true;
+		m_attachDebug.valid = validNow && resolved.valid;
+		m_attachDebug.oriented = rawOriented;
+		m_attachDebug.entityIndex = provider->EntityIndex();
+		m_attachDebug.entityHandle = resolved.entityHandle;
+		m_attachDebug.entityType = FollowTargetTypeName(m_state.targetType);
+		m_attachDebug.className = resolved.className;
+		m_attachDebug.modelName = resolved.modelName;
+		m_attachDebug.attachId = m_state.attachmentName;
+		m_attachDebug.attachKind = resolved.attachKind;
+		m_attachDebug.attachIndex = resolved.attachIndex;
+		m_attachDebug.source = resolved.source;
+		m_attachDebug.rawTarget = rawTarget;
+		m_attachDebug.rawAngles = rawAngles;
+		m_attachDebug.smoothedTarget = rawTarget;
+		m_attachDebug.smoothedAngles = m_outputAngles;
+		m_attachDebug.cameraPosition = m_smoothedCamPos;
+		m_attachDebug.cameraAngles = m_outputAngles;
+		m_attachDebug.distance = FollowDistance(m_smoothedCamPos, rawTarget);
+		m_attachDebug.cameraDelta = m_motionInitialized && m_havePrevDebug ? FollowDistance(m_prevDebugCamPos, m_smoothedCamPos) : 0.0;
+		m_attachDebug.targetDelta = m_havePrevDebug ? FollowDistance(m_prevDebugTargetPos, rawTarget) : 0.0;
+		m_attachDebug.angleDelta = m_havePrevDebug
+			? std::sqrt(std::pow(FollowWrapDegrees(m_outputAngles.pitch - m_prevDebugCamAng.pitch), 2.0)
+				+ std::pow(FollowWrapDegrees(m_outputAngles.yaw - m_prevDebugCamAng.yaw), 2.0))
+			: 0.0;
+		m_attachDebug.aimError = std::sqrt(pitchErr * pitchErr + yawErr * yawErr);
+		m_attachDebug.jitter = (m_attachDebug.cameraDelta > m_attachDebug.targetDelta + 0.01)
+			? (m_attachDebug.cameraDelta - m_attachDebug.targetDelta) : 0.0;
+		m_attachDebug.smoothing = m_state.positionSmoothing;
+		m_attachDebug.previewTick = frameTick;
+		m_attachDebug.demoTick = frameTick;
+		m_prevDebugCamPos = m_smoothedCamPos;
+		m_prevDebugTargetPos = rawTarget;
+		m_prevDebugCamAng = m_outputAngles;
+		m_havePrevDebug = true;
 		CameraBridge_SetFreeCamEnabled(true);
 		CameraBridge_SetCameraPose(
 			m_smoothedCamPos.x, m_smoothedCamPos.y, m_smoothedCamPos.z,
 			m_outputAngles.pitch, m_outputAngles.yaw, m_outputAngles.roll, m_state.fov);
 		if (m_debug && ((m_debugFrame++ % 15) == 0)) {
 			advancedfx::Message(
-				"[followcam][attach] entity=%d oriented=%d pos=(%.1f %.1f %.1f) "
-				"ang=(%.1f %.1f %.1f) fov=%.1f.\n",
-				m_state.targetEntityIndex, rawOriented ? 1 : 0,
+				"[followcam][attachdebug] type=%s entity=%d handle=%llu attach=%s kind=%s valid=%d source=%s "
+				"target=(%.1f %.1f %.1f) cam=(%.1f %.1f %.1f) ang=(%.1f %.1f %.1f) "
+				"dist=%.1f camDelta=%.2f targetDelta=%.2f angleDelta=%.2f aimError=%.2f jitter=%.2f tick=%d fov=%.1f.\n",
+				FollowTargetTypeName(m_state.targetType), m_attachDebug.entityIndex,
+				(unsigned long long)m_attachDebug.entityHandle, m_attachDebug.attachId.c_str(),
+				m_attachDebug.attachKind.c_str(), m_attachDebug.valid ? 1 : 0, m_attachDebug.source.c_str(),
+				rawTarget.x, rawTarget.y, rawTarget.z,
 				m_smoothedCamPos.x, m_smoothedCamPos.y, m_smoothedCamPos.z,
-				m_outputAngles.pitch, m_outputAngles.yaw, m_outputAngles.roll, m_state.fov);
+				m_outputAngles.pitch, m_outputAngles.yaw, m_outputAngles.roll,
+				m_attachDebug.distance, m_attachDebug.cameraDelta, m_attachDebug.targetDelta,
+				m_attachDebug.angleDelta, m_attachDebug.aimError, m_attachDebug.jitter,
+				frameTick, m_state.fov);
 		}
 		return;
 	}
@@ -1241,7 +1530,10 @@ void FollowCamera::SetPrediction(double value) { m_state.prediction = std::clamp
 void FollowCamera::SetDeadzone(double value) { m_state.deadzone = std::clamp(value, 0.0, 45.0); }
 void FollowCamera::SetMaxTurnSpeed(double value) { m_state.maxTurnSpeed = std::clamp(value, 0.0, 4000.0); }
 void FollowCamera::SetAttachmentName(const std::string& value) {
-	if (!value.empty()) m_state.attachmentName = value.substr(0, 64);
+	if (!value.empty()) {
+		m_state.attachmentName = value.substr(0, 64);
+		ResetMotion();
+	}
 }
 
 std::string FollowCamera::BuildStateJson() const {
@@ -1250,6 +1542,17 @@ std::string FollowCamera::BuildStateJson() const {
 	std::unique_ptr<IFollowTargetProvider> provider = MakeProvider();
 	const bool targetValid = provider && provider->IsValid();
 	const std::string targetName = provider ? provider->GetDisplayName() : "";
+	std::vector<FollowAttachPoint> selectedAttachPoints;
+	if (provider && m_state.mode == FollowMode::Attach) {
+		CEntityInstance* activeEntity = EntityAt(provider->EntityIndex());
+		bool activeWeapon = false, activeBomb = false;
+		if (activeEntity) {
+			const std::string cls = EntityClass(activeEntity);
+			activeWeapon = IsWeaponClass(cls);
+			activeBomb = IsBombClass(cls);
+		}
+		selectedAttachPoints = AvailableAttachPoints(activeEntity, m_state.targetType, activeWeapon, activeBomb);
+	}
 	double targetDistance = 0.0;
 	if (provider && targetValid)
 		targetDistance = FollowDistance(m_state.cameraPosition, provider->GetWorldPosition());
@@ -1285,11 +1588,46 @@ std::string FollowCamera::BuildStateJson() const {
 	o << ",\"switchBomb\":" << (m_state.switchToDroppedBombOnDeath ? "true" : "false");
 	o << ",\"holdLast\":" << (m_state.holdLastKnownPosition ? "true" : "false");
 	o << ",\"attachment\":\"" << JsonEscape(m_state.attachmentName) << "\"";
+	o << ",\"attachPoints\":[";
+	for (size_t ai = 0; ai < selectedAttachPoints.size(); ++ai) {
+		if (ai) o << ",";
+		AppendAttachPointJson(o, selectedAttachPoints[ai]);
+	}
+	o << "]";
 	o << ",\"message\":\"" << JsonEscape(m_lastMessage) << "\"";
 	o << ",\"grenadePending\":" << (m_grenadeTrackPending ? "true" : "false");
 	o << ",\"grenadeThrowTick\":" << m_grenadeThrowTick;
 	o << ",\"grenadeSeekTick\":" << m_grenadeSeekTick;
 	o << ",\"debug\":" << (m_debug ? "true" : "false");
+	o << ",\"attachDebug\":{";
+	o << "\"active\":" << (m_attachDebug.active ? "true" : "false");
+	o << ",\"valid\":" << (m_attachDebug.valid ? "true" : "false");
+	o << ",\"oriented\":" << (m_attachDebug.oriented ? "true" : "false");
+	o << ",\"entityIndex\":" << m_attachDebug.entityIndex;
+	o << ",\"entityHandle\":" << m_attachDebug.entityHandle;
+	o << ",\"entityType\":\"" << JsonEscape(m_attachDebug.entityType) << "\"";
+	o << ",\"className\":\"" << JsonEscape(m_attachDebug.className) << "\"";
+	o << ",\"modelName\":\"" << JsonEscape(m_attachDebug.modelName) << "\"";
+	o << ",\"attachId\":\"" << JsonEscape(m_attachDebug.attachId) << "\"";
+	o << ",\"attachKind\":\"" << JsonEscape(m_attachDebug.attachKind) << "\"";
+	o << ",\"attachIndex\":" << m_attachDebug.attachIndex;
+	o << ",\"source\":\"" << JsonEscape(m_attachDebug.source) << "\"";
+	o << ",\"rawTarget\":[" << m_attachDebug.rawTarget.x << "," << m_attachDebug.rawTarget.y << "," << m_attachDebug.rawTarget.z << "]";
+	o << ",\"rawAngles\":[" << m_attachDebug.rawAngles.pitch << "," << m_attachDebug.rawAngles.yaw << "," << m_attachDebug.rawAngles.roll << "]";
+	o << ",\"smoothedTarget\":[" << m_attachDebug.smoothedTarget.x << "," << m_attachDebug.smoothedTarget.y << "," << m_attachDebug.smoothedTarget.z << "]";
+	o << ",\"smoothedAngles\":[" << m_attachDebug.smoothedAngles.pitch << "," << m_attachDebug.smoothedAngles.yaw << "," << m_attachDebug.smoothedAngles.roll << "]";
+	o << ",\"camera\":[" << m_attachDebug.cameraPosition.x << "," << m_attachDebug.cameraPosition.y << "," << m_attachDebug.cameraPosition.z << "]";
+	o << ",\"cameraAngles\":[" << m_attachDebug.cameraAngles.pitch << "," << m_attachDebug.cameraAngles.yaw << "," << m_attachDebug.cameraAngles.roll << "]";
+	o << ",\"distance\":" << m_attachDebug.distance;
+	o << ",\"cameraDelta\":" << m_attachDebug.cameraDelta;
+	o << ",\"targetDelta\":" << m_attachDebug.targetDelta;
+	o << ",\"angleDelta\":" << m_attachDebug.angleDelta;
+	o << ",\"aimError\":" << m_attachDebug.aimError;
+	o << ",\"jitter\":" << m_attachDebug.jitter;
+	o << ",\"smoothing\":" << m_attachDebug.smoothing;
+	o << ",\"previewTick\":" << m_attachDebug.previewTick;
+	o << ",\"demoTick\":" << m_attachDebug.demoTick;
+	o << "}";
 	o << ",\"candidates\":[";
 	auto candidates = Candidates();
 	const size_t limit = (std::min<size_t>)(candidates.size(), 24);
@@ -1319,13 +1657,37 @@ std::string FollowCamera::BuildStateJson() const {
 			if (ai) o << ",";
 			o << "\"" << JsonEscape(c.attachments[ai]) << "\"";
 		}
+		o << "],\"attachPoints\":[";
+		for (size_t pi = 0; pi < c.attachPoints.size(); ++pi) {
+			if (pi) o << ",";
+			AppendAttachPointJson(o, c.attachPoints[pi]);
+		}
 		o << "]}";
 	}
 	o << "]"; // close candidates array
 
 	// Recorded loadout events (weapon/C4 drops + pickups) from the .fmjson v5 pre-scan.
 	const int evStatus = m_eventStatus.load();
+	unsigned long long eventScanElapsedMs = 0;
+	std::string eventDemoPath;
+	std::string eventHelperPath;
+	std::string eventError;
+	size_t eventCount = 0;
+	{
+		std::lock_guard<std::mutex> lock(m_eventMutex);
+		if (m_eventScanStartMs && evStatus == (int)EventStatus::Loading)
+			eventScanElapsedMs = GetTickCount64() - m_eventScanStartMs;
+		eventDemoPath = m_eventDemoPath.empty() ? m_eventLoadingPath : m_eventDemoPath;
+		eventHelperPath = m_eventHelperPath;
+		eventError = m_eventError;
+		eventCount = m_events.size();
+	}
 	o << ",\"eventStatus\":" << evStatus;       // 0 idle 1 loading 2 ready 3 failed
+	o << ",\"eventScanElapsedMs\":" << eventScanElapsedMs;
+	o << ",\"eventDemoPath\":\"" << JsonEscape(eventDemoPath) << "\"";
+	o << ",\"eventHelperPath\":\"" << JsonEscape(eventHelperPath) << "\"";
+	o << ",\"eventError\":\"" << JsonEscape(eventError) << "\"";
+	o << ",\"eventCount\":" << eventCount;
 	o << ",\"selectedEvent\":" << m_selectedEvent;
 	o << ",\"events\":[";
 	if (m_state.targetType == FollowTargetType::Weapon) {
@@ -1394,9 +1756,15 @@ void FollowCamera::EnsureEventsLoaded() const {
 		std::lock_guard<std::mutex> lock(m_eventMutex);
 		const int status = m_eventStatus.load();
 		if (m_eventDemoPath == path && status == (int)EventStatus::Ready) return;
+		if (m_eventDemoPath == path && status == (int)EventStatus::Failed) return;
 		if (m_eventLoadingPath == path && status == (int)EventStatus::Loading) return;
 
 		m_eventLoadingPath = path;
+		m_eventDemoPath.clear();
+		m_events.clear();
+		m_eventError.clear();
+		m_eventHelperPath.clear();
+		m_eventScanStartMs = GetTickCount64();
 		m_eventStatus.store((int)EventStatus::Loading);
 	}
 
@@ -1431,6 +1799,9 @@ void FollowCamera::EnsureEventsLoaded() const {
 		if (m_eventLoadingPath == path) {
 			m_events = std::move(evs);
 			m_eventDemoPath = path;
+			m_eventHelperPath = result.helperPath;
+			m_eventError = result.ok ? std::string() : (result.error.empty() ? "demo event scan failed" : result.error);
+			m_eventScanStartMs = 0;
 			m_eventStatus.store(result.ok ? (int)EventStatus::Ready : (int)EventStatus::Failed);
 		}
 	});

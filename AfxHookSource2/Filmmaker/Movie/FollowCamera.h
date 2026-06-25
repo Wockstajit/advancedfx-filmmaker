@@ -44,6 +44,15 @@ enum class FollowTargetStatus {
 	Active = 3
 };
 
+struct FollowAttachPoint {
+	std::string id;
+	std::string label;
+	std::string kind;
+	bool valid = false;
+	int index = -1;
+	std::string source;
+};
+
 struct FollowTargetCandidate {
 	int entityIndex = -1;
 	uint64_t handle = 0;
@@ -63,6 +72,7 @@ struct FollowTargetCandidate {
 	int throwTick = -1;
 	int tickDelta = 0;
 	std::vector<std::string> attachments;
+	std::vector<FollowAttachPoint> attachPoints;
 };
 
 // A recorded loadout event from the demo pre-scan (.fmjson v5): weapon/C4 drops and
@@ -233,6 +243,41 @@ private:
 	mutable std::unordered_map<uint64_t, GrenadeRecord> m_grenadeCache;
 	unsigned m_debugFrame = 0;
 
+	struct AttachDebugSnapshot {
+		bool active = false;
+		bool valid = false;
+		bool oriented = false;
+		int entityIndex = -1;
+		uint64_t entityHandle = 0;
+		std::string entityType;
+		std::string className;
+		std::string modelName;
+		std::string attachId;
+		std::string attachKind;
+		int attachIndex = -1;
+		std::string source;
+		FollowVec3 rawTarget;
+		FollowAngles rawAngles;
+		FollowVec3 smoothedTarget;
+		FollowAngles smoothedAngles;
+		FollowVec3 cameraPosition;
+		FollowAngles cameraAngles;
+		double distance = 0.0;
+		double cameraDelta = 0.0;
+		double targetDelta = 0.0;
+		double angleDelta = 0.0;
+		double aimError = 0.0;
+		double jitter = 0.0;
+		double smoothing = 0.0;
+		int previewTick = 0;
+		int demoTick = 0;
+	};
+	AttachDebugSnapshot m_attachDebug;
+	FollowVec3 m_prevDebugCamPos;
+	FollowVec3 m_prevDebugTargetPos;
+	FollowAngles m_prevDebugCamAng;
+	bool m_havePrevDebug = false;
+
 	// Selected recorded event + last computed pose (instrumentation readout).
 	int m_selectedEvent = -1;
 	FollowVec3 m_lastCamPos;
@@ -246,6 +291,9 @@ private:
 	mutable std::string m_eventLoadingPath;  // path of the in-flight background load
 	mutable std::atomic<int> m_eventStatus{ (int)EventStatus::Idle };
 	mutable std::vector<FollowEventRecord> m_events;
+	mutable unsigned long long m_eventScanStartMs = 0;
+	mutable std::string m_eventError;
+	mutable std::string m_eventHelperPath;
 	// The background loader is joinable (not detached) so it can be cancelled + joined on
 	// shutdown; m_eventCancel aborts the in-flight helper process within ~50ms.
 	mutable std::thread m_eventThread;

@@ -26,6 +26,8 @@ struct DemoHelperResult {
 	bool hasScoreboard = false; // at least one player row present
 	int teamScore0 = 0;         // CT
 	int teamScore1 = 0;         // T
+	std::string error;          // helper / parse failure text when ok=false
+	std::string helperPath;     // helper exe path used for diagnostics
 	std::vector<ScoreboardPlayer> players;
 	std::vector<DemoEvent> events; // weapon/C4 drop+pickup ticks (full parse only, v5+)
 };

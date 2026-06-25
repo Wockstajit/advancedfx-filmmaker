@@ -8,6 +8,7 @@ Repository automation, verification harnesses, launchers, configs, screenshots, 
 - `capture-game-window.ps1` captures only the CS2 window (client area by default) at full resolution — use this for reading UI detail.
 - `AutomationCommon.ps1` creates isolated timestamped run directories and metadata.
 - `verify-followcam.ps1` runs the live CS2/netcon Follow Camera verification.
+- `verify-attach-camera-live.ps1` runs the live Attach Camera target-aware preview checks, discovering demos from the CS2 Steam install first.
 - `verify-grenade-tracking.ps1` discovers a nearby grenade, seeks before its throw, and proves reacquisition.
 - `verify-editor-viewport-debug.ps1` is a static (no-launch) source check for the camera-editor viewport work: no auto free-cam/jump on open, HUD scales 1:1 with the world blit, and the `editor debug` overlay + render-layer instrumentation are wired end to end.
 - `verify-editor-viewport-live.ps1` runs the live HUD scaling check, prints per-HUD pixel bounds/areas, and writes closed-viewer vs camera-editor comparison JSON/CSV.

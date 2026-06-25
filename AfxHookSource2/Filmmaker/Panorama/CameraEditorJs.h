@@ -35,8 +35,8 @@ inline const char* kCameraEditorJs = R"EDJS(
 
     var S = {
       accent: '#f0b323ff', freeze: '#4aa3ffff', danger: '#c92a2acc',
-      bg: 'rgba(12,14,18,0.97)', bgSoft: 'rgba(20,24,30,0.97)',
-      panelBorder: '#ffffff1f', sectionBg: '#ffffff0c',
+      bg: '#0c0e12ff', bgSoft: '#14181eff',
+      panelBorder: '#ffffff1f', sectionBg: '#1a1f26ff',
       label: '#9aa4b0ff', value: '#eef2f6ff', dim: '#6b7480ff',
       btnBg: '#ffffff14', btnOn: '#f0b32333',
       font: 'Stratum2, "Arial Unicode MS"'
@@ -158,7 +158,8 @@ R"EDJS(
     // Bottom backdrop (sits BEHIND the CameraTimeline panel, which is z55) = workspace
     // footer under the preview.
     var backdrop = mk('Panel', root); backdrop.hittest = false;
-    backdrop.style.verticalAlign = 'bottom'; backdrop.style.horizontalAlign = 'left';
+    backdrop.style.verticalAlign = 'top'; backdrop.style.horizontalAlign = 'left';
+    backdrop.style.position = '0px 0px 0px';
     backdrop.style.width = '100%'; backdrop.style.height = BOTTOM_H + 'px';
     backdrop.style.backgroundColor = S.bg; backdrop.style.borderTop = '1px solid #ffffff14';
 
@@ -169,7 +170,8 @@ R"EDJS(
     // tabs replace them. Pure switches (NOT toggles): always select that mode -> never an empty bottom.
     var curBottomMode = 'native';
     var tabBar = mk('Panel', root); tabBar.hittest = false;
-    tabBar.style.verticalAlign = 'bottom'; tabBar.style.horizontalAlign = 'left';
+    tabBar.style.verticalAlign = 'top'; tabBar.style.horizontalAlign = 'left';
+    tabBar.style.position = '0px 0px 0px';
     tabBar.style.height = TAB_BAR_H + 'px';
     tabBar.style.backgroundColor = S.bgSoft;
     tabBar.style.borderTop = '1px solid ' + S.accent; tabBar.style.borderBottom = '1px solid ' + S.accent;
@@ -304,6 +306,9 @@ R"EDJS(
     var followStatus = lbl(followSec, 'Place a camera and select a target.', S.dim, 11);
     followStatus.style.marginTop = '8px';
     var followWarn = lbl(followSec, '', '#f4c95dff', 10); followWarn.style.marginTop = '3px';
+    var attachDebugText = lbl(followSec, '', '#9effa0ff', 9);
+    attachDebugText.style.fontFamily = 'Consolas, "Courier New", monospace';
+    attachDebugText.style.marginTop = '4px';
 
     // Camera model: Lock-on (placed turret that rotates to track) vs Attach (ride-along).
     var modeBtns = [];
@@ -432,19 +437,35 @@ R"EDJS(
     attachMenu.visible = false;
     var attachSig = '';
     function renderAttachmentMenu(f) {
-      var options = (f && f.type === 2) ? ['muzzle', 'muzzle_flash', 'shell_eject'] : ['head', 'eyes', 'weapon_hand_R', 'weapon_hand_L'];
+      var options = [];
+      if (f && f.attachPoints && f.attachPoints.length) options = f.attachPoints;
       var list = (f && f.candidates) || [], selected = null;
       for (var i = 0; i < list.length; i++) {
         if ((list[i].index === f.targetIndex) || (f.targetHandle && list[i].handle === f.targetHandle)) { selected = list[i]; break; }
       }
-      if (selected && selected.attachments && selected.attachments.length) options = selected.attachments;
-      if (f && f.attachment && options.indexOf(f.attachment) < 0) options.unshift(f.attachment);
-      var sig = options.join('|');
+      if (!options.length && selected && selected.attachPoints && selected.attachPoints.length) options = selected.attachPoints;
+      if (!options.length && selected && selected.attachments && selected.attachments.length) {
+        for (var si = 0; si < selected.attachments.length; si++) {
+          options.push({ id: selected.attachments[si], label: selected.attachments[si], kind: 'attachment', valid: true, index: -1, source: 'legacy' });
+        }
+      }
+      var hasCurrent = false;
+      for (var oi = 0; oi < options.length; oi++) if (options[oi].id === f.attachment) hasCurrent = true;
+      if (f && f.attachment && !hasCurrent) options.unshift({ id: f.attachment, label: f.attachment + ' (invalid)', kind: 'invalid', valid: false, index: -1, source: 'stale-selection' });
+      var sigParts = [];
+      for (var sp = 0; sp < options.length; sp++) sigParts.push(options[sp].id + ':' + options[sp].valid + ':' + options[sp].index + ':' + options[sp].source);
+      var sig = sigParts.join('|');
       if (sig === attachSig) return;
       attachSig = sig; attachMenu.RemoveAndDeleteChildren();
-      for (var j = 0; j < options.length; j++) (function (name, isLast) {
-        var option = btn(attachMenu, name, function () { cmd('mirv_filmmaker follow bone ' + name); attachMenu.visible = false; }, S.value);
+      if (!options.length) { lbl(attachMenu, 'No valid attach points for this target.', S.dim, 10); return; }
+      for (var j = 0; j < options.length; j++) (function (point, isLast) {
+        var name = point.id || point.label || 'entity';
+        var label = point.label || name;
+        if (point.kind && point.kind !== 'attachment') label += '  ·  ' + point.kind;
+        if (!point.valid) label += '  ·  invalid';
+        var option = btn(attachMenu, label, function () { if (point.valid) cmd('mirv_filmmaker follow bone ' + name); attachMenu.visible = false; }, point.valid ? S.value : '#6b7280ff');
         option.style.width = '100%'; option.style.marginRight = '0px'; option.style.marginBottom = isLast ? '0px' : '3px';
+        option.__lbl.style.color = point.valid ? S.value : S.dim;
       })(options[j], j + 1 === options.length);
     }
 
@@ -466,8 +487,14 @@ R"EDJS(
       if (sig === eventSig) return;
       eventSig = sig; eventList.RemoveAndDeleteChildren();
       if (!list.length) {
-        lbl(eventList, (f && f.eventStatus === 1) ? 'Scanning demo for drop/pickup events...'
-          : ((f && f.eventStatus === 3) ? 'Event scan unavailable for this demo.' : 'No drop/pickup events near here.'), S.dim, 10);
+        var scanText = 'No drop/pickup events near here.';
+        if (f && f.eventStatus === 1) {
+          scanText = 'Scanning demo for drop/pickup events...' +
+            (f.eventScanElapsedMs ? (' ' + Math.round(f.eventScanElapsedMs / 1000) + 's') : '');
+        } else if (f && f.eventStatus === 3) {
+          scanText = f.eventError ? ('Event scan failed: ' + f.eventError) : 'Event scan unavailable for this demo.';
+        }
+        lbl(eventList, scanText, S.dim, 10);
         return;
       }
       for (var j = 0; j < list.length; j++) (function (e) {
@@ -1044,7 +1071,7 @@ R"EDJS(
       // types (Player Bone / Weapon Attach). Hiding the rest keeps the row uncluttered
       // and makes the two camera models read as distinct workflows.
       typeBtns[0].visible = !attachModeOn;  // Player (lock-on)
-      typeBtns[1].visible = !attachModeOn;  // Grenade (lock-on)
+      typeBtns[1].visible = true;           // Grenade (lock-on or attach)
       typeBtns[2].visible = !attachModeOn;  // Weapon / C4 (lock-on)
       typeBtns[3].visible = attachModeOn;   // Player Bone (attach)
       typeBtns[4].visible = attachModeOn;   // Weapon Attach (attach)
@@ -1095,7 +1122,31 @@ R"EDJS(
       renderAttachmentMenu(f);
       // Show the chosen point only once a target is selected; otherwise N/A (it used to
       // always read "head").
-      attachSelect.__lbl.text = haveTarget ? (f.attachment || 'N/A') : 'N/A';
+      var attachLabelText = f.attachment || 'N/A';
+      if (haveTarget && f.attachPoints) {
+        for (var ap = 0; ap < f.attachPoints.length; ap++) {
+          if (f.attachPoints[ap].id === f.attachment) {
+            attachLabelText = f.attachPoints[ap].label || f.attachment;
+            break;
+          }
+        }
+      }
+      attachSelect.__lbl.text = haveTarget ? attachLabelText : 'N/A';
+      var ad = f.attachDebug || {};
+      attachDebugText.visible = !!(f.debug && attachModeOn && ad.active);
+      if (attachDebugText.visible) {
+        attachDebugText.text = 'entity ' + (ad.entityIndex == null ? '-' : ad.entityIndex) +
+          '  attach ' + (ad.attachId || '-') + '  ' + (ad.source || '-') + '\n' +
+          'target ' + ((ad.rawTarget || []).join ? ad.rawTarget.join(', ') : '-') + '\n' +
+          'camera ' + ((ad.camera || []).join ? ad.camera.join(', ') : '-') + '\n' +
+          'dist ' + Number(ad.distance || 0).toFixed(1) +
+          '  aim ' + Number(ad.aimError || 0).toFixed(1) +
+          '  jitter ' + Number(ad.jitter || 0).toFixed(2) +
+          '  dC ' + Number(ad.cameraDelta || 0).toFixed(2) +
+          '  dT ' + Number(ad.targetDelta || 0).toFixed(2);
+      } else {
+        attachDebugText.text = '';
+      }
       // Events + Preview Tick (grenade throws / weapon-C4 drops).
       var eventsRelevant = (f.type === 1 || f.type === 2);
       eventsLabel.visible = eventsRelevant;
@@ -1133,7 +1184,8 @@ R"EDJS(
       var rw = rawW / rsx, rh = rawH / rsy;
       // The tab bar + backdrop span the content width left of the inspector. The tab bar is a
       // DIVIDER docked directly ABOVE the active bottom editor; the editor rests flush at the
-      // bottom and the preview shrinks to clear both. Width set here so it tracks resolution.
+      // bottom and the preview shrinks to clear both. Anchor from the top; Panorama does not
+      // reliably apply marginBottom on this full-screen root after the viewport is scaled.
       tabBar.style.width = Math.floor(Math.max(0, rw - INSPECTOR_W)) + 'px';
       if (!finitePositive(rw) || !finitePositive(rh)) {
         hidePreviewLayout();
@@ -1169,8 +1221,13 @@ R"EDJS(
         } catch (eNat) {}
         editorTop = natH;
       }
-      tabBar.style.marginBottom = Math.floor(editorTop + TAB_GAP) + 'px';
       var bottomH = Math.max(TAB_BAR_H + BOTTOM_LIFT, Math.min(editorTop + TAB_GAP + TAB_BAR_H, Math.max(0, rh - 160)));
+      var dockTopY = Math.max(0, rh - bottomH);
+      var desiredTabY = rh - editorTop - TAB_GAP - TAB_BAR_H;
+      var tabY = Math.max(dockTopY, desiredTabY);
+      tabBar.style.position = '0px 0px 0px';
+      tabBar.style.marginTop = Math.floor(tabY) + 'px';
+      tabBar.style.marginBottom = '0px';
       // In Regular Timeline mode the native CS2 bar (a LOWER-z HUD root) is the editor: our opaque
       // backdrop (z53) would HIDE the bar if it covered it, and our full-screen catcher would eat the
       // bar's clicks -- so the catcher shrinks to the preview area (the scaler blacks the rest).
@@ -1178,11 +1235,12 @@ R"EDJS(
       // see-through, bleeding the game render as a thin line); instead we anchor it ABOVE the bar
       // (editorTop..bottomH) so it fills that gap behind the tab bar without covering the native bar.
       // Camera/graph overlays render ABOVE z53, so there the backdrop covers the whole band (0..bottomH).
+      backdrop.style.position = '0px 0px 0px';
+      backdrop.style.marginTop = Math.floor(dockTopY) + 'px';
+      backdrop.style.marginBottom = '0px';
       if (nativeBottom) {
-        backdrop.style.marginBottom = Math.floor(editorTop) + 'px';
         backdrop.style.height = Math.floor(Math.max(0, bottomH - editorTop)) + 'px';
       } else {
-        backdrop.style.marginBottom = '0px';
         backdrop.style.height = Math.floor(bottomH) + 'px';
       }
       backdrop.visible = true;

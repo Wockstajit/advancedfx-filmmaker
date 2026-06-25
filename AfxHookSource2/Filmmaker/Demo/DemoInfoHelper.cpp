@@ -40,6 +40,15 @@ bool FileExists(const std::wstring& p) {
 	return a != INVALID_FILE_ATTRIBUTES && !(a & FILE_ATTRIBUTE_DIRECTORY);
 }
 
+std::string WideToUtf8(const std::wstring& s) {
+	if (s.empty()) return std::string();
+	int n = WideCharToMultiByte(CP_UTF8, 0, s.c_str(), (int)s.size(), nullptr, 0, nullptr, nullptr);
+	if (n <= 0) return std::string();
+	std::string out((size_t)n, '\0');
+	WideCharToMultiByte(CP_UTF8, 0, s.c_str(), (int)s.size(), out.data(), n, nullptr, nullptr);
+	return out;
+}
+
 // Locates FilmmakerDemoInfo.exe. An explicit override wins, then a few staging
 // layouts relative to this DLL are tried.
 std::wstring FindHelperExe() {
@@ -182,11 +191,16 @@ std::string RunCaptureStdout(const std::wstring& exe, const std::wstring& arg,
 
 bool ParseJson(const std::string& json, DemoHelperResult& out) {
 	JsonValue root;
-	if (!JsonParse(json, root) || root.type != JsonValue::Type::Object)
+	if (!JsonParse(json, root) || root.type != JsonValue::Type::Object) {
+		out.error = "helper output was not valid JSON";
 		return false;
+	}
 	const JsonValue* okv = root.Find("ok");
-	if (!okv || !okv->AsBool(false))
+	if (!okv || !okv->AsBool(false)) {
+		if (const JsonValue* e = root.Find("error")) out.error = e->AsString("helper returned ok=false");
+		if (out.error.empty()) out.error = "helper returned ok=false";
 		return false;
+	}
 
 	out.ok = true;
 	if (const JsonValue* v = root.Find("v")) out.schemaVersion = v->AsInt();
@@ -254,6 +268,7 @@ DemoHelperResult ReadDemoInfoViaHelper(const std::wstring& demoPath,
 	const bool wantNamesFast = !wantedAccountIds.empty();
 	const std::wstring cachePath = demoPath + L".fmjson";
 	const std::wstring exe = FindHelperExe();
+	result.helperPath = WideToUtf8(exe);
 
 	ULONGLONG demoTime = 0, cacheTime = 0, helperTime = 0;
 	const bool haveDemoTime = GetWriteTime(demoPath, demoTime);
@@ -277,19 +292,26 @@ DemoHelperResult ReadDemoInfoViaHelper(const std::wstring& demoPath,
 				// freshness gate above already discards it once the demo or helper exe
 				// changes, so honoring it here stops us re-launching the (slow, external)
 				// helper on every scan for a permanently unparseable demo.
+				if (const JsonValue* e = cachedRoot.Find("error"))
+					result.error = e->AsString("cached helper result is ok=false");
+				else
+					result.error = "cached helper result is ok=false";
 				return result; // ok == false
 			}
 			DemoHelperResult cached;
 			if (ParseJson(cachedJson, cached)
 				&& cached.schemaVersion == kSchemaVersion
 				&& (wantNamesFast || !cached.namesOnly)) {
+				cached.helperPath = WideToUtf8(exe);
 				return cached;
 			}
 		}
 	}
 
-	if (exe.empty())
+	if (exe.empty()) {
+		result.error = "FilmmakerDemoInfo helper executable was not found";
 		return result; // no helper -> caller falls back to the sidecar
+	}
 
 	std::wstring idsArg;
 	if (wantNamesFast) {
@@ -302,13 +324,18 @@ DemoHelperResult ReadDemoInfoViaHelper(const std::wstring& demoPath,
 	}
 
 	std::string json = RunCaptureStdout(exe, demoPath, idsArg, cancel);
-	if (json.empty())
+	if (json.empty()) {
+		result.error = cancel && cancel->load()
+			? "demo info helper was cancelled"
+			: "demo info helper produced no JSON before timeout";
 		return result;
+	}
 
 	// Cache whatever the helper produced (including ok:false negative results, so
 	// unparseable demos are not re-run every scan).
 	WriteFileUtf8(cachePath, json);
 	ParseJson(json, result);
+	result.helperPath = WideToUtf8(exe);
 	return result;
 }
 
