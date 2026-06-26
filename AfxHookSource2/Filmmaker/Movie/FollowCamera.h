@@ -164,11 +164,13 @@ public:
 	void SetRotationAxis(int axis, double value); // 0=pitch 1=yaw 2=roll
 	void SetFov(double value);
 	void SetPreset(const std::string& name);
+	void ResetFraming();
 	void SetLookSmoothing(double value);
 	void SetPositionSmoothing(double value);
 	void SetPrediction(double value);
 	void SetDeadzone(double value);
 	void SetMaxTurnSpeed(double value);
+	void ResetTracking();
 	void SetAttachmentName(const std::string& value);
 	void SetAutoDisableOnDeath(bool value) { m_state.autoDisableOnDeath = value; }
 	void SetSwitchToDroppedWeapon(bool value) { m_state.switchToDroppedWeaponOnDeath = value; }
@@ -203,6 +205,10 @@ private:
 	bool ResolvePendingGrenade(int currentTick);
 	void UpdateGrenadeCache() const;
 	void ResetMotion();
+	void ResetFramingState();
+	void ResetTrackingState();
+	void ApplyAttachTrackingDefaults();
+	void ApplyLockOnTrackingState();
 	double WallDt();
 
 	// Background load of the current demo's loadout events (.fmjson v5). Kicks off a

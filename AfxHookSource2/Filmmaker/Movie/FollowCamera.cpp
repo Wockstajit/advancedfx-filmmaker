@@ -33,6 +33,24 @@ constexpr double kMediumDistance = 1800.0;
 constexpr double kFarDistance = 3500.0;
 constexpr double kVeryFarDistance = 7000.0;
 constexpr double kTeleportDistance = 1800.0;
+constexpr double kDefaultFov = 90.0;
+constexpr double kDefaultLockOnLookSmoothing = 0.10;
+constexpr double kDefaultLockOnPositionSmoothing = 0.04;
+constexpr double kDefaultLockOnPrediction = 0.0;
+constexpr double kDefaultLockOnDeadzone = 0.0;
+constexpr double kDefaultLockOnMaxTurnSpeed = 720.0;
+
+FollowVec3 DefaultLockOnOffset() {
+	return FollowVec3{ 0.0, 0.0, 0.0 };
+}
+
+FollowVec3 DefaultAttachOffset() {
+	return FollowVec3{ 72.0, 0.0, 8.0 };
+}
+
+FollowAngles DefaultRotationOffset() {
+	return FollowAngles{ 0.0, 0.0, 0.0 };
+}
 
 CEntityInstance* EntityAt(int index) {
 	if (index < 0 || index > GetHighestEntityIndex() || !g_pEntityList || !*g_pEntityList || !g_GetEntityFromIndex)
@@ -610,6 +628,45 @@ void FollowCamera::ResetMotion() {
 	m_havePrevDebug = false;
 }
 
+void FollowCamera::ResetFramingState() {
+	m_state.offset = (m_state.mode == FollowMode::Attach) ? DefaultAttachOffset() : DefaultLockOnOffset();
+	m_state.rotationOffset = DefaultRotationOffset();
+	m_state.fov = kDefaultFov;
+}
+
+void FollowCamera::ApplyAttachTrackingDefaults() {
+	m_state.lookSmoothing = 0.0;
+	m_state.positionSmoothing = 0.0;
+	m_state.prediction = 0.0;
+	m_state.deadzone = 0.0;
+	m_state.maxTurnSpeed = 0.0;
+	m_renderTimeSample = true;
+}
+
+void FollowCamera::ApplyLockOnTrackingState() {
+	m_state.lookSmoothing = m_lockOnLookSmoothing;
+	m_state.positionSmoothing = m_lockOnPositionSmoothing;
+	m_state.prediction = m_lockOnPrediction;
+	m_state.deadzone = m_lockOnDeadzone;
+	m_state.maxTurnSpeed = m_lockOnMaxTurnSpeed;
+}
+
+void FollowCamera::ResetTrackingState() {
+	m_lockOnLookSmoothing = kDefaultLockOnLookSmoothing;
+	m_lockOnPositionSmoothing = kDefaultLockOnPositionSmoothing;
+	m_lockOnPrediction = kDefaultLockOnPrediction;
+	m_lockOnDeadzone = kDefaultLockOnDeadzone;
+	m_lockOnMaxTurnSpeed = kDefaultLockOnMaxTurnSpeed;
+	m_state.autoDisableOnDeath = true;
+	m_state.switchToDroppedWeaponOnDeath = false;
+	m_state.switchToDroppedBombOnDeath = false;
+	m_state.holdLastKnownPosition = true;
+	if (m_state.mode == FollowMode::Attach)
+		ApplyAttachTrackingDefaults();
+	else
+		ApplyLockOnTrackingState();
+}
+
 void FollowCamera::PlaceCamera() {
 	const bool replaced = m_state.hasCamera;
 	double pos[3] = {}, ang[3] = {}, fov = 90.0;
@@ -745,6 +802,9 @@ bool FollowCamera::CaptureAttachPoseFromCurrentView() {
 void FollowCamera::ClearCamera() {
 	CancelReposition();
 	StopPreview();
+	ResetTrackingState();
+	ResetFramingState();
+	ResetMotion();
 	m_state.hasCamera = false;
 	m_state.targetEntityIndex = -1;
 	m_state.targetHandle = 0;
@@ -858,7 +918,13 @@ void FollowCamera::SetTargetType(FollowTargetType type) {
 }
 
 void FollowCamera::SetMode(FollowMode mode) {
-	if (m_state.mode == mode) return;
+	if (m_state.mode == mode) {
+		if (mode == FollowMode::Attach) {
+			ApplyAttachTrackingDefaults();
+			ResetMotion();
+		}
+		return;
+	}
 	if (m_state.mode != FollowMode::Attach) {
 		m_lockOnLookSmoothing = m_state.lookSmoothing;
 		m_lockOnPositionSmoothing = m_state.positionSmoothing;
@@ -868,23 +934,15 @@ void FollowCamera::SetMode(FollowMode mode) {
 	}
 	m_state.mode = mode;
 	if (mode == FollowMode::Attach) {
-		m_state.lookSmoothing = 0.0;
-		m_state.positionSmoothing = 0.0;
-		m_state.prediction = 0.0;
-		m_state.deadzone = 0.0;
-		m_state.maxTurnSpeed = 0.0;
+		ApplyAttachTrackingDefaults();
 	} else {
-		m_state.lookSmoothing = m_lockOnLookSmoothing;
-		m_state.positionSmoothing = m_lockOnPositionSmoothing;
-		m_state.prediction = m_lockOnPrediction;
-		m_state.deadzone = m_lockOnDeadzone;
-		m_state.maxTurnSpeed = m_lockOnMaxTurnSpeed;
+		ApplyLockOnTrackingState();
 	}
 	if (mode == FollowMode::Attach
 		&& std::fabs(m_state.offset.x) < 0.001
 		&& std::fabs(m_state.offset.y) < 0.001
 		&& std::fabs(m_state.offset.z) < 0.001) {
-		m_state.offset = FollowVec3{ 72.0, 0.0, 8.0 };
+		m_state.offset = DefaultAttachOffset();
 	}
 	ResetMotion();
 }
@@ -1710,6 +1768,16 @@ void FollowCamera::SetPreset(const std::string& name) {
 	else SetOffset(0, 0, 0);
 }
 
+void FollowCamera::ResetFraming() {
+	ResetFramingState();
+	ResetMotion();
+	m_lastMessage = (m_state.mode == FollowMode::Attach)
+		? "Attach framing reset to defaults."
+		: "Framing reset to defaults.";
+	advancedfx::Message("[followcam] %s framing reset to defaults.\n",
+		m_state.mode == FollowMode::Attach ? "attach" : "lock-on");
+}
+
 void FollowCamera::SetLookSmoothing(double value) {
 	if (m_state.mode == FollowMode::Attach) {
 		m_state.lookSmoothing = 0.0;
@@ -1750,6 +1818,17 @@ void FollowCamera::SetMaxTurnSpeed(double value) {
 	m_state.maxTurnSpeed = std::clamp(value, 0.0, 4000.0);
 	m_lockOnMaxTurnSpeed = m_state.maxTurnSpeed;
 }
+
+void FollowCamera::ResetTracking() {
+	ResetTrackingState();
+	ResetMotion();
+	m_lastMessage = (m_state.mode == FollowMode::Attach)
+		? "Attach tracking reset to stable defaults."
+		: "Advanced tracking reset to defaults.";
+	advancedfx::Message("[followcam] %s tracking reset to defaults.\n",
+		m_state.mode == FollowMode::Attach ? "attach" : "lock-on");
+}
+
 void FollowCamera::SetAttachmentName(const std::string& value) {
 	if (!value.empty()) {
 		m_state.attachmentName = value.substr(0, 64);

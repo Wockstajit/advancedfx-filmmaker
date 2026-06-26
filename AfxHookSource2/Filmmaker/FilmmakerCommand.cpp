@@ -457,12 +457,13 @@ void DoFollow(int argc, advancedfx::ICommandArgs* args, const char* cmd) {
 			"%s follow nearest | select <entityIndex> | selecthandle <handle> | trackgrenade.\n"
 			"%s follow eventselect <index> | previewtick   (jump to a recorded throw/drop tick).\n"
 			"%s follow preset centered|above|low|shoulder|side|behind|orbitleft|orbitright|weapon|bomb.\n"
+			"%s follow reset framing|tracking | resetframing|resettracking.\n"
 			"%s follow offset <x> <y> <z> | offsetx|offsety|offsetz <v>.\n"
 			"%s follow rotation <p> <y> <r> | rotpitch|rotyaw|rotroll <v> | fov <v>.\n"
 			"%s follow look|position|prediction|deadzone|maxturn <value>.\n"
 			"%s follow autodead|switchweapon|switchbomb|hold <0|1>.\n"
 			"%s follow attachment|bone <name> | campose | debug <0|1>.\n",
-			cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd);
+			cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd);
 		return;
 	}
 
@@ -503,6 +504,13 @@ void DoFollow(int argc, advancedfx::ICommandArgs* args, const char* cmd) {
 	} else if (0 == _stricmp(action, "trackgrenade")) {
 		follow.TrackSelectedGrenade();
 	} else if (0 == _stricmp(action, "preset")) follow.SetPreset(a3);
+	else if (0 == _stricmp(action, "reset")) {
+		if (0 == _stricmp(a3, "tracking") || 0 == _stricmp(a3, "advanced")) follow.ResetTracking();
+		else if (0 == _stricmp(a3, "framing") || 0 == _stricmp(a3, "offset")) follow.ResetFraming();
+		else advancedfx::Warning("usage: %s follow reset framing|tracking\n", cmd);
+	}
+	else if (0 == _stricmp(action, "resetframing")) follow.ResetFraming();
+	else if (0 == _stricmp(action, "resettracking")) follow.ResetTracking();
 	else if (0 == _stricmp(action, "offset")) {
 		if (argc < 6) { advancedfx::Warning("usage: %s follow offset <x> <y> <z>\n", cmd); return; }
 		follow.SetOffset(atof(a3), atof(args->ArgV(4)), atof(args->ArgV(5)));

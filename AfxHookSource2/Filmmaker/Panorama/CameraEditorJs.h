@@ -584,8 +584,13 @@ R"EDJS(
     }
 
     // ---- Framing: offset / rotation / FOV -- 2-column grid of native Sliders ----------
-    var framingLabel = lbl(followSec, 'FRAMING (OFFSET / ROTATION / FOV)', S.dim, 10);
-    framingLabel.style.letterSpacing = '1px'; framingLabel.style.marginTop = '9px';
+    var framingHead = row(followSec); framingHead.style.marginTop = '9px';
+    var framingLabel = lbl(framingHead, 'FRAMING (OFFSET / ROTATION / FOV)', S.dim, 10);
+    framingLabel.style.letterSpacing = '1px'; framingLabel.style.width = 'fill-parent-flow(1.0)';
+    framingLabel.style.verticalAlign = 'center';
+    var framingReset = btn(framingHead, 'Reset', function () { cmd('mirv_filmmaker follow reset framing'); }, S.value);
+    framingReset.style.width = '76px'; framingReset.style.marginRight = '0px';
+    framingReset.__lbl.style.fontSize = '10px';
     var xformPanel = mk('Panel', followSec); xformPanel.style.flowChildren = 'down'; xformPanel.style.width = '100%'; xformPanel.style.marginTop = '3px';
     var xformSliders = [];
     // Shared slider commit handler. (Panorama's Slider/keybind APIs don't expose a held-Shift
@@ -646,12 +651,17 @@ R"EDJS(
     });
 
     var advancedOpen = false;
-    var advancedToggle = btn(followSec, 'Advanced Tracking  ▸', function () {
+    var advancedRow = row(followSec); advancedRow.style.marginTop = '8px';
+    var advancedToggle = btn(advancedRow, 'Advanced Tracking  ▸', function () {
       advancedOpen = !advancedOpen;
       advancedPanel.visible = advancedOpen;
+      advancedReset.visible = advancedOpen;
       advancedToggle.__lbl.text = advancedOpen ? 'Advanced Tracking  ▾' : 'Advanced Tracking  ▸';
     }, S.value);
-    advancedToggle.style.marginTop = '8px'; advancedToggle.style.marginRight = '0px';
+    advancedToggle.style.width = 'fill-parent-flow(1.0)';
+    var advancedReset = btn(advancedRow, 'Reset', function () { cmd('mirv_filmmaker follow reset tracking'); }, S.value);
+    advancedReset.style.width = '76px'; advancedReset.style.marginRight = '0px'; advancedReset.visible = false;
+    advancedReset.__lbl.style.fontSize = '10px';
     var advancedPanel = mk('Panel', followSec); advancedPanel.style.flowChildren = 'down';
     advancedPanel.style.width = '100%'; advancedPanel.style.marginTop = '4px'; advancedPanel.visible = false;
 
@@ -1163,11 +1173,15 @@ R"EDJS(
                                    : 'A placed camera rotates to track the target. Tap to switch.';
       if (attachModeOn) {
         advancedOpen = false;
+        advancedRow.visible = false;
         advancedToggle.visible = false;
+        advancedReset.visible = false;
         advancedPanel.visible = false;
         advancedToggle.__lbl.text = 'Advanced Tracking  ▸';
       } else {
+        advancedRow.visible = true;
         advancedToggle.visible = true;
+        advancedReset.visible = advancedOpen;
         advancedPanel.visible = advancedOpen;
         advancedToggle.__lbl.text = advancedOpen ? 'Advanced Tracking  ▾' : 'Advanced Tracking  ▸';
       }
