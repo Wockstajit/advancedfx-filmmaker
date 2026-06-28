@@ -344,8 +344,15 @@ target_sources(${PROJECT_NAME} PRIVATE
     Filmmaker/Movie/FollowCameraMath.h
     Filmmaker/Movie/MovieMode.cpp
     Filmmaker/Movie/MovieMode.h
-    Filmmaker/Movie/MirvCosmetics.cpp
-    Filmmaker/Movie/MirvCosmetics.h
+
+    Filmmaker/Cosmetics/CosmeticProfile.cpp
+    Filmmaker/Cosmetics/CosmeticProfile.h
+    Filmmaker/Cosmetics/CosmeticCatalog.cpp
+    Filmmaker/Cosmetics/CosmeticCatalog.h
+    Filmmaker/Cosmetics/CosmeticOverrideSystem.cpp
+    Filmmaker/Cosmetics/CosmeticOverrideSystem.h
+    Filmmaker/Cosmetics/CosmeticCommands.cpp
+    Filmmaker/Cosmetics/CosmeticDebug.cpp
 
     Filmmaker/Platform/FolderPicker.cpp
     Filmmaker/Platform/FolderPicker.h

@@ -933,13 +933,14 @@ R"EDJS(
       return null;
     }
     function applyCustomizeTargetLoadout(ct) {
-      custLoadout = { primary: null, secondary: null, knife: null, gloves: null };
+      custLoadout = { primary: null, secondary: null, knife: null, gloves: null, agentModel: '' };
       if (ct && ct.weapons) {
         custLoadout.primary = normalizeLoadoutWeapon(ct.weapons.primary);
         custLoadout.secondary = normalizeLoadoutWeapon(ct.weapons.secondary);
         custLoadout.knife = normalizeLoadoutWeapon(ct.weapons.knife);
         custLoadout.gloves = normalizeLoadoutWeapon(ct.weapons.gloves);
       }
+      if (ct && typeof ct.agentModel === 'string') custLoadout.agentModel = ct.agentModel;
       var activeSlot = WEAPON_SLOT_BY_DEF[custActiveWeaponDef] || '';
       if (activeSlot && !custLoadout[activeSlot])
         custLoadout[activeSlot] = { entityIndex: parseInt(ct && ct.activeWeaponIndex || -1, 10), defIndex: custActiveWeaponDef, paintKit: 0, wear: 0.01 };
@@ -953,7 +954,7 @@ R"EDJS(
         var w = custLoadout[slot] || {};
         return [parseInt(w.defIndex || 0, 10) || 0, parseInt(w.paintKit || 0, 10) || 0, Number(w.wear || 0).toFixed(4)].join(':');
       }
-      return [custTargetKey || '', normalizeTeamName(custTargetTeam), part('primary'), part('secondary'), part('knife'), part('gloves')].join('|');
+      return [custTargetKey || '', normalizeTeamName(custTargetTeam), part('primary'), part('secondary'), part('knife'), part('gloves'), custLoadout.agentModel || ''].join('|');
     }
     function filteredOptions(slot) {
       var arr = COSMETICS[slot] || [];
@@ -1105,9 +1106,23 @@ R"EDJS(
       }
       return (normalizeTeamName(custTargetTeam) === 'CT') ? '5029:0' : '5028:0';
     }
+    function agentDefaultSelection() {
+      // Match the player's live model path (read off the pawn, e.g.
+      // 'agents/models/ctm_st6/ctm_st6_variantg.vmdl') to a catalog agent by its meta.model.
+      // NOTE: the catalog key is SINGULAR 'agent' (matching the slot name), not 'agents'.
+      var model = custLoadout.agentModel || '';
+      if (model) {
+        var arr = COSMETICS.agent || [];
+        for (var i = 0; i < arr.length; i++) {
+          var m = arr[i][2] || {};
+          if (m.model && m.model === model) return arr[i][1];
+        }
+      }
+      return 'default';
+    }
     function resetSelectionsFromLoadout() {
       custSel = {
-        agent: 'default',
+        agent: agentDefaultSelection(),
         primary: loadoutDefaultSelection('primary'),
         secondary: loadoutDefaultSelection('secondary'),
         knife: loadoutDefaultSelection('knife'),
@@ -1253,21 +1268,34 @@ R"EDJS(
     }
     function applyCosmeticCommand(slot) {
       if (custTargetIndex < 0 || !custWear[slot]) return;
+      // Target the player by SteamID -- the backend store is SteamID-keyed so the override follows
+      // them across pawn recreation / round reset / death / observer switch / demo seek. The C++
+      // state pushes custTargetKey as "steam:<id>" for real players; fall back to "current" (the
+      // live spectated player) when no SteamID was resolved (e.g. bots).
+      var target = (custTargetKey && custTargetKey.indexOf('steam:') === 0)
+        ? custTargetKey.substring(6) : 'current';
       var opt = selOpt(slot, custSel[slot]);
       var meta = opt ? (opt[2] || {}) : {};
       var def = parseInt(meta.def || 0, 10) || 0;
       var pk = parseInt(meta.paint || meta.paintKit || 0, 10) || 0;
       var wear = wearValue(slot).toFixed(4);
-      var targetArg = (custTargetKey || ('pawn:' + custTargetIndex)).replace(':', '_');
+      var sent = false;
       if ((slot === 'primary' || slot === 'secondary') && def > 0) {
-        cmd('mirv_filmmaker cosmetics weapon ' + targetArg + ' ' + def + ' ' + pk + ' ' + wear + ' 0');
-      } else if (slot === 'knife') {
-        cmd('mirv_filmmaker cosmetics knife ' + targetArg + ' ' + def + ' ' + pk + ' ' + wear + ' 0');
-      } else if (slot === 'gloves') {
-        cmd('mirv_filmmaker cosmetics gloves ' + targetArg + ' ' + def + ' ' + pk + ' ' + wear + ' 0');
+        cmd('mirv_filmmaker cosmetics player ' + target + ' weapon ' + def + ' paint ' + pk + ' wear ' + wear + ' seed 0');
+        sent = true;
+      } else if (slot === 'knife' && def > 0) {
+        cmd('mirv_filmmaker cosmetics player ' + target + ' knife ' + def + ' paint ' + pk + ' wear ' + wear + ' seed 0');
+        sent = true;
+      } else if (slot === 'gloves' && def > 0) {
+        cmd('mirv_filmmaker cosmetics player ' + target + ' gloves ' + def + ' paint ' + pk + ' wear ' + wear + ' seed 0');
+        sent = true;
       } else if (slot === 'agent') {
-        cmd('mirv_filmmaker cosmetics agent ' + targetArg + ' ' + (parseInt(meta.def || 0, 10) || 0));
+        cmd('mirv_filmmaker cosmetics player ' + target + ' agent ' + (meta.model || 'default'));
+        sent = true;
       }
+      // The SteamID-keyed backend has a master enable switch (the legacy pawn-indexed one always
+      // applied). Turn it on whenever the user picks something so the override renders in the demo.
+      if (sent) cmd('mirv_filmmaker cosmetics enabled 1');
     }
     // Apply a selection. Updates UI + preview immediately, persists per current player, and sends
     // the matching offline-demo cosmetic command where the native path exists.

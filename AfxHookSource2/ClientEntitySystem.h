@@ -73,6 +73,12 @@ public:
 // person, 4=roaming/freecam; 0=none). outTargetIndex receives the spectated entity index or -1.
 uint8_t AfxGetLocalObserverState(int * outTargetIndex);
 
+// Entity index of the player PAWN currently being viewed during demo playback, or -1 if none.
+// Tries the engine observer-services target first, then falls back to matching a player pawn's
+// render eye against the active game camera -- robust in POV/GOTV demos where the observer-
+// services fields read 0/-1 even while a player is plainly being spectated. First-person only.
+int AfxGetSpectatedPawnIndex();
+
 typedef int (__fastcall * GetHighestEntityIndex_t)(void * pEntityList, bool bUnknown);
 typedef void * (__fastcall * GetEntityFromIndex_t)(void * pEntityList, int index);
 

@@ -1,6 +1,8 @@
 #include "SchemaSystem.h"
 #include "Globals.h"
 #include <winsock.h>
+#include <fstream>
+#include <string>
 
 ClientDllOffsets_t g_clientDllOffsets;
 
@@ -154,7 +156,11 @@ void initCosmeticsOffsets()
 	ok = ok && getOffset(&g_clientDllOffsets.C_EconItemView.m_iItemIDLow, "client.dll", "C_EconItemView", "m_iItemIDLow");
 	ok = ok && getOffset(&g_clientDllOffsets.C_EconItemView.m_iAccountID, "client.dll", "C_EconItemView", "m_iAccountID");
 	getOffset(&g_clientDllOffsets.C_EconItemView.m_AttributeList, "client.dll", "C_EconItemView", "m_AttributeList");
-	getOffset(&g_clientDllOffsets.C_AttributeList.m_Attributes, "client.dll", "C_AttributeList", "m_Attributes");
+	getOffset(&g_clientDllOffsets.C_EconItemView.m_NetworkedDynamicAttributes, "client.dll", "C_EconItemView", "m_NetworkedDynamicAttributes");
+	// NOTE: the schema class is "CAttributeList" (no underscore) -- the old "C_AttributeList" name
+	// never matched, so m_Attributes stayed 0 and EVERY econ attribute read (paint kit/wear/seed)
+	// silently failed, falling back to the m_nFallback* fields (which are 0 for networked demo items).
+	getOffset(&g_clientDllOffsets.C_AttributeList.m_Attributes, "client.dll", "CAttributeList", "m_Attributes");
 	getOffset(&g_clientDllOffsets.CEconItemAttribute.m_iAttributeDefinitionIndex, "client.dll", "CEconItemAttribute", "m_iAttributeDefinitionIndex");
 	getOffset(&g_clientDllOffsets.CEconItemAttribute.m_flValue, "client.dll", "CEconItemAttribute", "m_flValue");
 	getClassSize(&g_clientDllOffsets.CEconItemAttribute.m_size, "client.dll", "CEconItemAttribute");
@@ -163,7 +169,57 @@ void initCosmeticsOffsets()
 	// Equipped gloves on the pawn -- optional (kept OFF the `ok` chain so a missing field disables
 	// only the "current gloves" read, not the whole skin-changer). Guarded by != 0 at the read site.
 	getOffset(&g_clientDllOffsets.C_CSPlayerPawn.m_EconGloves, "client.dll", "C_CSPlayerPawn", "m_EconGloves");
+	// Read-only model-state chain (agent/player-model display). Off the `ok` chain: a missing field
+	// just disables the agent read, not the whole skin-changer. Guarded by != 0 at the read site.
+	getOffset(&g_clientDllOffsets.ModelChain.m_CBodyComponent, "client.dll", "C_BaseEntity", "m_CBodyComponent");
+	getOffset(&g_clientDllOffsets.ModelChain.m_skeletonInstance, "client.dll", "CBodyComponentSkeletonInstance", "m_skeletonInstance");
+	getOffset(&g_clientDllOffsets.ModelChain.m_modelState, "client.dll", "CSkeletonInstance", "m_modelState");
+	getOffset(&g_clientDllOffsets.ModelChain.m_ModelName, "client.dll", "CModelState", "m_ModelName");
 	g_cosmeticsOffsetsOk = ok;
+}
+
+// TEMP DIAGNOSTIC: dump every client.dll schema class whose name mentions Econ/Attribute (plus the
+// player pawn) to %TEMP%\hlae_schema_econ.txt, so we can read the EXACT live field/class names the
+// attribute-list reader needs. The names hardcoded in initCosmeticsOffsets ("C_AttributeList",
+// "CEconItemAttribute", "m_Attributes"...) are NOT matching the current schema, leaving every skin
+// read at 0. Runs once at init, before the schema map is cleared. Remove once the offsets are fixed.
+void dumpEconSchemaToFile()
+{
+	char tmp[MAX_PATH] = {};
+	GetEnvironmentVariableA("TEMP", tmp, MAX_PATH);
+	std::string path = (tmp[0] ? std::string(tmp) : std::string(".")) + "\\hlae_schema_econ.txt";
+	std::ofstream f(path, std::ios::trunc);
+	if (!f) return;
+
+	auto modIt = g_SchemaSystemOffsets.find("client.dll");
+	if (modIt == g_SchemaSystemOffsets.end()) { f << "no client.dll schema scope\n"; return; }
+
+	for (const auto& classEntry : modIt->second) {
+		const std::string& className = classEntry.first;
+		// Econ/attribute classes (skin read) + the model-state chain (agent/player-model read:
+		// C_BaseEntity -> body component -> skeleton instance -> CModelState::m_ModelName).
+		if (className.find("Econ") == std::string::npos
+			&& className.find("Attribute") == std::string::npos
+			&& className.find("Skeleton") == std::string::npos
+			&& className.find("ModelState") == std::string::npos
+			&& className.find("BodyComponent") == std::string::npos
+			&& className.find("SceneNode") == std::string::npos
+			&& className != "C_CSPlayerPawn"
+			&& className != "C_BaseEntity"
+			&& className != "C_BaseModelEntity")
+			continue;
+
+		uint32_t sz = 0;
+		if (g_SchemaSystemClassSizes.count("client.dll")) {
+			auto& sizes = g_SchemaSystemClassSizes.at("client.dll");
+			auto szIt = sizes.find(className);
+			if (szIt != sizes.end()) sz = szIt->second;
+		}
+
+		f << "=== " << className << " (size=" << sz << ") ===\n";
+		for (const auto& fieldEntry : classEntry.second)
+			f << "  " << fieldEntry.first << " @ 0x" << std::hex << fieldEntry.second << std::dec << "\n";
+	}
 }
 
 void HookSchemaSystem(HMODULE schemaSystemDll)
@@ -196,6 +252,7 @@ void HookSchemaSystem(HMODULE schemaSystemDll)
 
 	initSchemaSystemOffsets();
 	initCosmeticsOffsets(); // non-fatal; must run before g_SchemaSystemOffsets is cleared
+	dumpEconSchemaToFile(); // TEMP diagnostic; must run before the schema map is cleared below
 
 	g_SchemaSystemOffsets.clear();
 	g_SchemaSystemClassSizes.clear();

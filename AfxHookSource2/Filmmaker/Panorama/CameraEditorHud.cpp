@@ -7,7 +7,7 @@
 #include "../Movie/CameraPath.h"
 #include "../Movie/CameraBridge.h"
 #include "../Movie/FollowCamera.h"
-#include "../Movie/MirvCosmetics.h"
+#include "../Cosmetics/CosmeticOverrideSystem.h"
 
 #include "../../DeathMsg.h" // AfxHookSource2_GetPanoramaHudPanel + PanoramaUIPanel offsets
 #include "../../ClientEntitySystem.h" // AfxGetLocalObserverState (spectator gating for Customize)
@@ -174,17 +174,18 @@ bool TryMakeAttributeVector(unsigned char* vectorField, AttributeVectorView& out
 	return false;
 }
 
-bool TryReadItemAttributeFloat(unsigned char* itemView, int attributeId, float& out) {
+// Searches ONE CAttributeList (embedded at itemView + listOff) for attributeId, writing its float
+// value to `out`. Returns false when the list offset is unresolved, the vector is empty, or the
+// attribute is absent. SEH-guarded: a bad pointer/offset faults here and is swallowed.
+bool TryReadAttrFromList(unsigned char* itemView, ptrdiff_t listOff, int attributeId, float& out) {
 	const ClientDllOffsets_t& offsets = g_clientDllOffsets;
-	if (!itemView
-		|| offsets.C_EconItemView.m_AttributeList == 0
+	if (!itemView || listOff == 0
 		|| offsets.C_AttributeList.m_Attributes == 0
 		|| offsets.CEconItemAttribute.m_iAttributeDefinitionIndex == 0
 		|| offsets.CEconItemAttribute.m_flValue == 0)
 		return false;
 
-	unsigned char* attributeList = itemView + offsets.C_EconItemView.m_AttributeList;
-	unsigned char* vectorField = attributeList + offsets.C_AttributeList.m_Attributes;
+	unsigned char* vectorField = itemView + listOff + offsets.C_AttributeList.m_Attributes;
 	AttributeVectorView vec;
 	if (!TryMakeAttributeVector(vectorField, vec))
 		return false;
@@ -203,6 +204,18 @@ bool TryReadItemAttributeFloat(unsigned char* itemView, int attributeId, float& 
 	} __except (1) {
 		return false;
 	}
+	return false;
+}
+
+bool TryReadItemAttributeFloat(unsigned char* itemView, int attributeId, float& out) {
+	const ClientDllOffsets_t& offsets = g_clientDllOffsets;
+	// A networked/spectated player's econ attributes (paint kit/wear/seed) live in
+	// m_NetworkedDynamicAttributes; the local "cooked" m_AttributeList is typically empty for them.
+	// Try the networked list first, then the local list (which holds fully-initialized local items).
+	if (TryReadAttrFromList(itemView, offsets.C_EconItemView.m_NetworkedDynamicAttributes, attributeId, out))
+		return true;
+	if (TryReadAttrFromList(itemView, offsets.C_EconItemView.m_AttributeList, attributeId, out))
+		return true;
 	return false;
 }
 
@@ -344,6 +357,37 @@ void WriteWeaponSlotJson(std::ostringstream& o, const char* name, const Customiz
 	o << "}";
 }
 
+// Reads the player's agent/player-model path (read-only) via the model-state chain, for the modal's
+// AGENT display. pawn + m_CBodyComponent(ptr deref) + m_skeletonInstance + m_modelState + m_ModelName.
+// SEH-guarded: a bad pointer/offset faults here and is swallowed; returns false then.
+bool ReadAgentModelPath(CEntityInstance* pawn, char* out, size_t outSize) {
+	if (out && outSize) out[0] = '\0';
+	if (!pawn || !pawn->IsPlayerPawn() || !out || outSize == 0)
+		return false;
+	const ClientDllOffsets_t& o = g_clientDllOffsets;
+	if (o.ModelChain.m_CBodyComponent == 0 || o.ModelChain.m_skeletonInstance == 0
+		|| o.ModelChain.m_modelState == 0 || o.ModelChain.m_ModelName == 0)
+		return false;
+	unsigned char* p = (unsigned char*)pawn;
+	bool ok = false;
+	__try {
+		unsigned char* bodyComp = *(unsigned char**)(p + o.ModelChain.m_CBodyComponent);
+		if ((uintptr_t)bodyComp > 0x10000) {
+			unsigned char* modelState = bodyComp + o.ModelChain.m_skeletonInstance + o.ModelChain.m_modelState;
+			const char* name = *(const char**)(modelState + o.ModelChain.m_ModelName);
+			if ((uintptr_t)name > 0x10000) {
+				size_t i = 0;
+				for (; name[i] && i + 1 < outSize; ++i) out[i] = name[i];
+				out[i] = '\0';
+				ok = (i > 0);
+			}
+		}
+	} __except (1) {
+		ok = false;
+	}
+	return ok;
+}
+
 std::string BuildCustomizeTargetJson(int pawnIndex) {
 	CEntityInstance* pawn = EntityFromIndex(pawnIndex);
 	if (!pawn || !pawn->IsPlayerPawn())
@@ -400,6 +444,10 @@ std::string BuildCustomizeTargetJson(int pawnIndex) {
 	else
 		o << "null";
 	o << "}";
+	// Read-only agent/player-model path for the AGENT slot display (matched to the catalog in JS).
+	char agentModel[256] = {};
+	ReadAgentModelPath(pawn, agentModel, sizeof(agentModel));
+	o << ",\"agentModel\":\"" << JsonEscape(agentModel) << "\"";
 	o << "}";
 	return o.str();
 }
@@ -514,9 +562,9 @@ void CameraEditorHud::OnExit() {
 
 	MovieHudRef().SetVisible(m_prevMovieHud);
 
-	// Drop any cosmetic skin overrides so they don't persist (and possibly mis-apply by stale
-	// entity index) after the editor is closed.
-	Cosmetics_ClearAll();
+	// NOTE: cosmetic overrides are keyed by SteamID and persist across editor open/close on
+	// purpose now (they follow the player through the whole demo). Closing the editor no longer
+	// clears them; use "mirv_filmmaker cosmetics clear" or the Customize modal to remove them.
 
 	// Drop any pending scaled-preview blit so the next full-screen frame renders normally.
 	AfxViewportScaler::SetRequest(false, 0, 0, 0, 0);
@@ -591,6 +639,12 @@ std::string CameraEditorHud::BuildStateJson() {
 	{
 		int obsTargetIndex = -1;
 		uint8_t obsMode = AfxGetLocalObserverState(&obsTargetIndex);
+		// AfxGetLocalObserverState's target reads -1 in POV/GOTV demos (so customizeTarget would be
+		// null and the modal would fall back to a fuzzy nearest-player guess). Use the robust eye-match
+		// resolver so customizeTarget is deterministically the player actually being viewed. Returns -1
+		// in free cam (no single spectated player) -> customizeTarget null, fallback as before.
+		int spectated = AfxGetSpectatedPawnIndex();
+		if (spectated >= 0) obsTargetIndex = spectated;
 		o << ",\"obsMode\":" << (int)obsMode;
 		o << ",\"obsTarget\":" << obsTargetIndex;
 		o << ",\"customizeTarget\":" << BuildCustomizeTargetJson(obsTargetIndex);

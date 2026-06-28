@@ -759,6 +759,56 @@ uint8_t AfxGetLocalObserverState(int * outTargetIndex) {
     return mode;
 }
 
+// Resolves the player PAWN currently being viewed, returning its entity index or -1.
+//
+// Primary path is the engine observer-services target (AfxGetLocalObserverState). In many CS2
+// demos -- notably POV / "Your Matches" downloads -- the local controller's observer-services
+// read mode 0 / target -1 even while a player is plainly being spectated, because demo playback
+// drives the render view directly rather than through the live observer system. When the observer
+// target is unavailable, fall back to matching each player pawn's render eye (origin + angles)
+// against the active game camera (g_CurrentGameCamera), the SAME first-person resolution that
+// DeathMsg.cpp::getSpectatedPlayer relies on. The fallback only matches in first person (where the
+// camera eye coincides with the pawn's render eye); in third-person / free cam it returns -1,
+// which is correct -- there is no single spectated player then.
+int AfxGetSpectatedPawnIndex() {
+    if (!g_pEntityList || !*g_pEntityList || !g_GetEntityFromIndex)
+        return -1;
+
+    // Primary: engine observer-services target, validated to be a player pawn.
+    int target = -1;
+    AfxGetLocalObserverState(&target);
+    if (target >= 0 && target <= GetHighestEntityIndex()) {
+        CEntityInstance* pawn = (CEntityInstance*)g_GetEntityFromIndex(*g_pEntityList, target);
+        if (pawn && pawn->IsPlayerPawn())
+            return target;
+    }
+
+    // Fallback: render-eye match against the current game camera (first-person only).
+    auto absd = [](double v) { return v < 0.0 ? -v : v; };
+    const double* camO = g_CurrentGameCamera.origin;
+    const double* camA = g_CurrentGameCamera.angles;
+
+    const int highest = GetHighestEntityIndex();
+    for (int i = 0; i <= highest; ++i) {
+        CEntityInstance* ent = (CEntityInstance*)g_GetEntityFromIndex(*g_pEntityList, i);
+        if (!ent || !ent->IsPlayerPawn())
+            continue;
+
+        float o[3] = {}; ent->GetRenderEyeOrigin(o);
+        float a[3] = {}; ent->GetRenderEyeAngles(a);
+
+        // Magnitude comparison + 0.2 tolerance, matching DeathMsg.cpp::getSpectatedPlayer.
+        if (absd(absd((double)o[0]) - absd(camO[0])) > 0.2) continue;
+        if (absd(absd((double)o[1]) - absd(camO[1])) > 0.2) continue;
+        if (absd(absd((double)o[2]) - absd(camO[2])) > 0.2) continue;
+        if (absd(absd((double)a[0]) - absd(camA[0])) > 0.2) continue;
+        if (absd(absd((double)a[1]) - absd(camA[1])) > 0.2) continue;
+        if (absd(absd((double)a[2]) - absd(camA[2])) > 0.2) continue;
+        return i;
+    }
+    return -1;
+}
+
 extern "C" FFIBool afx_hook_source2_get_entity_ref_attachment(void * pRef, const char* attachmentName, double outPosition[3], double outAngles[4]) {
     if(auto pInstance = ((CAfxEntityInstanceRef *)pRef)->GetInstance()) {
 		auto idx = pInstance->LookupAttachment(attachmentName);

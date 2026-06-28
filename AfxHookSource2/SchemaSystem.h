@@ -110,6 +110,10 @@ struct ClientDllOffsets_t {
 		ptrdiff_t m_iItemIDLow = 0;           // uint32
 		ptrdiff_t m_iAccountID = 0;           // uint32
 		ptrdiff_t m_AttributeList = 0;        // C_AttributeList (value member)
+		ptrdiff_t m_NetworkedDynamicAttributes = 0; // C_AttributeList (value member); where a
+		                                            // networked/spectated item's paint kit, wear,
+		                                            // seed actually live (m_AttributeList is the
+		                                            // local cooked list, empty for demo players).
 		ptrdiff_t m_bInitialized = 0;         // bool, optional refresh hint
 		ptrdiff_t m_bInitializedTags = 0;     // bool, optional refresh hint
 	} C_EconItemView;
@@ -130,6 +134,17 @@ struct ClientDllOffsets_t {
 	struct C_CSPlayerPawn {
 		ptrdiff_t m_EconGloves = 0; // C_EconItemView (value member)
 	} C_CSPlayerPawn;
+
+	// READ-ONLY model-state chain for showing which agent/player-model a spectated player wears
+	// (this is a READ for the modal display; it is NOT a model swap -- see
+	// docs/cosmetics-model-override-research.md for why writing the model is server-side-only).
+	// Chain: pawn + m_CBodyComponent(ptr) -> + m_skeletonInstance -> + m_modelState -> + m_ModelName.
+	struct ModelChain {
+		ptrdiff_t m_CBodyComponent = 0;   // C_BaseEntity::m_CBodyComponent (CBodyComponent*, a POINTER)
+		ptrdiff_t m_skeletonInstance = 0; // CBodyComponentSkeletonInstance::m_skeletonInstance (embedded)
+		ptrdiff_t m_modelState = 0;       // CSkeletonInstance::m_modelState (embedded CModelState)
+		ptrdiff_t m_ModelName = 0;        // CModelState::m_ModelName (CUtlSymbolLarge == const char*)
+	} ModelChain;
 };
 
 extern struct ClientDllOffsets_t g_clientDllOffsets;

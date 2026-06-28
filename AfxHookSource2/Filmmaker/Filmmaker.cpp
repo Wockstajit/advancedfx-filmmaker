@@ -12,7 +12,7 @@
 #include "Movie/MovieMode.h"
 #include "Movie/CameraPath.h"
 #include "Movie/FollowCamera.h"
-#include "Movie/MirvCosmetics.h"
+#include "Cosmetics/CosmeticOverrideSystem.h"
 #include "Platform/FolderPicker.h"
 #include "Platform/TextEncoding.h"
 
@@ -50,6 +50,7 @@ std::wstring g_currentDemoPath; // last demo launched via Watch (for the marker 
 
 void DoInit() {
 	g_library.Init();
+	CosmeticsRef().Init(); // load persisted offline-demo cosmetic profiles (%APPDATA%\HLAE\)
 	g_rescanRequested.store(true); // initial scan happens on the next RunFrame
 }
 
