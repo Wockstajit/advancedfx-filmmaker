@@ -11,6 +11,47 @@ reverted=0` every frame) but the weapon keeps rendering its original skin. This 
 missing visual-rebuild step only — it does not touch the separate, already-researched
 knife/agent **model**-swap problem (`docs/cosmetics-model-override-research.md`).
 
+Update after this pass: the code now exposes an explicit experimental bridge for the only visual
+path verified to work in CS2: `mirv_filmmaker cosmetics paintkitbridge ...`. It writes the global
+`cl_paintkit_override` cvar and restores the previous value when disabled. This is **not** a true
+per-player/per-entity skin hook; it is global and only affects the next weapon deploy/create, because
+that is when CS2 reads the cvar while building the composite material. The reusable live verifier is
+`automation/verify/verify-cosmetics-paintkit-bridge.ps1`, with image-diff support in
+`automation/tools/image_diff.py`.
+
+## Tooling added for this investigation (current build)
+
+Two console commands were added to drive the investigation in-game (both in
+`AfxHookSource2/Filmmaker/Cosmetics/`):
+
+- **`mirv_filmmaker cosmetics visualdiag`** (`CosmeticDebug.cpp::Cosmetics_PrintVisualDiag`,
+  read-only): dumps the spectated weapon's full visual-cache state — entity index/class, owner xuid,
+  defIndex, `m_iItemIDHigh/Low`/`m_iAccountID`, the fallback paint/wear/seed/stattrak, the
+  `m_NetworkedDynamicAttributes` values for def 6/7/8/81, the world-model path, the active-weapon
+  handle, and crucially **the three visuals-cache flags AND their resolved schema offsets**
+  (`m_bVisualsDataSet`, `m_bClearWeaponIdentifyingUGC`, `m_nCustomEconReloadEventId`). Those printed
+  offsets are exactly what an IDA/Ghidra pass needs to xref the consuming function (search for byte
+  access at `weapon_base + <offset>`) — closing the one gap this research could not (the "How to
+  locate" section below). Run it before AND after a skin apply / rebuild to compare.
+- **`mirv_filmmaker cosmetics rebuild once` / `rebuild auto 0|1`**
+  (`CosmeticOverrideSystem.cpp::RebuildOnce` / `SetRebuildAuto`): `rebuild once` re-asserts the
+  visuals-stale field writes (`m_bVisualsDataSet=false`, `m_bClearWeaponIdentifyingUGC=true`, bump
+  `m_nCustomEconReloadEventId`, clear init flags, bump attr parity) on **every** matched weapon
+  entity right now, decoupled from per-frame change detection, and fires the recompose vcall once if
+  it is armed (`cosmetics recompose 1`). `rebuild auto` gates whether the per-frame loop does that
+  stale-marking on change. **Caveat, consistent with the findings below:** these only re-issue the
+  field writes already proven to *stick but not render*; they make the field-poke path manually
+  triggerable for A/B screenshots and provide a single on-demand slot to fire a resolved rebuild
+  function once one is found — they are not, by themselves, expected to fix the render until the
+  consuming function (or a lifecycle event) is actually invoked.
+
+- **`mirv_filmmaker cosmetics paintkitbridge [0|1|auto|force <paint>]`**
+  (`CosmeticOverrideSystem.cpp`): a deploy-time workaround around CS2's own
+  `cl_paintkit_override`. `auto` follows the currently spectated profiled weapon's paint kit;
+  `force <paint>` is for automation/manual proof-of-life without editing stored profiles. It is
+  intentionally labeled experimental/global because it cannot target one player after the composite
+  has already been built.
+
 ## tl;dr
 
 The write almost certainly never reaches the code that builds the skin's composited material
@@ -22,6 +63,163 @@ fix is not a vtable call at all: it's locating and calling the (non-virtual) mat
 function directly via a byte signature, the same way the rest of this DLL resolves engine
 functions. No current-build CS2 signature for that function was found in this pass — that is the
 single concrete next step, detailed below.
+
+## Binary-analysis update (2026-06-28): the trigger is `OnDataChanged` (a virtual), and the legacy code is present
+
+A static pass over the **actual current-build `client.dll`**
+(`F:\SteamLibrary\...\csgo\bin\win64\client.dll`, 6/11/2026, 37 MB) with capstone + pefile
+(throwaway tooling under the session scratchpad; not committed) changes the framing above on
+several points. Findings, strongest first:
+
+1. **The CS:GO-legacy `cstrike15` weapon code is compiled into CS2's `client.dll`.** The build
+   embeds source-path strings `...\game\shared\cstrike15\weapon_csbase.cpp`, `weapon_knife.cpp`,
+   `weapon_csbasegun.cpp`, etc. So the leak architecture this doc relied on is **not just
+   historical** — the same `OnDataChanged` / custom-material call sites exist as real functions in
+   the running binary.
+2. **CS2 replaced CS:GO's `CCustomMaterial` with the Source 2 "composite material" (`.vcompmat`)
+   system.** The binary carries `CompositeMaterialGameSystem` / `CCompositeMaterialManager`, the
+   paint-kit templates `workshop/paintkits/templates/*.vcompmat`, and a `composite_material_*`
+   convar family. So the "rebuild" we want is **"(re)build this weapon's composite material,"** a
+   different subsystem than the doc assumed — the `m_vecCompositeMaterialAssemblyProcedures` /
+   `CompositeMaterial_t` family flagged as a "loose thread" earlier is in fact the relevant system.
+3. **The rebuild TRIGGER is the weapon's `OnDataChanged`, which *is* virtual.** The doc conflated
+   the trigger with the *non-virtual* `UpdateCustomMaterial` it calls and concluded "a vtable
+   approach is structurally wrong." That is half right: `UpdateCustomMaterial` is non-virtual, but
+   the thing that *calls* it — `OnDataChanged(DataUpdateType_t)` — is a normal entity virtual.
+   Corroborated by the networked field **`m_nCustomEconReloadEventId`** (name literally = "reload
+   the custom econ visuals when this changes"), which is a delta-checked-on-`OnDataChanged` token.
+   **So `SafeVCall` is the right mechanism after all — just aimed at `OnDataChanged`, not at the
+   guessed "UpdateComposite" index 7.**
+4. **The repo already hypothesized this.** `CosmeticOverrideSystem.h` comments that `vtArg=0`
+   tests `OnDataChanged(DATA_UPDATE_CREATED)` "the candidate skin-rebuild trigger." The only
+   missing piece is the **correct vtable index for `OnDataChanged`** (the historical `7` was a
+   guess for a different function).
+5. **Why the override fails is now precise.** Real demo weapons render their *real* skins, which
+   proves the composite **is** built during demo playback, at entity-creation time. Our override
+   fails only because we change econ data *after* that build and nothing re-runs `OnDataChanged`.
+   The fix is strictly "re-run the create/data-changed path for an already-created weapon."
+6. **Independent confirmation from a working tool.** `yuzhouUvU/cs2_weapons_skin` (client-side)
+   applies the skin and then forces a visual refresh by **destroying + recreating the weapon
+   entity** (`RemoveWeapon` → entity-system `EntityRemove` → `GiveNamedItem`), letting the natural
+   creation-time composite consume the new fallback values in `OnEntitySpawned`. It never calls a
+   manual rebuild. Same lesson as `cs2-WeaponPaints`' `!kill` requirement — but those are
+   server-authoritative calls, **unavailable during demo playback** (no server simulating the
+   world), which is exactly why this tool needs a different lever.
+
+**Concrete anchors located in the current build (for the runtime step below):**
+`C_CSWeaponBase` main vftable `@ 0x181a2a798`; `C_EconEntity` main vftable `@ 0x181b5f570`;
+`C_CSWeaponBase::GetEconWpnData` accessors `@ 0x180796d50` / `@ 0x180796de0` (cached at
+`weapon+0x1cc0`); `m_bVisualsDataSet` / `m_nCustomEconReloadEventId` netvar strings
+`@ 0x181a26240` / `@ 0x181a26268`. RTTI is walkable both statically (confirmed) and at runtime via
+the repo's existing `FindClassVtable`/`getVTableFn`.
+
+**What static analysis could NOT close (same gap as before, now narrowed):** identifying the exact
+`OnDataChanged` vtable slot purely statically did not converge — the composite request is 3+ call
+levels deep and/or routed through an indirect (vtable) call, so a linear string/call-xref scan of
+the slot bodies surfaces nothing. The reliable way to get the index is a **one-time runtime vtable
+dump** of a live weapon entity (the repo can already resolve the vtable via `FindClassVtable`),
+then confirm by A/B in-game. This is now a single value to find, not an open-ended signature hunt.
+
+**Refined recommendation (supersedes "Recommended minimal change" item 2's "retire the vtable
+approach"):**
+- **Path A — recommended, reuses existing infra.** Add a diagnostic that dumps `C_CSWeaponBase`'s
+  vtable at runtime so `OnDataChanged`'s index can be identified, then drive the existing
+  `cosmetics recompose` / `vtidx` / `vtarg` path to call `weapon->OnDataChanged(DATA_UPDATE_CREATED)`
+  **after** the econ write **and** a `m_nCustomEconReloadEventId` bump. Almost all of this already
+  exists; only the index + the right `DataUpdateType_t` enum value need confirming in-game.
+- **Path B — proven mechanism, more code, non-instant.** Hook the client weapon-entity
+  creation / `OnDataChanged` path and write the override *before* the natural composite build
+  (mirroring `yuzhouUvU`'s `OnEntitySpawned`). No index needed, but it only takes visual effect on
+  the next entity (re)creation — i.e. a demo seek / round change / weapon switch — not instantly.
+
+Both still require a build + live verification to confirm; neither is provable from the static
+binary alone.
+
+## Live in-game verification (2026-06-28): mechanism found, data path works, composite regen is the wall
+
+Built the tooling and drove it against a live demo (USP-S / SSG08 of a spectated pro). Artifacts
+under `automation/output/ondatachanged_bisect/` (git-ignored). What was added:
+`mirv_filmmaker cosmetics vtprobe <idx>` (calls `weapon->vtable[idx](this,0)` after marking visuals
+stale, SEH-guarded); the `reloadevent` lever changed from `++` to **`= -1`**
+(`CosmeticOverrideSystem.cpp`); and `automation/verify/verify-ondatachanged-bisect.ps1`. Findings,
+in order of certainty:
+
+1. **The OnDataChanged index hunt is solved: it is slot 11**, and the trigger condition is exactly
+   what the static disassembly predicted. `C_CSWeaponBase` vtable slot 11 (`0x1807aa6d0`) chains to
+   the C_EconEntity base, then — **only if `m_nCustomEconReloadEventId < 0`** — calls the composite
+   manager's **`"clientside_reload_custom_econ"`** and stores a fresh reload id. Live, after
+   `vtprobe 11`, the field went `-1 → 272` (a deterministic id), proving the reload block ran.
+   **This also fixes a real bug: the repo's old `reloadevent` lever *incremented* the field
+   (→ positive → the `jge skip` branch), so it could never trigger.** The correct value is `-1`.
+2. **Slot 11 is safe to call; blind probing is not.** `vtprobe 4` (another DataUpdateType_t-taking
+   virtual) returned `faulted=0` but the game crashed (`ResetBreakpadAppId`) immediately after —
+   SEH catches access violations, not logic corruption. So the offset-xref that pinpointed slot 11
+   (find the function that writes `m_nCustomEconReloadEventId @+0x18bc`) is what made this tractable
+   without crash-bisecting nine candidates.
+3. **The econ DATA path works end-to-end.** With the override correctly on the held weapon's slot
+   (note: `weapon 0` = primary; a held USP-S is *secondary*, so use `weapon 61`) the live
+   `m_NetworkedDynamicAttributes` def6 became our paint, the fallback fields updated, and — in
+   fallback mode (`m_iItemIDHigh=-1`) — **the in-game HUD weapon name changed to the override skin**
+   (USP-S → "Kill Confirmed" for paint 504). The data/identity/name layer fully consumes the write.
+4. **But the rendered composite MATERIAL does not regenerate.** Despite the HUD name flipping and
+   `def6`/fallback all reading our paint, the 3D view-model kept its *original* composited skin
+   (USP-S stayed visually "Check Engine"; direct crop A/B of view-model pixels were identical).
+   This held for `arg=0` and `arg=1`, paused and resumed, fallback on/off, and after
+   `mat_reloadallmaterials` (no effect). Note `m_bVisualsDataSet` reads **0 even for a
+   correctly-rendered stock skin**, so it is NOT the rebuild gate this doc earlier guessed.
+5. **Runtime composite override IS achievable — proven by the engine's own dev lever.** `sv_cheats 1;
+   cl_paintkit_override <N>` makes weapons render paint kit `<N>` (a freshly-deployed SSG08
+   rendered the override finish; `mat_reloadallmaterials` alone did nothing). So the rendering path
+   can be driven at runtime; it just isn't driven by an out-of-band econ edit + the reload call.
+   `cl_paintkit_override` applies at composite-**build** time (weapon deploy/create) and is global
+   (all weapons), confirming the composite is built from the econ item at create/deploy and then
+   cached on the renderable — our per-frame poll writes *after* that build, and nothing invalidates
+   the cached composite material instance.
+
+**Net:** the "rebuild signature" the task asked for is found and wired (slot 11 / reloadId=-1 /
+`clientside_reload_custom_econ`), and it correctly drives the econ identity + HUD name — but it does
+**not** force a true composite-material regeneration on an already-built renderable. That last step
+(the doc's original wall) is what `cl_paintkit_override` does and our path does not.
+
+**Recommended next direction (Path C — most promising, supersedes A/B above):** locate the
+`cl_paintkit_override` *read* site inside the composite-build path (the convar object is registered
+at `client.dll` `0x18011cc9f`; find where its value is consulted during weapon visuals build) and
+**hook it** to return the spectated/owning player's per-entity override paint instead of the global
+convar value. That reuses the engine's proven, already-working composite-build path and makes it
+per-player. Failing a hook, Path B (write the override *before* the natural create/deploy composite
+build, via an entity-creation/`OnDataChanged` hook rather than the current too-late per-frame poll)
+remains the fallback, but only takes effect on weapon (re)deploy.
+
+### Follow-up (same session): every write-based approach exhaustively ruled out — the barrier is build-time timing
+
+Pushed the investigation to a definitive conclusion. None of these render a per-player override (all
+verified live with screenshot diffs):
+- per-frame econ write (def6 + fallback) — HUD/name only, never the composite;
+- slot-11 reload (`reloadId=-1` + `OnDataChanged`), `arg=0` and `arg=1`, fallback on/off, paused/resumed;
+- visuals-invalidate (`m_bVisualsDataSet=0`) + reload;
+- `mat_reloadallmaterials`;
+- **seek-recreate with the override pre-written** (clean A/B at one tick: cosmetics-off real skin
+  `def6=796` vs cosmetics-on `def6=504` after recreate → **weapon-region pixel diff max=24, i.e. no
+  skin change**; HUD still "Check Engine").
+- `cl_paintkit_override <N>` on an **already-deployed** weapon (in place) — **no change** (mean
+  pixel diff 0.04); it only affects a weapon at its **next deploy**, and then **globally**.
+
+**Root cause, now airtight:** the weapon's skin composite is built **once, synchronously, at entity
+create/deploy, from the *authoritative networked econ item*** (the GC item behind `m_iItemIDHigh`,
+paint 796 here) — **not** from our locally-edited `m_NetworkedDynamicAttributes` def6 — and is then
+cached on the renderable. Our per-frame write lands *after* that build (the demo's full-update at a
+seek re-sends 796 and builds before our `RunMainThreadFrame` overwrites to 504), and nothing
+out-of-band invalidates the cached composite. `cl_paintkit_override` is the *only* lever that works
+because it is consulted **inside the build**, overriding the value the build uses.
+
+**Therefore a write-then-hope design can never render a per-player skin** — the only viable path is
+to intercept the paint kit **at the build's read site** (exactly where `cl_paintkit_override` is
+consulted) and return the per-entity override. That read site is masked behind CS2's modern
+convar system (the convar object at `0x1823cfaf0` has **zero** value-field xrefs in `client.dll` —
+reads go through the convar interface/handle, not a direct `[obj+off]` access), so locating it needs
+either deeper convar-system RE or an IDA/Ghidra pass on the composite-input builder near
+`client.dll` `0x1807307fd` (which collects `&m_nFallbackPaintKit`/seed/wear for the composite). The
+fix is then a Detours/vtable hook at that point — the concrete, and only, remaining work.
 
 ## Mechanism
 

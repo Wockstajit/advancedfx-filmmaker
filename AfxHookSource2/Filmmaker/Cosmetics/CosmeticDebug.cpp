@@ -15,6 +15,7 @@
 #include "../../../shared/AfxConsole.h"
 
 #include <cstdint>
+#include <string>
 
 namespace Filmmaker {
 
@@ -227,6 +228,106 @@ void ReadPawnModelName(int pawnIndex, ModelNameResult* out) {
 	}
 }
 
+// Generalized model-name read: same CModelState::m_ModelName chain as ReadPawnModelName, but for ANY
+// entity (a weapon entity is a C_BaseAnimGraph and carries the same body-component/skeleton chain),
+// so we can dump the weapon's own world-model path. SEH-guarded POD body.
+void ReadEntityModelName(CEntityInstance* ent, ModelNameResult* out) {
+	*out = ModelNameResult{};
+	if (!ent)
+		return;
+	const ClientDllOffsets_t& o = g_clientDllOffsets;
+	if (o.ModelChain.m_CBodyComponent == 0 || o.ModelChain.m_skeletonInstance == 0
+		|| o.ModelChain.m_modelState == 0 || o.ModelChain.m_ModelName == 0)
+		return;
+	unsigned char* p = (unsigned char*)ent;
+	__try {
+		unsigned char* bodyComp = *(unsigned char**)(p + o.ModelChain.m_CBodyComponent);
+		if ((uintptr_t)bodyComp > 0x10000) {
+			unsigned char* modelState = bodyComp + o.ModelChain.m_skeletonInstance + o.ModelChain.m_modelState;
+			const char* name = *(const char**)(modelState + o.ModelChain.m_ModelName);
+			if ((uintptr_t)name > 0x10000) {
+				size_t i = 0;
+				for (; name[i] && i + 1 < sizeof(out->name); ++i)
+					out->name[i] = name[i];
+				out->name[i] = '\0';
+				out->ok = (i > 0);
+			}
+		}
+	} __except (1) {
+		out->ok = false;
+	}
+}
+
+// POD dump of one weapon entity's full visual/econ cache state. Every render-relevant field the
+// visual-rebuild research cares about, read in a single SEH-guarded pass. `have*` flags distinguish
+// "offset unresolved on this build" (false) from "read 0" (true, value 0).
+struct WeaponVisualDiag {
+	bool ok = false;
+	uint64_t ownerXuid = 0;
+	int defIndex = 0;
+	int32_t itemIdHigh = 0;
+	uint32_t itemIdLow = 0;
+	uint32_t accountId = 0;
+	int32_t fbPaint = 0;
+	float fbWear = 0.0f;
+	int32_t fbSeed = 0;
+	int32_t fbStat = 0;
+	bool haveVisualsData = false;  unsigned char visualsDataSet = 0;
+	bool haveClearUgc = false;     unsigned char clearUgc = 0;
+	bool haveReloadEvent = false;  int32_t reloadEvent = 0;
+	bool haveAttrInit = false;     unsigned char attrInit = 0;
+};
+
+// Reads everything in WeaponVisualDiag off a weapon entity. Caller resolves itemView; this only
+// touches POD pointers inside __try. Optional offsets (the C_CSWeaponBase visuals flags) are gated by
+// != 0 so a missing field reports have*=false instead of reading a bogus address.
+void ReadWeaponVisualDiag(unsigned char* w, unsigned char* itemView, WeaponVisualDiag* out) {
+	*out = WeaponVisualDiag{};
+	const ClientDllOffsets_t& o = g_clientDllOffsets;
+	__try {
+		uint32_t xLow = *(uint32_t*)(w + o.C_EconEntity.m_OriginalOwnerXuidLow);
+		uint32_t xHigh = *(uint32_t*)(w + o.C_EconEntity.m_OriginalOwnerXuidHigh);
+		out->ownerXuid = ((uint64_t)xHigh << 32) | (uint64_t)xLow;
+		out->defIndex = (int)*(uint16_t*)(itemView + o.C_EconItemView.m_iItemDefinitionIndex);
+		out->itemIdHigh = *(int32_t*)(itemView + o.C_EconItemView.m_iItemIDHigh);
+		if (o.C_EconItemView.m_iItemIDLow) out->itemIdLow = *(uint32_t*)(itemView + o.C_EconItemView.m_iItemIDLow);
+		if (o.C_EconItemView.m_iAccountID) out->accountId = *(uint32_t*)(itemView + o.C_EconItemView.m_iAccountID);
+		out->fbPaint = *(int32_t*)(w + o.C_EconEntity.m_nFallbackPaintKit);
+		out->fbWear = *(float*)(w + o.C_EconEntity.m_flFallbackWear);
+		out->fbSeed = *(int32_t*)(w + o.C_EconEntity.m_nFallbackSeed);
+		out->fbStat = *(int32_t*)(w + o.C_EconEntity.m_nFallbackStatTrak);
+		if (o.C_CSWeaponBase.m_bVisualsDataSet) {
+			out->visualsDataSet = *(unsigned char*)(w + o.C_CSWeaponBase.m_bVisualsDataSet);
+			out->haveVisualsData = true;
+		}
+		if (o.C_CSWeaponBase.m_bClearWeaponIdentifyingUGC) {
+			out->clearUgc = *(unsigned char*)(w + o.C_CSWeaponBase.m_bClearWeaponIdentifyingUGC);
+			out->haveClearUgc = true;
+		}
+		if (o.C_CSWeaponBase.m_nCustomEconReloadEventId) {
+			out->reloadEvent = *(int32_t*)(w + o.C_CSWeaponBase.m_nCustomEconReloadEventId);
+			out->haveReloadEvent = true;
+		}
+		if (o.C_EconEntity.m_bAttributesInitialized) {
+			out->attrInit = *(unsigned char*)(w + o.C_EconEntity.m_bAttributesInitialized);
+			out->haveAttrInit = true;
+		}
+		out->ok = true;
+	} __except (1) {
+		out->ok = false;
+	}
+}
+
+// Extracts a specific attribute def's value out of an already-read AttrListDump. Returns false if the
+// def is not present (e.g. StatTrak on a non-ST gun). The list reader already SEH-guarded the read.
+bool AttrValueForDef(const AttrListDump& d, int def, float* outVal) {
+	if (!d.ok) return false;
+	for (int i = 0; i < d.count; ++i) {
+		if (d.items[i].def == def) { if (outVal) *outVal = d.items[i].val; return true; }
+	}
+	return false;
+}
+
 const char* SlotLabel(CosmeticSlot slot) {
 	switch (slot) {
 	case CosmeticSlot::Primary: return "primary";
@@ -268,6 +369,9 @@ void Cosmetics_PrintStatus(const char* cmd) {
 	sys.GetVtIdx(&vtComp, &vtSec);
 	advancedfx::Message("  recompose=%d faulted=%d vtComp=%d vtSec=%d vtArg=%d fallbackId=%d\n",
 		sys.Recompose() ? 1 : 0, sys.RecomposeFaulted() ? 1 : 0, vtComp, vtSec, sys.VtArg(), sys.FallbackId() ? 1 : 0);
+	advancedfx::Message("  paintkitbridge=%d cvarFound=%d value=%d forced=%d (global deploy-time cl_paintkit_override)\n",
+		sys.PaintkitBridge() ? 1 : 0, sys.PaintkitBridgeCvarFound() ? 1 : 0,
+		sys.PaintkitBridgeLastValue(), sys.PaintkitBridgeForcedValue());
 
 	if (sys.Store().All().empty())
 		advancedfx::Message("  (no profiles)\n");
@@ -364,6 +468,121 @@ void Cosmetics_PrintSpectatedDebug(const char* cmd) {
 		advancedfx::Message("  would apply: (no matching slot override for the currently-held item, slot=%s)\n",
 			SlotLabel(liveSlot));
 	}
+}
+
+void Cosmetics_PrintVisualDiag(const char* cmd) {
+	CosmeticOverrideSystem& sys = CosmeticsRef();
+
+	if (!g_cosmeticsOffsetsOk) {
+		advancedfx::Warning("%s cosmetics visualdiag: econ offsets did not resolve; cannot read weapon state.\n", cmd);
+		return;
+	}
+	if (!sys.InDemoContext()) {
+		advancedfx::Warning("%s cosmetics visualdiag: not in a demo (no weapon to inspect).\n", cmd);
+		return;
+	}
+
+	const int pawnIndex = sys.CurrentSpectatedPawnIndex();
+	const uint64_t steamId = sys.CurrentSpectatedSteamId();
+	if (pawnIndex < 0) {
+		advancedfx::Warning("%s cosmetics visualdiag: no spectated pawn (spectate a player first).\n", cmd);
+		return;
+	}
+
+	CEntityInstance* pawn = EntFromIndex(pawnIndex);
+	if (!pawn || !pawn->IsPlayerPawn()) {
+		advancedfx::Warning("%s cosmetics visualdiag: pawn=%d not resolvable.\n", cmd, pawnIndex);
+		return;
+	}
+	SOURCESDK::CS2::CBaseHandle wh = pawn->GetActiveWeaponHandle();
+	CEntityInstance* weapon = wh.IsValid() ? EntFromIndex(wh.GetEntryIndex()) : nullptr;
+	if (!weapon) {
+		advancedfx::Warning("%s cosmetics visualdiag: pawn=%d has no active weapon resolved.\n", cmd, pawnIndex);
+		return;
+	}
+
+	const ClientDllOffsets_t& o = g_clientDllOffsets;
+	unsigned char* w = (unsigned char*)weapon;
+	unsigned char* itemView = w + o.C_EconEntity.m_AttributeManager + o.C_AttributeContainer.m_Item;
+
+	// Class names (read-only const char*; GetClassName is a C++ call, kept out of any SEH helper).
+	const char* cls = weapon->GetClassName();
+	const char* clientCls = weapon->GetClientClassName();
+
+	// All entity field reads happen inside POD-only SEH helpers (ReadWeaponVisualDiag / ReadAttrList /
+	// ReadEntityModelName) -- this function itself has NO __try, so it is free to use std::string
+	// temporaries below without tripping MSVC C2712 (no __try + object-unwinding in one function).
+	WeaponVisualDiag d;
+	ReadWeaponVisualDiag(w, itemView, &d);
+
+	AttrListDump networked, local;
+	ReadAttrList(itemView, o.C_EconItemView.m_NetworkedDynamicAttributes, &networked);
+	ReadAttrList(itemView, o.C_EconItemView.m_AttributeList, &local);
+
+	ModelNameResult model;
+	ReadEntityModelName(weapon, &model);
+
+	advancedfx::Message("%s cosmetics visualdiag (READ-ONLY):\n", cmd);
+	advancedfx::Message("  weapon: index=%d class='%s' clientClass='%s'\n",
+		wh.GetEntryIndex(), cls ? cls : "(null)", clientCls ? clientCls : "(null)");
+	advancedfx::Message("  activeWeaponHandle: raw=0x%08x entry=%d serial=%d valid=%d\n",
+		(unsigned int)wh.ToInt(), wh.GetEntryIndex(), wh.GetSerialNumber(), wh.IsValid() ? 1 : 0);
+
+	if (!d.ok) {
+		advancedfx::Warning("  (visual-diag field read faulted -- offsets may be stale)\n");
+		return;
+	}
+
+	advancedfx::Message("  spectatePawn=%d ownerXuid=%llu spectateSteam=%llu defIndex=%d\n",
+		pawnIndex, (unsigned long long)d.ownerXuid, (unsigned long long)steamId, d.defIndex);
+	advancedfx::Message("  itemId: high=%d low=%u accountId=%u\n", d.itemIdHigh, d.itemIdLow, d.accountId);
+	advancedfx::Message("  fallback: paint=%d wear=%.4f seed=%d stattrak=%d\n",
+		d.fbPaint, d.fbWear, d.fbSeed, d.fbStat);
+
+	// Networked dynamic attributes -- where a demo weapon's real skin lives (def6/7/8/81).
+	float nPaint = 0, nSeed = 0, nWear = 0, nStat = 0;
+	bool hP = AttrValueForDef(networked, 6, &nPaint);
+	bool hS = AttrValueForDef(networked, 7, &nSeed);
+	bool hW = AttrValueForDef(networked, 8, &nWear);
+	bool hT = AttrValueForDef(networked, 81, &nStat);
+	advancedfx::Message("  networkedAttrs: count=%d  paint(def6)=%s  seed(def7)=%s  wear(def8)=%s  stattrak(def81)=%s\n",
+		networked.ok ? networked.count : -1,
+		hP ? std::to_string((int)nPaint).c_str() : "(absent)",
+		hS ? std::to_string((int)nSeed).c_str() : "(absent)",
+		hW ? std::to_string(nWear).c_str() : "(absent)",
+		hT ? std::to_string((int)nStat).c_str() : "(absent)");
+	advancedfx::Message("  localAttrs (m_AttributeList): count=%d (usually empty for demo items)\n",
+		local.ok ? local.count : -1);
+
+	// The visuals-cache flags + their resolved schema offsets, so the values can be plugged straight
+	// into an IDA/Ghidra xref pass (search for byte access at weapon_base + these offsets).
+	advancedfx::Message("  visuals flags (the rebuild gate):\n");
+	if (d.haveVisualsData)
+		advancedfx::Message("    m_bVisualsDataSet            = %u   @+0x%zx\n", (unsigned)d.visualsDataSet, (size_t)o.C_CSWeaponBase.m_bVisualsDataSet);
+	else
+		advancedfx::Message("    m_bVisualsDataSet            = (offset unresolved)\n");
+	if (d.haveClearUgc)
+		advancedfx::Message("    m_bClearWeaponIdentifyingUGC = %u   @+0x%zx\n", (unsigned)d.clearUgc, (size_t)o.C_CSWeaponBase.m_bClearWeaponIdentifyingUGC);
+	else
+		advancedfx::Message("    m_bClearWeaponIdentifyingUGC = (offset unresolved)\n");
+	if (d.haveReloadEvent)
+		advancedfx::Message("    m_nCustomEconReloadEventId   = %d   @+0x%zx\n", d.reloadEvent, (size_t)o.C_CSWeaponBase.m_nCustomEconReloadEventId);
+	else
+		advancedfx::Message("    m_nCustomEconReloadEventId   = (offset unresolved)\n");
+	if (d.haveAttrInit)
+		advancedfx::Message("    m_bAttributesInitialized     = %u   @+0x%zx (on C_EconEntity)\n", (unsigned)d.attrInit, (size_t)o.C_EconEntity.m_bAttributesInitialized);
+
+	// Echo which stale-mark writes are currently ENABLED, so the live flag values above can be tied
+	// back to what we are (or are not) writing. All-OFF is the HUD-safe default.
+	const CosmeticRebuildFlags& rf = sys.GetRebuildFlags();
+	advancedfx::Message("  rebuildflags (enabled writes): visualsdata=%d clearugc=%d reloadevent=%d "
+		"initialized=%d attrinit=%d imagecache=%d attrparity=%d\n",
+		rf.visualsDataSet ? 1 : 0, rf.clearUgc ? 1 : 0, rf.reloadEvent ? 1 : 0,
+		rf.initialized ? 1 : 0, rf.attrInit ? 1 : 0, rf.imageCache ? 1 : 0, rf.attrParity ? 1 : 0);
+
+	advancedfx::Message("  worldModel: %s\n", model.ok ? model.name : "(unresolved)");
+	advancedfx::Message("  note: viewmodel is a separate C_BaseViewModel entity sharing this econ item; "
+		"a skin change alters the composited material, not the model path above.\n");
 }
 
 } // namespace Filmmaker

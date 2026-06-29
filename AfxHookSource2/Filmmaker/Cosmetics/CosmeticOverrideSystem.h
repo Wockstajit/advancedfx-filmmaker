@@ -36,6 +36,25 @@ struct CosmeticFrameStats {
 	int attrValuesChanged = 0; // values that differed from the requested override
 	int attrListsEmpty = 0;    // valid vectors with no matching writable skin attrs
 	uint64_t frame = 0;        // monotonically increasing apply-frame counter
+	int paintkitBridgeValue = 0; // current cl_paintkit_override bridge value, 0 = inactive/default
+};
+
+// Which speculative "visuals are stale" field writes the rebuild step is allowed to perform. These
+// were added experimentally to try to force a demo weapon to re-composite its skin; live testing
+// (2026-06-28) showed NONE of them trigger the 3D rebuild AND at least one (clearUgc / initialized)
+// makes the weapon VANISH from the HUD weapon-switch bar by blanking its econ identity. So every flag
+// now DEFAULTS OFF -- normal apply writes only the real skin data (networked attrs + fallback fields),
+// which is HUD-safe -- and each is independently toggleable ("cosmetics rebuildflags <name> 0|1") so
+// the harmful-vs-useful one can be bisected without writing all of them at once. POD (all bool), so it
+// is safe to pass by value into the SEH-guarded write. See docs/cosmetics-recompose-research.md.
+struct CosmeticRebuildFlags {
+	bool visualsDataSet = false; // C_CSWeaponBase::m_bVisualsDataSet = false (most plausible gate)
+	bool clearUgc = false;       // C_CSWeaponBase::m_bClearWeaponIdentifyingUGC = true (HUD-vanish suspect)
+	bool reloadEvent = false;    // C_CSWeaponBase::m_nCustomEconReloadEventId = -1 (networked reload token)
+	bool initialized = false;    // C_EconItemView::m_bInitialized/m_bInitializedTags = false (desc cache)
+	bool attrInit = false;       // C_EconEntity::m_bAttributesInitialized = false (entity attr re-init)
+	bool imageCache = false;     // m_bRestoreCustomMaterialAfterPrecache + inventory-image cache hints
+	bool attrParity = false;     // CAttributeManager::m_iReapplyProvisionParity ++ (attr cache bump)
 };
 
 class CosmeticOverrideSystem {
@@ -107,7 +126,55 @@ public:
 	void SetFallbackId(bool e) { m_fallbackId = e; }
 	bool FallbackId() const { return m_fallbackId; }
 
+	// --- visual-cache rebuild (the refresh path; "cosmetics rebuild ...") ---
+	// Writing the econ fields/attributes is confirmed to STICK but does not, by itself, make a demo
+	// weapon re-composite its skin material (the consuming step is entity-lifecycle driven, not a
+	// per-frame poll -- see docs/cosmetics-recompose-research.md). These give a manual, on-demand way
+	// to (re)assert the "visuals are stale" field writes (m_bVisualsDataSet=false,
+	// m_bClearWeaponIdentifyingUGC=true, bump m_nCustomEconReloadEventId, clear init flags, bump attr
+	// parity) on every matched weapon entity, decoupled from the per-frame change detection, plus fire
+	// the OPT-IN recompose vcall once (only if armed via "cosmetics recompose 1"). All writes are
+	// SEH-guarded. Returns the number of matched weapon entities the rebuild touched.
+	int RebuildOnce();
+	// Per-frame auto-rebuild: when ON, the apply loop writes the ENABLED stale-mark flags (see
+	// RebuildFlags) whenever a value changes; when OFF, the per-frame loop writes only the raw skin
+	// values and the stale-mark flags fire only on an explicit "rebuild once". Default ON, but since
+	// every rebuild flag now defaults OFF this writes nothing harmful until a flag is enabled.
+	// "cosmetics rebuild auto 0|1".
+	void SetRebuildAuto(bool e) { m_rebuildAuto = e; }
+	bool RebuildAuto() const { return m_rebuildAuto; }
+
+	// Which stale-mark field writes the rebuild step performs (all default OFF -> HUD-safe). Toggle a
+	// single flag by name (returns false on an unknown name) or all at once, for bisecting which write
+	// breaks the HUD weapon panel vs. which triggers a visual rebuild. "cosmetics rebuildflags ...".
+	const CosmeticRebuildFlags& GetRebuildFlags() const { return m_rebuildFlags; }
+	bool SetRebuildFlag(const char* name, bool on);
+	void SetAllRebuildFlags(bool on);
+
+	// Experimental deploy-time bridge for the one skin path CS2 is known to visually honor:
+	// cl_paintkit_override is read while a weapon composite is being BUILT, not after it is cached.
+	// When enabled, the main-thread pump sets that global cvar to the currently spectated profiled
+	// weapon's paint kit and restores the previous value when there is no matching target or the
+	// bridge is disabled. Limitations are intentional and surfaced in the command text: this is global
+	// and only affects the next weapon deploy/create, so it is a proof-of-life/workaround while the
+	// true per-entity composite read-site hook is still unknown.
+	void SetPaintkitBridge(bool e);
+	bool PaintkitBridge() const { return m_paintkitBridge; }
+	void SetPaintkitBridgeForcedValue(int paintKit) { m_paintkitBridgeForcedValue = paintKit; }
+	int PaintkitBridgeForcedValue() const { return m_paintkitBridgeForcedValue; }
+	int PaintkitBridgeLastValue() const { return m_paintkitBridgeLastValue; }
+	bool PaintkitBridgeCvarFound() const { return m_paintkitBridgeCvarFound; }
+
 private:
+	// Shared matched-weapon apply loop, used by both the per-frame pump (RunFrame) and the on-demand
+	// rebuild (RebuildOnce). forceStale forces the visuals-stale field writes even when no value
+	// changed; fireRebuildCall fires the SEH-guarded recompose vcall when armed. Returns matched count.
+	int ApplyMatchedWeapons(bool forceStale, bool fireRebuildCall);
+	void UpdatePaintkitBridge();
+	int ResolveSpectatedPaintkitOverride() const;
+	bool SetPaintkitBridgeCvar(int value);
+	void RestorePaintkitBridgeCvar();
+
 	CosmeticProfileStore m_store;
 	bool m_initialized = false;
 	bool m_debug = false;
@@ -121,6 +188,14 @@ private:
 	int m_vtCompositeSec = -1;
 	int m_vtArg = 1;           // argument for the recompose vtable call; see SetVtArg
 	bool m_fallbackId = false; // opt-in itemIDHigh=-1 path; see SetFallbackId
+	bool m_rebuildAuto = true; // per-frame stale-mark write of the ENABLED flags; see SetRebuildAuto
+	CosmeticRebuildFlags m_rebuildFlags; // which stale-mark writes are allowed (all default OFF)
+	bool m_paintkitBridge = false;
+	bool m_paintkitBridgeCvarFound = false;
+	bool m_paintkitBridgeHaveOriginal = false;
+	int m_paintkitBridgeOriginalValue = 0;
+	int m_paintkitBridgeForcedValue = -1; // -1 = auto from spectated profiled weapon, >0 = forced global paint
+	int m_paintkitBridgeLastValue = 0;
 };
 
 // Process-wide singleton (matches the ...Ref() pattern used by MovieMode/CameraPath/etc.).
@@ -136,5 +211,11 @@ void Cosmetics_RunCommand(int argc, advancedfx::ICommandArgs* args, const char* 
 // Diagnostics (implemented in CosmeticDebug.cpp). Print to the console via advancedfx::Message.
 void Cosmetics_PrintStatus(const char* cmd);
 void Cosmetics_PrintSpectatedDebug(const char* cmd);
+// Read-only visual-cache dump for the spectated weapon: the full econ identity, the fallback fields,
+// the networked dynamic attribute values (def 6/7/8/81), the C_CSWeaponBase visuals-cache flags
+// (m_bVisualsDataSet / m_bClearWeaponIdentifyingUGC / m_nCustomEconReloadEventId) AND their resolved
+// schema offsets (for an IDA/Ghidra xref pass), the active weapon handle, and the weapon's world
+// model path. Never writes. "cosmetics visualdiag".
+void Cosmetics_PrintVisualDiag(const char* cmd);
 
 } // namespace Filmmaker

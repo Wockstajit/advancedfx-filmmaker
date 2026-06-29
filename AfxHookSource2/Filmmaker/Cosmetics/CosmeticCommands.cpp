@@ -69,9 +69,15 @@ void PrintUsage(const char* cmd) {
 		"  %s cosmetics player <steamId|current> gloves <defIndex> [paint=N] [wear=F] [seed=N]\n"
 		"  %s cosmetics player <steamId|current> agent <modelPath|default>\n"
 			"  %s cosmetics diag   (dump the spectated player's live weapon econ state)\n"
+			"  %s cosmetics visualdiag   (read-only: full visual-cache state + flag offsets)\n"
+			"  %s cosmetics rebuild once   (re-assert enabled rebuildflags on matched weapons now)\n"
+			"  %s cosmetics rebuild auto [0|1]   (per-frame writing of enabled rebuildflags on change)\n"
+			"  %s cosmetics rebuildflags [<name> 0|1 | all 0|1]   (toggle individual stale-mark writes)\n"
+			"  %s cosmetics paintkitbridge [0|1|auto|force <paint>]   (global deploy-time bridge)\n"
 			"  %s cosmetics recompose [0|1]   (force material re-composite after writes)\n"
-			"  %s cosmetics vtidx <comp> <sec>   (tune UpdateComposite vtable indices, -1=skip)\n",
-		cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd);
+			"  %s cosmetics vtidx <comp> <sec>   (tune UpdateComposite vtable indices, -1=skip)\n"
+			"  %s cosmetics vtprobe <idx>   (bisect OnDataChanged: call weapon vtable[idx](this,0) now)\n",
+		cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd);
 }
 
 // Parses ORDER-INDEPENDENT key/value tokens of the form "key=value" (or "key value", to be lenient)
@@ -222,6 +228,94 @@ void DoPlayer(int argc, advancedfx::ICommandArgs* args, const char* cmd) {
 	}
 }
 
+// Visual-cache rebuild (the refresh path). "rebuild once" re-asserts the visuals-stale field writes
+// on every matched weapon entity right now (decoupled from the per-frame change detection) so the
+// user can manually retrigger a refresh attempt for a screenshot; "rebuild auto 0|1" gates the
+// per-frame stale-marking. See CosmeticOverrideSystem.h / RebuildOnce / SetRebuildAuto.
+void PrintRebuildFlags(const char* cmd) {
+	const CosmeticRebuildFlags& f = CosmeticsRef().GetRebuildFlags();
+	advancedfx::Message("%s cosmetics rebuildflags: visualsdata=%d clearugc=%d reloadevent=%d "
+		"initialized=%d attrinit=%d imagecache=%d attrparity=%d\n",
+		cmd, f.visualsDataSet ? 1 : 0, f.clearUgc ? 1 : 0, f.reloadEvent ? 1 : 0,
+		f.initialized ? 1 : 0, f.attrInit ? 1 : 0, f.imageCache ? 1 : 0, f.attrParity ? 1 : 0);
+}
+
+void DoRebuild(int argc, advancedfx::ICommandArgs* args, const char* cmd) {
+	const char* mode = (argc >= 4) ? args->ArgV(3) : "";
+	if (TokenIs(mode, "once")) {
+		int n = CosmeticsRef().RebuildOnce();
+		advancedfx::Message("%s cosmetics: rebuild once -> touched %d matched weapon entit%s%s.\n",
+			cmd, n, (n == 1 ? "y" : "ies"),
+			CosmeticsRef().Recompose() ? " (+ fired recompose vcall, armed)" : "");
+		PrintRebuildFlags(cmd);
+		if (n == 0)
+			advancedfx::Warning("%s cosmetics: rebuild once touched nothing -- needs a demo playing, a "
+				"stored profile for the spectated owner, and resolved offsets.\n", cmd);
+	} else if (TokenIs(mode, "auto")) {
+		if (argc >= 5)
+			CosmeticsRef().SetRebuildAuto(0 != atoi(args->ArgV(4)));
+		advancedfx::Message("%s cosmetics: rebuild auto = %d (per-frame writing of the ENABLED rebuildflags on change).\n",
+			cmd, CosmeticsRef().RebuildAuto() ? 1 : 0);
+	} else {
+		advancedfx::Warning("usage: %s cosmetics rebuild once | auto 0|1\n", cmd);
+	}
+}
+
+// Toggle the individual visuals-stale field writes (all default OFF -> HUD-safe). The "clearugc" and
+// "initialized" writes are the weapon-vanishes-from-the-switch-bar suspects; enable one at a time and
+// "rebuild once" to bisect which breaks the HUD vs. which (if any) triggers a visual rebuild.
+void DoRebuildFlags(int argc, advancedfx::ICommandArgs* args, const char* cmd) {
+	if (argc >= 5) {
+		const char* name = args->ArgV(3);
+		bool on = 0 != atoi(args->ArgV(4));
+		if (TokenIs(name, "all")) {
+			CosmeticsRef().SetAllRebuildFlags(on);
+		} else if (!CosmeticsRef().SetRebuildFlag(name, on)) {
+			advancedfx::Warning("%s cosmetics: unknown rebuild flag '%s' "
+				"(visualsdata|clearugc|reloadevent|initialized|attrinit|imagecache|attrparity|all).\n", cmd, name);
+			return;
+		}
+	} else if (argc == 4) {
+		advancedfx::Warning("usage: %s cosmetics rebuildflags <name> 0|1   (or 'all 0|1'); no value = list\n", cmd);
+		return;
+	}
+	PrintRebuildFlags(cmd);
+	advancedfx::Message("  (all OFF = HUD-safe default; clearugc/initialized blank the HUD weapon icon)\n");
+}
+
+void DoPaintkitBridge(int argc, advancedfx::ICommandArgs* args, const char* cmd) {
+	if (argc >= 4) {
+		const char* mode = args->ArgV(3);
+		if (TokenIs(mode, "force")) {
+			if (argc < 5) {
+				advancedfx::Warning("usage: %s cosmetics paintkitbridge force <paintKit>\n", cmd);
+				return;
+			}
+			int paintKit = atoi(args->ArgV(4));
+			if (paintKit <= 0) {
+				advancedfx::Warning("%s cosmetics paintkitbridge: force paintKit must be > 0; use 'auto' or '0' to clear.\n", cmd);
+				return;
+			}
+			CosmeticsRef().SetPaintkitBridgeForcedValue(paintKit);
+			CosmeticsRef().SetPaintkitBridge(true);
+		} else if (TokenIs(mode, "auto")) {
+			CosmeticsRef().SetPaintkitBridgeForcedValue(-1);
+			CosmeticsRef().SetPaintkitBridge(true);
+		} else {
+			CosmeticsRef().SetPaintkitBridge(0 != atoi(mode));
+		}
+	}
+
+	advancedfx::Message("%s cosmetics: paintkitbridge=%d cvarFound=%d value=%d forced=%d\n",
+		cmd,
+		CosmeticsRef().PaintkitBridge() ? 1 : 0,
+		CosmeticsRef().PaintkitBridgeCvarFound() ? 1 : 0,
+		CosmeticsRef().PaintkitBridgeLastValue(),
+		CosmeticsRef().PaintkitBridgeForcedValue());
+	advancedfx::Message("  experimental: uses global cl_paintkit_override, affects only next weapon deploy/create, "
+		"and is not per-player. Disable to restore the previous cvar value.\n");
+}
+
 // Forced material re-composite tuning (the refresh path). OFF by default; the correct CS2
 // UpdateComposite vtable index is build-specific, so it is live-tunable here. See
 // CosmeticOverrideSystem.h / SetRecompose.
@@ -260,6 +354,41 @@ void DoVtArg(int argc, advancedfx::ICommandArgs* args, const char* cmd) {
 		cmd, CosmeticsRef().VtArg());
 }
 
+// One-shot probe of a single candidate vtable index, for bisecting which slot is the weapon's
+// OnDataChanged (the real client-side skin-rebuild trigger -- see the 2026-06-28 binary-analysis
+// section of docs/cosmetics-recompose-research.md). Static analysis of the live client.dll narrowed
+// OnDataChanged to a small set of DataUpdateType_t-taking virtuals on the C_CSWeaponBase vtable
+// (candidates: 4, 11, 15, 18, 70, 108, 110, 124, 126); this command tries one of them per call so a
+// screenshot can attribute any visual rebuild to a specific index. It sets the visuals-stale marks
+// (m_bVisualsDataSet=false + m_nCustomEconReloadEventId bump) BEFORE the call -- so OnDataChanged
+// sees the visuals as stale -- then SEH-guarded-calls weapon->vtable[idx](this, 0) on every matched
+// weapon. arg 0 == DATA_UPDATE_CREATED (the leak's branch that unconditionally rebuilds the skin).
+// A wrong index that access-violates is caught (faulted=1) instead of crashing the game.
+void DoVtProbe(int argc, advancedfx::ICommandArgs* args, const char* cmd) {
+	if (argc < 4) {
+		advancedfx::Warning("usage: %s cosmetics vtprobe <vtableIndex>   (calls weapon vtable[idx](this,0) = "
+			"OnDataChanged(DATA_UPDATE_CREATED) after econ write + visuals-stale marks; candidates "
+			"4,11,15,18,70,108,110,124,126)\n", cmd);
+		return;
+	}
+	int idx = atoi(args->ArgV(3));
+	CosmeticOverrideSystem& sys = CosmeticsRef();
+	sys.SetRebuildFlag("visualsdata", true);  // m_bVisualsDataSet = false (mark visuals stale)
+	sys.SetRebuildFlag("reloadevent", true);  // bump m_nCustomEconReloadEventId (the networked reload token)
+	sys.SetVtArg(0);                           // DATA_UPDATE_CREATED
+	sys.SetVtIdx(idx, -1);                     // probe this index only (secondary skipped); re-arms recompose
+	int n = sys.RebuildOnce();                 // writes the stale marks, then fires weapon->vtable[idx](this,0)
+	advancedfx::Message("%s cosmetics: vtprobe idx=%d -> touched %d weapon(s), recompose=%d faulted=%d "
+		"(arg=0=DATA_UPDATE_CREATED; stale marks: visualsdata+reloadevent).\n",
+		cmd, idx, n, sys.Recompose() ? 1 : 0, sys.RecomposeFaulted() ? 1 : 0);
+	if (n == 0)
+		advancedfx::Warning("%s cosmetics: vtprobe touched nothing -- need a demo playing, a stored profile for "
+			"the spectated owner, and resolved offsets.\n", cmd);
+	if (sys.RecomposeFaulted())
+		advancedfx::Warning("%s cosmetics: vtprobe idx=%d FAULTED (access violation, caught) -- not a callable "
+			"(this,int) virtual; try the next candidate index.\n", cmd, idx);
+}
+
 } // namespace
 
 void Cosmetics_RunCommand(int argc, advancedfx::ICommandArgs* args, const char* cmd) {
@@ -281,6 +410,14 @@ void Cosmetics_RunCommand(int argc, advancedfx::ICommandArgs* args, const char* 
 		DoPlayer(argc, args, cmd);
 	} else if (TokenIs(sub, "diag")) {
 		Cosmetics_PrintSpectatedDebug(cmd);
+	} else if (TokenIs(sub, "visualdiag")) {
+		Cosmetics_PrintVisualDiag(cmd);
+	} else if (TokenIs(sub, "rebuild")) {
+		DoRebuild(argc, args, cmd);
+	} else if (TokenIs(sub, "rebuildflags")) {
+		DoRebuildFlags(argc, args, cmd);
+	} else if (TokenIs(sub, "paintkitbridge")) {
+		DoPaintkitBridge(argc, args, cmd);
 	} else if (TokenIs(sub, "recompose")) {
 		DoRecompose(argc, args, cmd);
 	} else if (TokenIs(sub, "vtidx")) {
@@ -289,6 +426,8 @@ void Cosmetics_RunCommand(int argc, advancedfx::ICommandArgs* args, const char* 
 		DoFallback(argc, args, cmd);
 	} else if (TokenIs(sub, "vtarg")) {
 		DoVtArg(argc, args, cmd);
+	} else if (TokenIs(sub, "vtprobe")) {
+		DoVtProbe(argc, args, cmd);
 	} else {
 		PrintUsage(cmd);
 	}

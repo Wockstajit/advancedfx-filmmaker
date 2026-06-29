@@ -8,8 +8,11 @@
 #include "../../SchemaSystem.h"        // g_clientDllOffsets, g_cosmeticsOffsetsOk
 
 #include "../../../deps/release/prop/AfxHookSource/SourceSdkShared.h"
+#include "../../../deps/release/prop/cs2/sdk_src/public/icvar.h"
 
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 namespace Filmmaker {
@@ -54,6 +57,107 @@ bool SafeVCall(void* obj, int idx, int arg) {
 		void* fn = vt[idx];
 		if (!fn) return false;
 		((UpdateComposite_t)fn)(obj, arg);
+		return true;
+	} __except (1) {
+		return false;
+	}
+}
+
+SOURCESDK::CS2::Cvar_s* FindPaintkitOverrideCvar() {
+	if (!SOURCESDK::CS2::g_pCVar)
+		return nullptr;
+	SOURCESDK::CS2::ConVarHandle handle = SOURCESDK::CS2::g_pCVar->FindConVar("cl_paintkit_override", false);
+	if (!handle.IsValid())
+		return nullptr;
+	return SOURCESDK::CS2::g_pCVar->GetCvar(handle.Get());
+}
+
+bool ReadCvarInt(SOURCESDK::CS2::Cvar_s* cvar, int* out) {
+	if (!cvar || !out)
+		return false;
+	__try {
+		switch (cvar->m_eVarType) {
+		case SOURCESDK::CS2::EConVarType_Bool:
+			*out = cvar->m_Value.m_bValue ? 1 : 0;
+			return true;
+		case SOURCESDK::CS2::EConVarType_Int16:
+			*out = (int)cvar->m_Value.m_i16Value;
+			return true;
+		case SOURCESDK::CS2::EConVarType_UInt16:
+			*out = (int)cvar->m_Value.m_u16Value;
+			return true;
+		case SOURCESDK::CS2::EConVarType_Int32:
+			*out = cvar->m_Value.m_i32Value;
+			return true;
+		case SOURCESDK::CS2::EConVarType_UInt32:
+			*out = (int)cvar->m_Value.m_u32Value;
+			return true;
+		case SOURCESDK::CS2::EConVarType_Int64:
+			*out = (int)cvar->m_Value.m_i64Value;
+			return true;
+		case SOURCESDK::CS2::EConVarType_UInt64:
+			*out = (int)cvar->m_Value.m_u64Value;
+			return true;
+		case SOURCESDK::CS2::EConVarType_Float32:
+			*out = (int)cvar->m_Value.m_flValue;
+			return true;
+		case SOURCESDK::CS2::EConVarType_Float64:
+			*out = (int)cvar->m_Value.m_dbValue;
+			return true;
+		case SOURCESDK::CS2::EConVarType_String:
+			*out = atoi(cvar->m_Value.m_szValue.Get());
+			return true;
+		default:
+			return false;
+		}
+	} __except (1) {
+		return false;
+	}
+}
+
+bool WriteCvarInt(SOURCESDK::CS2::Cvar_s* cvar, int value) {
+	if (!cvar)
+		return false;
+	__try {
+		switch (cvar->m_eVarType) {
+		case SOURCESDK::CS2::EConVarType_Bool:
+			cvar->m_Value.m_bValue = value != 0;
+			break;
+		case SOURCESDK::CS2::EConVarType_Int16:
+			cvar->m_Value.m_i16Value = (short)value;
+			break;
+		case SOURCESDK::CS2::EConVarType_UInt16:
+			cvar->m_Value.m_u16Value = (uint16_t)value;
+			break;
+		case SOURCESDK::CS2::EConVarType_Int32:
+			cvar->m_Value.m_i32Value = value;
+			break;
+		case SOURCESDK::CS2::EConVarType_UInt32:
+			cvar->m_Value.m_u32Value = (uint32_t)value;
+			break;
+		case SOURCESDK::CS2::EConVarType_Int64:
+			cvar->m_Value.m_i64Value = (int64_t)value;
+			break;
+		case SOURCESDK::CS2::EConVarType_UInt64:
+			cvar->m_Value.m_u64Value = (uint64_t)value;
+			break;
+		case SOURCESDK::CS2::EConVarType_Float32:
+			cvar->m_Value.m_flValue = (float)value;
+			break;
+		case SOURCESDK::CS2::EConVarType_Float64:
+			cvar->m_Value.m_dbValue = (double)value;
+			break;
+		case SOURCESDK::CS2::EConVarType_String:
+		{
+			char buf[32];
+			std::snprintf(buf, sizeof(buf), "%d", value);
+			cvar->m_Value.m_szValue.Set(buf);
+			break;
+		}
+		default:
+			return false;
+		}
+		++cvar->m_iTimesChanged;
 		return true;
 	} __except (1) {
 		return false;
@@ -154,6 +258,8 @@ void WriteNetworkedSkinAttributes(unsigned char* itemView, ptrdiff_t networkedOf
 // offVisualsData/offClearUgc/offReloadEvent      = optional C_CSWeaponBase visuals-cache hints
 // knifeDefOverride > 0 requests a def/model swap (best-effort; see header comment on agent/gloves
 // for what is and is not safe to do here -- this is just numeric def swap, not a model load).
+// markStaleEnabled = do the visuals-stale field writes when a value changed (per-frame auto-rebuild).
+// forceStale       = do them unconditionally (the manual "rebuild once" path), even when unchanged.
 ApplyResult ApplyCosmeticWrite(
 	unsigned char* w,
 	unsigned char* itemView,
@@ -183,7 +289,10 @@ ApplyResult ApplyCosmeticWrite(
 	int32_t statTrak,
 	uint32_t accountId,
 	int knifeDefOverride,
-	bool writeFallbackId) {
+	bool writeFallbackId,
+	bool markStaleEnabled,
+	bool forceStale,
+	CosmeticRebuildFlags flags) {
 	__try {
 		int32_t* pItemIdHigh = (int32_t*)(itemView + offItemIdHigh);
 		int32_t* pPaint = (int32_t*)(w + offPaint);
@@ -220,29 +329,41 @@ ApplyResult ApplyCosmeticWrite(
 		*pStat = statTrak;
 		if (knifeDefOverride > 0) *pDef = (uint16_t)knifeDefOverride; // best-effort knife DEF swap
 
-		if (need) {
-			if (offInit) *(bool*)(itemView + offInit) = false;
-			if (offInitTags) *(bool*)(itemView + offInitTags) = false;
-			if (offRestoreMaterial) *(bool*)(itemView + offRestoreMaterial) = true;
-			if (offImageReq) *(bool*)(itemView + offImageReq) = false;
-			if (offImageTried) *(bool*)(itemView + offImageTried) = false;
-			if (offCachedFile) *(char*)(itemView + offCachedFile) = 0;
-			if (attrManager) {
-				if (offAttrParity) {
-					int32_t* parity = (int32_t*)(attrManager + offAttrParity);
-					*parity = *parity + 1;
-				}
+		// The visuals-stale field writes. Gated on a value changing AND per-frame auto-rebuild being on
+		// (markStaleEnabled), OR forceStale (the "rebuild once" path) which re-asserts unconditionally.
+		// EACH individual write is ALSO gated on its rebuild flag (all default OFF) so the harmful ones
+		// (clearUgc/initialized blank the HUD weapon icon) are not written unless explicitly enabled for
+		// research -- see CosmeticRebuildFlags / "cosmetics rebuildflags". Default = none -> HUD-safe.
+		bool doStaleWrites = (need && markStaleEnabled) || forceStale;
+		if (doStaleWrites) {
+			if (flags.initialized) {
+				if (offInit) *(bool*)(itemView + offInit) = false;
+				if (offInitTags) *(bool*)(itemView + offInitTags) = false;
 			}
-			if (offVisualsData) *(bool*)(w + offVisualsData) = false;
-			if (offClearUgc) *(bool*)(w + offClearUgc) = true;
-			if (offReloadEvent) {
+			if (flags.imageCache) {
+				if (offRestoreMaterial) *(bool*)(itemView + offRestoreMaterial) = true;
+				if (offImageReq) *(bool*)(itemView + offImageReq) = false;
+				if (offImageTried) *(bool*)(itemView + offImageTried) = false;
+				if (offCachedFile) *(char*)(itemView + offCachedFile) = 0;
+			}
+			if (flags.attrParity && attrManager && offAttrParity) {
+				int32_t* parity = (int32_t*)(attrManager + offAttrParity);
+				*parity = *parity + 1;
+			}
+			if (flags.visualsDataSet && offVisualsData) *(bool*)(w + offVisualsData) = false;
+			if (flags.clearUgc && offClearUgc) *(bool*)(w + offClearUgc) = true;
+			if (flags.reloadEvent && offReloadEvent) {
+				// Set m_nCustomEconReloadEventId NEGATIVE (not ++). Binary analysis of the live client.dll
+				// (docs/cosmetics-recompose-research.md, 2026-06-28) shows C_CSWeaponBase vtable slot 11
+				// (the econ OnDataChanged path) only requests a "clientside_reload_custom_econ" composite
+				// rebuild when this field is < 0 ("cmp dword [weapon+0x18bc],0 / jge skip"); a positive value
+				// (the old ++ bump) is the skip case, which is why it never rebuilt. -1 == "reload me".
 				int32_t* reloadEvent = (int32_t*)(w + offReloadEvent);
-				*reloadEvent = *reloadEvent + 1;
+				*reloadEvent = -1;
 			}
-			// Experimental (Phase 2): clear C_EconEntity::m_bAttributesInitialized on the WEAPON
-			// (offset from w, NOT itemView) to try to force an econ attribute / composite re-init.
-			// Optional -- skipped when the offset did not resolve. See cosmetics-recompose-research.md.
-			if (offAttrInit) *(bool*)(w + offAttrInit) = false;
+			// Clear C_EconEntity::m_bAttributesInitialized on the WEAPON (offset from w, NOT itemView)
+			// to try to force an econ attribute / composite re-init. See cosmetics-recompose-research.md.
+			if (flags.attrInit && offAttrInit) *(bool*)(w + offAttrInit) = false;
 		}
 
 		ApplyResult r;
@@ -277,6 +398,7 @@ void CosmeticOverrideSystem::Init() {
 }
 
 void CosmeticOverrideSystem::Shutdown() {
+	RestorePaintkitBridgeCvar();
 	m_store.Save(); // best-effort; Save() itself swallows IO failures
 }
 
@@ -444,10 +566,10 @@ std::string CosmeticOverrideSystem::NameForSteamId(uint64_t steamId) const {
 
 void CosmeticOverrideSystem::RunFrame() {
 	// Cheap no-op gate: disabled, offsets unresolved, no profiles, or no demo playing.
-	if (!m_store.Enabled() || !g_cosmeticsOffsetsOk || m_store.Empty() || !InDemoContext())
+	if (!m_store.Enabled() || !g_cosmeticsOffsetsOk || m_store.Empty() || !InDemoContext()) {
+		UpdatePaintkitBridge();
 		return;
-
-	const ClientDllOffsets_t& o = g_clientDllOffsets;
+	}
 
 	++m_lastStats.frame;
 	m_lastStats.entitiesScanned = 0;
@@ -458,6 +580,179 @@ void CosmeticOverrideSystem::RunFrame() {
 	m_lastStats.attrValuesWritten = 0;
 	m_lastStats.attrValuesChanged = 0;
 	m_lastStats.attrListsEmpty = 0;
+	m_lastStats.paintkitBridgeValue = 0;
+
+	// Per-frame: mark visuals stale only on change (gated by m_rebuildAuto inside ApplyCosmeticWrite),
+	// and fire the recompose vcall only if the user armed it via "cosmetics recompose 1".
+	ApplyMatchedWeapons(/*forceStale=*/false, /*fireRebuildCall=*/m_recompose);
+	UpdatePaintkitBridge();
+}
+
+// Manual, on-demand rebuild: re-asserts the visuals-stale field writes (forceStale) on every matched
+// weapon entity even when nothing changed, and fires the recompose vcall once if armed. Decoupled
+// from the per-frame change detection so the user can retrigger a refresh attempt for a screenshot.
+// Does NOT require the apply loop to be enabled -- it is an explicit action -- but still hard-gated on
+// offsets resolving, a demo playing, and at least one stored profile. Returns matched entity count.
+int CosmeticOverrideSystem::RebuildOnce() {
+	if (!g_cosmeticsOffsetsOk || !InDemoContext() || m_store.Empty())
+		return 0;
+	m_lastStats.entitiesScanned = 0;
+	m_lastStats.entitiesMatched = 0;
+	m_lastStats.entitiesPatched = 0;
+	m_lastStats.entitiesReverted = 0;
+	m_lastStats.attrListsRead = 0;
+	m_lastStats.attrValuesWritten = 0;
+	m_lastStats.attrValuesChanged = 0;
+	m_lastStats.attrListsEmpty = 0;
+	return ApplyMatchedWeapons(/*forceStale=*/true, /*fireRebuildCall=*/m_recompose);
+}
+
+bool CosmeticOverrideSystem::SetRebuildFlag(const char* name, bool on) {
+	if (!name) return false;
+	if (0 == _stricmp(name, "visualsdata") || 0 == _stricmp(name, "visualsdataset")) m_rebuildFlags.visualsDataSet = on;
+	else if (0 == _stricmp(name, "clearugc")) m_rebuildFlags.clearUgc = on;
+	else if (0 == _stricmp(name, "reloadevent")) m_rebuildFlags.reloadEvent = on;
+	else if (0 == _stricmp(name, "initialized") || 0 == _stricmp(name, "init")) m_rebuildFlags.initialized = on;
+	else if (0 == _stricmp(name, "attrinit")) m_rebuildFlags.attrInit = on;
+	else if (0 == _stricmp(name, "imagecache")) m_rebuildFlags.imageCache = on;
+	else if (0 == _stricmp(name, "attrparity") || 0 == _stricmp(name, "parity")) m_rebuildFlags.attrParity = on;
+	else return false;
+	return true;
+}
+
+void CosmeticOverrideSystem::SetAllRebuildFlags(bool on) {
+	m_rebuildFlags.visualsDataSet = on;
+	m_rebuildFlags.clearUgc = on;
+	m_rebuildFlags.reloadEvent = on;
+	m_rebuildFlags.initialized = on;
+	m_rebuildFlags.attrInit = on;
+	m_rebuildFlags.imageCache = on;
+	m_rebuildFlags.attrParity = on;
+}
+
+void CosmeticOverrideSystem::SetPaintkitBridge(bool e) {
+	if (m_paintkitBridge == e) {
+		if (m_paintkitBridge)
+			UpdatePaintkitBridge();
+		return;
+	}
+	m_paintkitBridge = e;
+	if (!m_paintkitBridge)
+		RestorePaintkitBridgeCvar();
+	else
+		UpdatePaintkitBridge();
+}
+
+bool CosmeticOverrideSystem::SetPaintkitBridgeCvar(int value) {
+	SOURCESDK::CS2::Cvar_s* cvar = FindPaintkitOverrideCvar();
+	m_paintkitBridgeCvarFound = cvar != nullptr;
+	if (!cvar)
+		return false;
+
+	int current = 0;
+	if (!ReadCvarInt(cvar, &current))
+		return false;
+
+	if (!m_paintkitBridgeHaveOriginal) {
+		m_paintkitBridgeOriginalValue = current;
+		m_paintkitBridgeHaveOriginal = true;
+	}
+
+	if (current != value && !WriteCvarInt(cvar, value))
+		return false;
+
+	m_paintkitBridgeLastValue = value;
+	return true;
+}
+
+void CosmeticOverrideSystem::RestorePaintkitBridgeCvar() {
+	if (!m_paintkitBridgeHaveOriginal) {
+		m_paintkitBridgeLastValue = 0;
+		return;
+	}
+
+	SOURCESDK::CS2::Cvar_s* cvar = FindPaintkitOverrideCvar();
+	m_paintkitBridgeCvarFound = cvar != nullptr;
+	if (cvar)
+		WriteCvarInt(cvar, m_paintkitBridgeOriginalValue);
+	m_paintkitBridgeHaveOriginal = false;
+	m_paintkitBridgeLastValue = 0;
+	m_lastStats.paintkitBridgeValue = 0;
+}
+
+int CosmeticOverrideSystem::ResolveSpectatedPaintkitOverride() const {
+	if (m_paintkitBridgeForcedValue > 0)
+		return m_paintkitBridgeForcedValue;
+
+	if (!m_store.Enabled() || !g_cosmeticsOffsetsOk || m_store.Empty() || !InDemoContext())
+		return 0;
+
+	const int pawnIndex = CurrentSpectatedPawnIndex();
+	if (pawnIndex < 0)
+		return 0;
+
+	CEntityInstance* pawn = EntFromIndex(pawnIndex);
+	if (!pawn || !pawn->IsPlayerPawn())
+		return 0;
+
+	SOURCESDK::CS2::CBaseHandle wh = pawn->GetActiveWeaponHandle();
+	CEntityInstance* weapon = wh.IsValid() ? EntFromIndex(wh.GetEntryIndex()) : nullptr;
+	if (!weapon || !LooksLikeWeaponEntity(weapon))
+		return 0;
+
+	const ClientDllOffsets_t& o = g_clientDllOffsets;
+	WeaponEconRead econ;
+	if (!TryReadWeaponEconInfo((unsigned char*)weapon,
+			o.C_EconEntity.m_OriginalOwnerXuidLow, o.C_EconEntity.m_OriginalOwnerXuidHigh,
+			o.C_EconEntity.m_AttributeManager, o.C_AttributeContainer.m_Item,
+			o.C_EconItemView.m_iItemDefinitionIndex, &econ))
+		return 0;
+
+	if (econ.xuid == 0)
+		return 0;
+
+	const CosmeticProfile* prof = m_store.Find(econ.xuid);
+	if (!prof)
+		return 0;
+
+	const CosmeticItem* item = nullptr;
+	if (CosmeticCatalog::IsKnifeDef(econ.liveDef)) {
+		if (prof->knife.set)
+			item = &prof->knife;
+	} else {
+		CosmeticSlot slot = CosmeticCatalog::SlotForDefIndex(econ.liveDef);
+		const CosmeticItem* cand = (slot == CosmeticSlot::Secondary) ? &prof->secondary
+			: (slot == CosmeticSlot::Primary) ? &prof->primary
+			: nullptr;
+		if (cand && cand->set && (cand->defIndex == 0 || cand->defIndex == econ.liveDef))
+			item = cand;
+	}
+
+	if (!item || item->paintKit <= 0)
+		return 0;
+	return item->paintKit;
+}
+
+void CosmeticOverrideSystem::UpdatePaintkitBridge() {
+	if (!m_paintkitBridge) {
+		m_lastStats.paintkitBridgeValue = 0;
+		return;
+	}
+
+	const int paintKit = ResolveSpectatedPaintkitOverride();
+	if (paintKit <= 0) {
+		RestorePaintkitBridgeCvar();
+		return;
+	}
+
+	if (SetPaintkitBridgeCvar(paintKit))
+		m_lastStats.paintkitBridgeValue = paintKit;
+	else
+		m_lastStats.paintkitBridgeValue = 0;
+}
+
+int CosmeticOverrideSystem::ApplyMatchedWeapons(bool forceStale, bool fireRebuildCall) {
+	const ClientDllOffsets_t& o = g_clientDllOffsets;
 
 	const int highest = GetHighestEntityIndex();
 	for (int i = 0; i <= highest; ++i) {
@@ -567,7 +862,10 @@ void CosmeticOverrideSystem::RunFrame() {
 			(int32_t)item->statTrak,
 			(uint32_t)xuid,
 			knifeDefOverride,
-			m_fallbackId);
+			m_fallbackId,
+			m_rebuildAuto,
+			forceStale,
+			m_rebuildFlags);
 
 		if (result.patched)
 			++m_lastStats.entitiesPatched;
@@ -578,7 +876,9 @@ void CosmeticOverrideSystem::RunFrame() {
 			// fields + invalidating the init flags is not always enough to make a demo entity visually
 			// rebuild its skin material -- this calls the weapon's UpdateComposite vtable method when a
 			// (re)composite is warranted. SEH-guarded: a wrong index disables recompose, never crashes.
-			if (m_recompose && (result.needComposite || attr.changed)) {
+			// fireRebuildCall lets RunFrame keep this opt-in (only when m_recompose is armed) while the
+			// manual "rebuild once" path forces a call attempt on every matched entity (forceStale).
+			if (fireRebuildCall && (result.needComposite || attr.changed || forceStale)) {
 				bool ok = true;
 				if (m_vtComposite >= 0) ok = SafeVCall(ent, m_vtComposite, m_vtArg);
 				if (ok && m_vtCompositeSec >= 0) ok = SafeVCall(ent, m_vtCompositeSec, m_vtArg);
@@ -597,6 +897,8 @@ void CosmeticOverrideSystem::RunFrame() {
 	//
 	// No entity writes happen in this block on purpose -- do not add any here without first
 	// reading the research doc above.
+
+	return m_lastStats.entitiesMatched;
 }
 
 } // namespace Filmmaker
