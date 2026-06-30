@@ -698,3 +698,32 @@ In order of confidence/cost, smallest first:
   - `docs/cosmetics-model-override-research.md` (the separate, previously-researched model-swap
     problem; cross-referenced for the viewmodel/world-model entity split and the
     `C_EconEntity`/`C_EconItemView` field-name continuity argument)
+
+## Later reference comparison update (2026-06-29)
+
+The practical implementation guidance now lives in `docs/cosmetics-cs2-methodology-notes.md`,
+section 9, after reviewing all three local reference repos in
+`panorama ref/skin changer help/`. The newer takeaway is:
+
+- The direct composite path remains necessary for weapon skins, but it is only one part of the visible
+  update. The references also update item identity/cache flags, mesh group masks, viewmodels, HUD icon
+  caches, and sometimes item descriptions.
+- For demo playback, overwriting `m_NetworkedDynamicAttributes` works only when the demo entity already
+  has def 6/7/8/81 attributes. If `attrWritten=0`, fallback fields alone are usually insufficient; we
+  need an attribute-creation or `SetAttributeValueByName` fallback like the references.
+- The deeper `real-time-internal-overlay-research-main` read adds one more likely cache gate:
+  copied/synthetic item identity plus `C_EconItemView::m_bDisallowSOC = false`. Its source calls this
+  flag write "the fix" before copying fake loadout item IDs into the live weapon item view. In demo
+  mode we should not port fake inventory ownership, but we should test session-local synthetic item IDs
+  and `m_bDisallowSOC=false` alongside the missing-attribute fallback.
+- `real-time-internal-overlay-research-main` also proves StatTrak/nametag and knife viewmodel rebuilds
+  are separate refresh surfaces: it calls `AddStattrakEntity()`, `AddNametagEntity()`, and hooks
+  `C_BaseModelEntity::SetModel` to rewrite viewmodel knife models before the engine draws the default
+  model. Composite refresh alone will not solve those visible surfaces.
+- Default knives and gloves are special because they often have no paintable networked attribute vector
+  and may not have target materials for the requested paint. Treat `attrWritten=0` as a first-class
+  diagnostic result, not as "the composite call failed."
+- Gloves and agents are not solved by weapon recomposition. Gloves are pawn `m_EconGloves` plus body
+  group / HUD arms refresh; agents are pawn `SetModel`.
+- The current demo architecture should stay per-SteamID/per-entity. Do not port the local-player
+  inventory/loadout model wholesale.

@@ -2,8 +2,10 @@
 
 #include "../../ClientEntitySystem.h"   // entity-list globals, g_GetEntityFromIndex
 #include "../../SchemaSystem.h"          // g_clientDllOffsets
+#include "../../SceneSystem.h"           // CResourceSystem / g_pCResourceSystem (blocking resource precache)
 #include "../../../shared/binutils.h"
 #include "CosmeticDebugLog.h"           // MvmDebugLog_Active / MvmDebugLog_Linef (diagnostics)
+#include "CosmeticAnimFix.h"            // EnsureAnimCrashFixInstalled (knife-swap anim crash fix detour)
 
 #include <cstring>
 #include <cstdio>
@@ -41,6 +43,9 @@ typedef void (__fastcall* SetBodyGroup_t)(void* pawn, const char* group, unsigne
 typedef void (__fastcall* UpdateBodyGroupChoice_t)(void* entity);
 typedef void* (__fastcall* GetStaticData_t)(void* econItemView);
 typedef void* (__fastcall* GetEconItemSystem_t)(void* unused);
+// C_EconItemView::SetAttributeValueByName(view, name, float) -- the engine named-setter used to ADD a
+// paint attribute to an item that has none (the default-glove / default-weapon attrWritten=0 case).
+typedef void (__fastcall* SetAttributeValueByName_t)(void* itemView, const char* name, float value);
 // CGameSceneNode::PostDataUpdate(this, 0, 0) -- vtable index 22 (Andromeda SDK::VMT_Index, current
 // build). Forces the renderable to re-derive its model/mesh/body-group, so a swap shows while paused.
 typedef void (__fastcall* PostDataUpdate_t)(void* sceneNode, int a, int b);
@@ -54,10 +59,55 @@ struct Fns {
 	UpdateBodyGroupChoice_t updateBodyGroupChoice = nullptr;
 	GetStaticData_t getStaticData = nullptr;
 	GetEconItemSystem_t getEconItemSystem = nullptr;
+	SetAttributeValueByName_t setAttributeValueByName = nullptr;
 };
 
 Fns g_fns;
 ModelSwapResolveStatus g_status;
+
+// --- experimental animgraph reset (approach #1; see CosmeticModelSwap.h) ---------------------------
+// DISPROVEN for this build (default OFF). The reference offsets are the overlay-research VIEWMODEL/AG1
+// layout; on the demo world weapon the instance read at 0xD08 returns null (logged inst=0x0 wrote=0), and
+// current CS2 weapons run AG2 (m_pGraphInstanceAG2) where the null-vars trick does not map. Kept toggleable
+// for experiments ("cosmetics animreset 1 [offsets <instHex> <varsHex>]"). The real fix is precache (#2).
+bool g_animResetOn = false;
+uint32_t g_animInstOff = 0xD08;  // entity -> CAnimationGraphInstance*
+uint32_t g_animVarsOff = 0x2E0;  // CAnimationGraphInstance -> pAnimGraphNetworkedVariables
+
+// --- approach #2: blocking model precache before SetModel (the root-cause fix; see header) ----------
+// Default ON. Counters are diagnostics-only (surfaced in the precache breadcrumb).
+bool g_precacheOn = true;
+uint64_t g_precacheCalls = 0;
+
+// POD result of the SEH-guarded reset read/write (no C++ objects in the __try body).
+struct AnimResetResult { uintptr_t inst = 0; bool wrote = false; bool faulted = false; };
+
+void DoResetAnimGraph(unsigned char* entity, uint32_t instOff, uint32_t varsOff, AnimResetResult* out) {
+	*out = AnimResetResult{};
+	__try {
+		void* inst = *(void**)(entity + instOff);
+		out->inst = (uintptr_t)inst;
+		if ((uintptr_t)inst > 0x10000) {
+			*(void**)((unsigned char*)inst + varsOff) = nullptr;
+			out->wrote = true;
+		}
+	} __except (1) {
+		out->faulted = true;
+	}
+}
+
+// Reset the entity's animgraph networked-variables pointer after a model swap, then log a breadcrumb
+// (kept OUT of the __try so MvmDebugLog's std::string is legal). `tag` distinguishes world vs viewmodel.
+void ResetAnimGraph(unsigned char* entity, int entityIndex, const char* tag) {
+	if (!g_animResetOn || !entity)
+		return;
+	AnimResetResult r;
+	DoResetAnimGraph(entity, g_animInstOff, g_animVarsOff, &r);
+	if (MvmDebugLog_Active())
+		MvmDebugLog_LinefAlways("knife.swap",
+			"step=animreset.%s idx=%d instOff=0x%x inst=0x%llx wrote=%d faulted=%d varsOff=0x%x",
+			tag, entityIndex, g_animInstOff, (unsigned long long)r.inst, r.wrote ? 1 : 0, r.faulted ? 1 : 0, g_animVarsOff);
+}
 
 // CEconItemDefinition::m_pszModelName -- a raw econ-data offset (NOT a schema field), confirmed
 // identical in Andromeda (0x148) and nerv (get_model_name @ 0x148). Build-specific; the GetStaticData
@@ -208,6 +258,21 @@ bool TryGetModelFromStaticData(unsigned char* itemView, char* out, size_t outSiz
 	}
 }
 
+// SEH-guarded blocking precache of a model resource (approach #2). Runs on the swap thread (main) so the
+// .vmdl + its per-model animation data are resident before SetModel and before the worker-thread anim pass
+// poses the new model -- which is the null-table crash this fixes. No-op if the resource system is missing.
+bool SafePrecacheModel(const char* model) {
+	if (!g_precacheOn || !model || !*model || !g_pCResourceSystem)
+		return false;
+	__try {
+		g_pCResourceSystem->PreCache(model);
+		++g_precacheCalls;
+		return true;
+	} __except (1) {
+		return false;
+	}
+}
+
 // SEH-guarded SetModel on an entity (weapon world model, viewmodel, or pawn).
 bool SafeSetModel(unsigned char* entity, const char* model) {
 	if (!g_fns.setModel || !entity || !model || !*model)
@@ -292,7 +357,7 @@ bool SafeApplyGloves(unsigned char* pawn, int gloveDef, int paintKit, float wear
 	unsigned char* glove = pawn + offGloves; // embedded C_EconItemView
 	char gloveModel[260] = {};
 	// Diagnostics: POD counters filled inside the SEH block, logged after it (see "cosmetics.glove").
-	int dAttrVec = 0, dAttrCount = 0, dPaintW = 0, dSeedW = 0, dWearW = 0, dFaulted = 0;
+	int dAttrVec = 0, dAttrCount = 0, dPaintW = 0, dSeedW = 0, dWearW = 0, dFaulted = 0, dNamedSetter = 0;
 	__try {
 		*(uint16_t*)(glove + o.C_EconItemView.m_iItemDefinitionIndex) = (uint16_t)gloveDef;
 		if (o.C_EconItemView.m_iEntityQuality)
@@ -323,6 +388,16 @@ bool SafeApplyGloves(unsigned char* pawn, int gloveDef, int paintKit, float wear
 				}
 			}
 		}
+		// Missing-attribute fallback: a DEFAULT glove has no networked paint attribute to overwrite
+		// (dPaintW stays 0 above), so paint can never be written by the vector path -- apply it through
+		// the engine named-setter instead (the same path the weapon loop uses), which adds the attribute
+		// to the item view if absent. Without this, default gloves could not be painted at all.
+		if (paintKit > 0 && !dPaintW && g_fns.setAttributeValueByName) {
+			g_fns.setAttributeValueByName(glove, "set item texture prefab", (float)paintKit);
+			g_fns.setAttributeValueByName(glove, "set item texture wear", wear);
+			g_fns.setAttributeValueByName(glove, "set item texture seed", (float)seed);
+			dNamedSetter = 1;
+		}
 		if (o.C_EconItemView.m_bInitialized)
 			*(bool*)(glove + o.C_EconItemView.m_bInitialized) = true;
 		// Let the pawn choose the correct team/agent body groups from its econ glove. Forcing the
@@ -352,9 +427,9 @@ bool SafeApplyGloves(unsigned char* pawn, int gloveDef, int paintKit, float wear
 	if (MvmDebugLog_Active())
 		MvmDebugLog_Linef("cosmetics.glove",
 			"def=%d paint=%d seed=%d wear=%.3f faulted=%d attrVec=%d attrCount=%d wrote(p=%d s=%d w=%d) "
-			"bodyGroupFn=%d needReApplyOff=%d initOff=%d haveModel=%d arms=%d model='%s'",
+			"namedSetter=%d bodyGroupFn=%d needReApplyOff=%d initOff=%d haveModel=%d arms=%d model='%s'",
 			gloveDef, paintKit, seed, wear, dFaulted, dAttrVec, dAttrCount, dPaintW, dSeedW, dWearW,
-			g_fns.updateBodyGroupChoice ? 1 : 0,
+			dNamedSetter, g_fns.updateBodyGroupChoice ? 1 : 0,
 			o.C_CSPlayerPawn.m_bNeedToReApplyGloves ? 1 : 0,
 			o.C_EconItemView.m_bInitialized ? 1 : 0,
 			haveGloveModel ? 1 : 0, armsResolved ? 1 : 0, haveGloveModel ? gloveModel : "");
@@ -405,8 +480,9 @@ int SafePaintKitLegacy(int paintKitId) {
 // m_hOwnerEntity owner-match, which is wrong on some builds) is the safe discriminator: the world
 // weapon and its viewmodel share the same entity class (weapon_knife, weapon_ak47, ...). SEH-guarded.
 void RefreshViewmodelWeapons(unsigned char* pawn, const char* model, uint64_t meshMask,
-	unsigned char* worldWeapon) {
+	unsigned char* worldWeapon, int entityIndex = -1) {
 	const ClientDllOffsets_t& o = g_clientDllOffsets;
+	const bool trace = MvmDebugLog_Active();
 	if (!pawn) return;
 	if (o.C_CSPlayerPawn.m_hHudModelArms == 0 || o.C_BaseEntity.m_pGameSceneNode == 0 ||
 		o.CGameSceneNode.m_pChild == 0 || o.CGameSceneNode.m_pNextSibling == 0 ||
@@ -423,7 +499,13 @@ void RefreshViewmodelWeapons(unsigned char* pawn, const char* model, uint64_t me
 		__try { wantClass = ((CEntityInstance*)worldWeapon)->GetClassName(); }
 		__except (1) { wantClass = nullptr; }
 	}
+	if (trace)
+		MvmDebugLog_LinefAlways("knife.vm", "walk.begin idx=%d arms=%p wantClass='%s' model='%s' mask=%llu",
+			entityIndex, (void*)arms, wantClass ? wantClass : "?", model ? model : "", (unsigned long long)meshMask);
 
+	// Per-child breadcrumbs are written + flushed BEFORE each renderable is touched, so if the crash is
+	// in a half-built viewmodel during a switch, the LAST "knife.vm child" line names the exact child
+	// (its owner ptr + class + whether it matched and got the model write) we touched before dying.
 	__try {
 		void* armsNode = *(void**)(arms + o.C_BaseEntity.m_pGameSceneNode);
 		if (!armsNode) return;
@@ -432,24 +514,34 @@ void RefreshViewmodelWeapons(unsigned char* pawn, const char* model, uint64_t me
 			void* owner = *(void**)((unsigned char*)child + o.CGameSceneNode.m_pOwner);
 			if (owner && LooksLikeWeapon(owner)) {
 				bool sameWeapon = false;
+				const char* oc = nullptr;
 				if (wantClass) {
-					const char* oc = ((CEntityInstance*)owner)->GetClassName();
+					oc = ((CEntityInstance*)owner)->GetClassName();
 					sameWeapon = oc && 0 == std::strcmp(oc, wantClass);
 				}
+				if (trace)
+					MvmDebugLog_LinefAlways("knife.vm", "child idx=%d n=%d owner=%p cls='%s' same=%d willWriteModel=%d",
+						entityIndex, guard, owner, oc ? oc : "?", sameWeapon ? 1 : 0,
+						(sameWeapon && model && *model) ? 1 : 0);
 				if (sameWeapon) {
 					if (model && *model)
 						SafeSetModel((unsigned char*)owner, model);
 					if (meshMask)
 						SafeSetMeshMask((unsigned char*)owner, meshMask);
+					// Approach #1 on the first-person viewmodel child we just re-modeled (the exact entity
+					// the overlay-research reference applies it to).
+					ResetAnimGraph((unsigned char*)owner, entityIndex, "vm");
 				}
 				SafePostDataUpdate((unsigned char*)owner);
 			}
 			child = *(void**)((unsigned char*)child + o.CGameSceneNode.m_pNextSibling);
 		}
 	} __except (1) {
+		if (trace) MvmDebugLog_LinefAlways("knife.vm", "walk.FAULT idx=%d (SEH caught during child walk)", entityIndex);
 		return;
 	}
 	SafePostDataUpdate(arms);
+	if (trace) MvmDebugLog_LinefAlways("knife.vm", "walk.end idx=%d", entityIndex);
 }
 
 } // namespace
@@ -473,6 +565,8 @@ const ModelSwapResolveStatus& ResolveModelSwapFns() {
 		"40 56 48 83 EC ?? 48 89 5C 24 ?? 48 8B F1 48 8B 1D ?? ?? ?? ?? 48 85 DB 75");
 	g_fns.getEconItemSystem = (GetEconItemSystem_t)FindClientPattern(
 		"48 83 EC 28 48 8B 05 ?? ?? ?? ?? 48 85 C0 0F 85 81");
+	g_fns.setAttributeValueByName = (SetAttributeValueByName_t)ResolveRelCall(FindClientPattern(
+		"E8 ?? ?? ?? ?? 66 41 0F 6E D4"));
 
 	g_status.setModel = g_fns.setModel != nullptr;
 	g_status.setMeshGroupMask = g_fns.setMeshGroupMask != nullptr;
@@ -487,6 +581,18 @@ const ModelSwapResolveStatus& ResolveModelSwapFns() {
 bool IsValidAgentModelPath(const char* modelPath) {
 	return IsSupportedPlayerModelPath(modelPath);
 }
+
+void SetAnimGraphReset(bool enabled) { g_animResetOn = enabled; }
+bool AnimGraphReset() { return g_animResetOn; }
+void SetAnimGraphResetOffsets(uint32_t instOff, uint32_t varsOff) { g_animInstOff = instOff; g_animVarsOff = varsOff; }
+void GetAnimGraphResetOffsets(uint32_t* instOff, uint32_t* varsOff) {
+	if (instOff) *instOff = g_animInstOff;
+	if (varsOff) *varsOff = g_animVarsOff;
+}
+
+bool PrecacheModelResource(const char* modelPath) { ResolveModelSwapFns(); return SafePrecacheModel(modelPath); }
+void SetPrecacheModels(bool enabled) { g_precacheOn = enabled; }
+bool PrecacheModels() { return g_precacheOn; }
 
 int PaintKitLegacyModel(int paintKitId) {
 	ResolveModelSwapFns();
@@ -511,10 +617,24 @@ uint64_t ResolveMeshMask(int paintKitId, bool knife, int legacyOverride,
 }
 
 bool ApplyKnifeModelSwap(unsigned char* weapon, unsigned char* itemView,
-	unsigned char* pawnForViewmodel, int targetDef, uint64_t meshMask) {
+	unsigned char* pawnForViewmodel, int targetDef, uint64_t meshMask, int entityIndex) {
 	ResolveModelSwapFns();
-	if (!g_status.CoreOk() || !weapon || targetDef <= 0)
+	// Approach #3 (the working fix): make sure the anim-builder detour is installed before we SetModel the
+	// world weapon to a possibly-unloaded knife model, so the engine's later anim pass can't null-deref.
+	EnsureAnimCrashFixInstalled();
+	// Always-flushed step breadcrumbs (only when mvm_debug is running). The point: the knife type swap
+	// rebuilds the weapon's animation set, and re-firing it onto an entity the engine recreated during a
+	// quick weapon switch faults -- often inside one of these native calls, or in the engine's NEXT
+	// animation frame. Each step is written + flushed BEFORE the call, so the LAST "knife.swap" line in
+	// the log names exactly which call/state preceded the crash (an unmatched "...begin" = it faulted in
+	// that call; a clean "END" followed by the crash = it faulted later in the engine's deploy/anim pass).
+	const bool trace = MvmDebugLog_Active();
+	if (!g_status.CoreOk() || !weapon || targetDef <= 0) {
+		if (trace)
+			MvmDebugLog_LinefAlways("knife.swap", "ABORT idx=%d coreOk=%d weapon=%d targetDef=%d (functions unresolved or bad args -> no swap)",
+				entityIndex, g_status.CoreOk() ? 1 : 0, weapon ? 1 : 0, targetDef);
 		return false;
+	}
 
 	// Resolve the target model: prefer the live econ definition (GetStaticData on the def-already-set
 	// item view), fall back to the built-in knife table.
@@ -522,18 +642,62 @@ bool ApplyKnifeModelSwap(unsigned char* weapon, unsigned char* itemView,
 	bool haveModel = TryGetModelFromStaticData(itemView, model, sizeof(model));
 	if (!haveModel) {
 		const char* tbl = KnifeModelForDef(targetDef);
-		if (!tbl) return false;
+		if (!tbl) {
+			if (trace)
+				MvmDebugLog_LinefAlways("knife.swap", "ABORT idx=%d targetDef=%d (no model from econ and no table entry -> no swap)",
+					entityIndex, targetDef);
+			return false;
+		}
 		std::snprintf(model, sizeof(model), "%s", tbl);
 	}
 
+	// Open the crash-watch window so the vectored handler records any access violation in the next few
+	// seconds (the post-swap animation/render frames where these crashes land) with its module+offset.
+	if (trace) {
+		MvmCrashWatch_Arm(entityIndex, model);
+		MvmDebugLog_LinefAlways("knife.swap", "BEGIN idx=%d weapon=%p hasViewmodelPawn=%d targetDef=%d meshMask=%llu haveModel=%d model='%s'",
+			entityIndex, (void*)weapon, pawnForViewmodel ? 1 : 0, targetDef, (unsigned long long)meshMask, haveModel ? 1 : 0, model);
+	}
+
+	// Approach #2 (root-cause fix): blocking-load the target model + its anim data BEFORE SetModel, so the
+	// engine's later async anim pass finds a non-null per-model table instead of crashing (see header / §11).
+	if (trace) MvmDebugLog_LinefAlways("knife.swap", "step=precache.begin idx=%d on=%d resSys=%d model='%s'",
+		entityIndex, g_precacheOn ? 1 : 0, g_pCResourceSystem ? 1 : 0, model);
+	bool precached = SafePrecacheModel(model);
+	if (trace) MvmDebugLog_LinefAlways("knife.swap", "step=precache.end idx=%d fired=%d totalCalls=%llu",
+		entityIndex, precached ? 1 : 0, (unsigned long long)g_precacheCalls);
+
+	if (trace) MvmDebugLog_LinefAlways("knife.swap", "step=setModel.begin idx=%d model='%s'", entityIndex, model);
 	bool any = SafeSetModel(weapon, model);
-	if (meshMask)
+	if (trace) MvmDebugLog_LinefAlways("knife.swap", "step=setModel.end idx=%d ok=%d", entityIndex, any ? 1 : 0);
+
+	if (meshMask) {
+		if (trace) MvmDebugLog_LinefAlways("knife.swap", "step=meshMask.begin idx=%d mask=%llu", entityIndex, (unsigned long long)meshMask);
 		SafeSetMeshMask(weapon, meshMask);
+		if (trace) MvmDebugLog_LinefAlways("knife.swap", "step=meshMask.end idx=%d", entityIndex);
+	}
+
+	if (trace) MvmDebugLog_LinefAlways("knife.swap", "step=subclass.begin idx=%d def=%d", entityIndex, targetDef);
 	SafeUpdateSubclass(weapon, targetDef);
-	if (pawnForViewmodel)
-		RefreshViewmodelWeapons(pawnForViewmodel, model, meshMask, weapon);
+	if (trace) MvmDebugLog_LinefAlways("knife.swap", "step=subclass.end idx=%d", entityIndex);
+
+	// Approach #1: reset the WORLD weapon's animgraph so the engine rebuilds it for the new model rather
+	// than posing it with stale per-model data (the worker-thread null-deref this whole investigation chased).
+	ResetAnimGraph(weapon, entityIndex, "world");
+
+	if (pawnForViewmodel) {
+		// PRIME crash suspect: this walks the pawn's HUD-arms children (every weapon's first-person
+		// viewmodel) and writes the knife model onto the matching one. During a knife->AK switch the AK's
+		// viewmodel is mid-deploy; see RefreshViewmodelWeapons for the per-child breadcrumbs.
+		if (trace) MvmDebugLog_LinefAlways("knife.swap", "step=viewmodel.begin idx=%d (mirror onto first-person viewmodel)", entityIndex);
+		RefreshViewmodelWeapons(pawnForViewmodel, model, meshMask, weapon, entityIndex);
+		if (trace) MvmDebugLog_LinefAlways("knife.swap", "step=viewmodel.end idx=%d", entityIndex);
+	}
+
 	// Force the renderable to adopt the new model + mesh group now (shows while paused).
+	if (trace) MvmDebugLog_LinefAlways("knife.swap", "step=postData.begin idx=%d", entityIndex);
 	SafePostDataUpdate(weapon);
+	if (trace) MvmDebugLog_LinefAlways("knife.swap", "END idx=%d ok=%d", entityIndex, any ? 1 : 0);
 	return any;
 }
 
@@ -559,6 +723,7 @@ bool ApplyAgentModel(unsigned char* pawn, const char* modelPath) {
 	bool pathValid = IsSupportedPlayerModelPath(modelPath);
 	bool ok = false;
 	if (setModelFn && pawn && pathValid) {
+		SafePrecacheModel(modelPath); // approach #2: blocking-load the agent model before SetModel (same risk as knives)
 		ok = SafeSetModel(pawn, modelPath);
 		if (ok) SafePostDataUpdate(pawn); // refresh the pawn renderable so the agent model shows now
 	}

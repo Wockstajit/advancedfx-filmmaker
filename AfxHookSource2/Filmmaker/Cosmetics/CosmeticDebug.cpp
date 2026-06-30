@@ -7,6 +7,7 @@
 #include "CosmeticOverrideSystem.h"
 #include "CosmeticCatalog.h"
 #include "CosmeticModelSwap.h"
+#include "CosmeticDebugLog.h" // MvmDebugLog_Active / MvmDebugLog_Linef (uiclick before/after lines)
 
 #include "../Platform/TextEncoding.h"
 
@@ -16,6 +17,8 @@
 #include "../../../shared/AfxConsole.h"
 
 #include <cstdint>
+#include <cstdio>
+#include <cstring>
 #include <string>
 
 namespace Filmmaker {
@@ -363,8 +366,9 @@ void Cosmetics_PrintStatus(const char* cmd) {
 	advancedfx::Message("  lastFrame: scanned=%d matched=%d patched=%d reverted=%d frame=%llu\n",
 		stats.entitiesScanned, stats.entitiesMatched, stats.entitiesPatched, stats.entitiesReverted,
 		(unsigned long long)stats.frame);
-	advancedfx::Message("  attrs: listsRead=%d valuesWritten=%d valuesChanged=%d empty=%d\n",
-		stats.attrListsRead, stats.attrValuesWritten, stats.attrValuesChanged, stats.attrListsEmpty);
+	advancedfx::Message("  attrs: listsRead=%d valuesWritten=%d valuesChanged=%d empty=%d namedSetter=%d\n",
+		stats.attrListsRead, stats.attrValuesWritten, stats.attrValuesChanged, stats.attrListsEmpty,
+		stats.namedSetterApplied);
 
 	int vtComp = 0, vtSec = 0;
 	sys.GetVtIdx(&vtComp, &vtSec);
@@ -398,8 +402,14 @@ void Cosmetics_PrintStatus(const char* cmd) {
 
 	for (const auto& [steamId, profile] : sys.Store().All()) {
 		advancedfx::Message("  %llu '%s':\n", (unsigned long long)steamId, profile.name.c_str());
-		PrintItemLine("primary", profile.primary);
-		PrintItemLine("secondary", profile.secondary);
+		// Per-weapon overrides, one line each (label by def index so each gun is distinguishable).
+		for (const auto& [def, item] : profile.weapons) {
+			if (!item.set)
+				continue;
+			char label[32];
+			std::snprintf(label, sizeof(label), "weapon[%d]", def);
+			PrintItemLine(label, item);
+		}
 		PrintItemLine("knife", profile.knife);
 		if (profile.gloves.set) {
 			advancedfx::Message("    gloves def=%d paint=%d wear=%.4f seed=%d%s\n",
@@ -410,10 +420,8 @@ void Cosmetics_PrintStatus(const char* cmd) {
 			advancedfx::Message("    agent model='%s'%s\n", profile.agent.model.c_str(),
 				sys.ModelSwap() ? "" : " (modelswap OFF -> not applied)");
 		}
-		if (!profile.primary.set && !profile.secondary.set && !profile.knife.set &&
-			!profile.gloves.set && !profile.agent.set) {
+		if (profile.Empty())
 			advancedfx::Message("    (empty)\n");
-		}
 	}
 
 	// Also dump the live spectated player's weapon econ state when watching a demo, so "status" is
@@ -474,12 +482,10 @@ void Cosmetics_PrintSpectatedDebug(const char* cmd) {
 	const CosmeticItem* wouldApply = nullptr;
 	if (liveSlot == CosmeticSlot::Knife && profile->knife.set) {
 		wouldApply = &profile->knife;
-	} else if (liveSlot == CosmeticSlot::Secondary && profile->secondary.set &&
-		(profile->secondary.defIndex == 0 || profile->secondary.defIndex == info.itemDefIndex)) {
-		wouldApply = &profile->secondary;
-	} else if (liveSlot == CosmeticSlot::Primary && profile->primary.set &&
-		(profile->primary.defIndex == 0 || profile->primary.defIndex == info.itemDefIndex)) {
-		wouldApply = &profile->primary;
+	} else {
+		const CosmeticItem* cand = profile->FindWeapon(info.itemDefIndex);
+		if (cand && cand->set)
+			wouldApply = cand;
 	}
 
 	if (wouldApply) {
@@ -605,6 +611,130 @@ void Cosmetics_PrintVisualDiag(const char* cmd) {
 	advancedfx::Message("  worldModel: %s\n", model.ok ? model.name : "(unresolved)");
 	advancedfx::Message("  note: viewmodel is a separate C_BaseViewModel entity sharing this econ item; "
 		"a skin change alters the composited material, not the model path above.\n");
+}
+
+// Finds a weapon entity owned by `steamId` whose live item-definition index == targetDef, so the
+// snapshot can reach a weapon the player OWNS but is not currently holding (holstered / inventory) --
+// the override is keyed by owner XUID + def, so the matching world entity exists even when the weapon
+// is not deployed. Mirrors CosmeticOverrideSystem.cpp's LooksLikeWeaponEntity + TryReadWeaponEconInfo
+// gating. SEH-guarded POD body (no C++ objects needing unwind, so __try is legal here). Returns the
+// entity (and its index via outIndex) or nullptr if none matched.
+CEntityInstance* FindOwnedWeaponByDef(uint64_t steamId, int targetDef, int* outIndex) {
+	if (outIndex) *outIndex = -1;
+	if (steamId == 0 || targetDef <= 0 || !g_cosmeticsOffsetsOk)
+		return nullptr;
+	const ClientDllOffsets_t& o = g_clientDllOffsets;
+	const int highest = GetHighestEntityIndex();
+	for (int i = 0; i <= highest; ++i) {
+		CEntityInstance* ent = EntFromIndex(i);
+		if (!ent)
+			continue;
+		const char* cls = ent->GetClassName();
+		const char* clientCls = ent->GetClientClassName();
+		bool weaponish = (cls && std::strstr(cls, "weapon_")) || (cls && std::strstr(cls, "Weapon"))
+			|| (clientCls && std::strstr(clientCls, "Weapon"));
+		if (!weaponish)
+			continue;
+		unsigned char* w = (unsigned char*)ent;
+		bool match = false;
+		__try {
+			uint32_t xLow = *(uint32_t*)(w + o.C_EconEntity.m_OriginalOwnerXuidLow);
+			uint32_t xHigh = *(uint32_t*)(w + o.C_EconEntity.m_OriginalOwnerXuidHigh);
+			uint64_t xuid = ((uint64_t)xHigh << 32) | (uint64_t)xLow;
+			unsigned char* itemView = w + o.C_EconEntity.m_AttributeManager + o.C_AttributeContainer.m_Item;
+			int liveDef = (int)*(uint16_t*)(itemView + o.C_EconItemView.m_iItemDefinitionIndex);
+			match = (xuid == steamId && liveDef == targetDef);
+		} __except (1) {
+			match = false;
+		}
+		if (match) {
+			if (outIndex) *outIndex = i;
+			return ent;
+		}
+	}
+	return nullptr;
+}
+
+void Cosmetics_LogWeaponSnapshot(const char* cmd, const char* phase, uint64_t steamId, int targetDef) {
+	CosmeticOverrideSystem& sys = CosmeticsRef();
+
+	// Always emit SOMETHING so a skin click that produced no visible change is still explained
+	// (the user's complaint was that nothing showed up at all). Each early-out states why.
+	if (!g_cosmeticsOffsetsOk) {
+		advancedfx::Message("%s cosmetics uiclick %s: (econ offsets unresolved -- cannot read live weapon)\n", cmd, phase);
+		if (MvmDebugLog_Active())
+			MvmDebugLog_LinefAlways("cosmetics.uiclick", "%s offsetsUnresolved", phase);
+		return;
+	}
+	if (!sys.InDemoContext()) {
+		advancedfx::Message("%s cosmetics uiclick %s: (not in a demo -- no live weapon to read)\n", cmd, phase);
+		if (MvmDebugLog_Active())
+			MvmDebugLog_LinefAlways("cosmetics.uiclick", "%s notInDemo", phase);
+		return;
+	}
+
+	// Prefer the OWNED weapon that matches the picked def (reaches a holstered/not-deployed weapon);
+	// fall back to the spectated player's active/held weapon when targetDef<=0 or nothing matched.
+	const uint64_t owner = (steamId != 0) ? steamId : sys.CurrentSpectatedSteamId();
+	int weaponIndex = -1;
+	CEntityInstance* weapon = FindOwnedWeaponByDef(owner, targetDef, &weaponIndex);
+	const char* source = "ownedDef";
+	if (!weapon) {
+		const int pawnIndex = sys.CurrentSpectatedPawnIndex();
+		CEntityInstance* pawn = EntFromIndex(pawnIndex);
+		if (!pawn || !pawn->IsPlayerPawn()) {
+			advancedfx::Message("%s cosmetics uiclick %s: (def=%d not owned by %llu and no spectated pawn=%d)\n",
+				cmd, phase, targetDef, (unsigned long long)owner, pawnIndex);
+			if (MvmDebugLog_Active())
+				MvmDebugLog_LinefAlways("cosmetics.uiclick", "%s noPawn targetDef=%d owner=%llu pawn=%d",
+					phase, targetDef, (unsigned long long)owner, pawnIndex);
+			return;
+		}
+		SOURCESDK::CS2::CBaseHandle wh = pawn->GetActiveWeaponHandle();
+		weapon = wh.IsValid() ? EntFromIndex(wh.GetEntryIndex()) : nullptr;
+		weaponIndex = wh.IsValid() ? wh.GetEntryIndex() : -1;
+		source = (targetDef > 0) ? "activeWeapon(def-not-found)" : "activeWeapon";
+		if (!weapon) {
+			advancedfx::Message("%s cosmetics uiclick %s: (def=%d not found and pawn=%d has no active weapon)\n",
+				cmd, phase, targetDef, pawnIndex);
+			if (MvmDebugLog_Active())
+				MvmDebugLog_LinefAlways("cosmetics.uiclick", "%s noWeapon targetDef=%d pawn=%d", phase, targetDef, pawnIndex);
+			return;
+		}
+	}
+
+	const char* cls = weapon->GetClassName();
+	const ClientDllOffsets_t& o = g_clientDllOffsets;
+	unsigned char* w = (unsigned char*)weapon;
+	unsigned char* itemView = w + o.C_EconEntity.m_AttributeManager + o.C_AttributeContainer.m_Item;
+
+	// All field reads happen inside the POD-only SEH helpers (no __try in this function), so std::string
+	// temporaries below are fine (no MSVC C2712).
+	WeaponVisualDiag d;
+	ReadWeaponVisualDiag(w, itemView, &d);
+
+	AttrListDump networked;
+	ReadAttrList(itemView, o.C_EconItemView.m_NetworkedDynamicAttributes, &networked);
+	float nPaint = 0, nSeed = 0, nWear = 0;
+	bool hP = AttrValueForDef(networked, 6, &nPaint);
+	bool hS = AttrValueForDef(networked, 7, &nSeed);
+	bool hW = AttrValueForDef(networked, 8, &nWear);
+
+	char netPaint[24], netSeed[24], netWear[24];
+	if (hP) std::snprintf(netPaint, sizeof(netPaint), "%d", (int)nPaint); else std::snprintf(netPaint, sizeof(netPaint), "absent");
+	if (hS) std::snprintf(netSeed, sizeof(netSeed), "%d", (int)nSeed); else std::snprintf(netSeed, sizeof(netSeed), "absent");
+	if (hW) std::snprintf(netWear, sizeof(netWear), "%.3f", nWear); else std::snprintf(netWear, sizeof(netWear), "absent");
+
+	// The decisive line: networked def6 paint is where a demo weapon's REAL skin lives, so comparing
+	// it before vs after the click shows whether the override actually changed what the game reads.
+	advancedfx::Message("%s cosmetics uiclick %s: src=%s idx=%d cls='%s' def=%d ok=%d netPaint=%s netSeed=%s netWear=%s fbPaint=%d fbWear=%.3f\n",
+		cmd, phase, source, weaponIndex, cls ? cls : "?", d.defIndex, d.ok ? 1 : 0,
+		netPaint, netSeed, netWear, d.fbPaint, d.fbWear);
+	if (MvmDebugLog_Active())
+		MvmDebugLog_LinefAlways("cosmetics.uiclick",
+			"%s src=%s idx=%d cls='%s' def=%d ok=%d netPaint=%s netSeed=%s netWear=%s fbPaint=%d fbWear=%.3f",
+			phase, source, weaponIndex, cls ? cls : "?", d.defIndex, d.ok ? 1 : 0,
+			netPaint, netSeed, netWear, d.fbPaint, d.fbWear);
 }
 
 } // namespace Filmmaker

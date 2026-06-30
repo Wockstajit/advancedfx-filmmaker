@@ -362,3 +362,26 @@ production code is written.
 - Server-side player-model plugin (CounterStrikeSharp, GPL-3.0):
   https://github.com/samyycX/CS2-PlayerModelChanger
 - CS2 entity list reference: https://cs2.poggu.me/dumped-data/entity-list/
+
+## Later reference comparison update (2026-06-29)
+
+This older research doc is partly superseded by `docs/cosmetics-cs2-methodology-notes.md`, especially
+section 9. The still-valid conclusion is that writing `m_iItemDefinitionIndex` alone does not change the
+rendered model. The obsolete conclusion is that CS2 model swaps are not available from `client.dll`:
+all three local references use or corroborate `C_BaseModelEntity::SetModel(const char*)`,
+`CGameSceneNode::SetMeshGroupMask`, `C_CSWeaponBase::UpdateSubclass`, and
+`CGameSceneNode::PostDataUpdate` from `client.dll`.
+
+For demo playback the remaining model-swap risk is lifecycle timing, not the existence of the function:
+seek/POV/deploy can recreate entities and viewmodels while the demo packet stream is rebuilding them.
+The correct implementation shape is conservative reapply: target by owner SteamID, operate only on the
+current active weapon for first-person viewmodel writes, wait for a post-seek stability window before
+knife type swaps, and keep a user-visible kill switch for knife model swaps.
+
+The deeper `real-time-internal-overlay-research-main` pass adds one escalation path if conservative
+reapply still shows a default knife for a frame. That repo hooks `C_BaseModelEntity::SetModel` in
+`src/game/game_hooks.cpp`, and `src/game/skins/skin_changer.cpp::OnSetModel` rewrites the incoming
+viewmodel knife model argument before the original engine call runs. SOURCE:MVM should keep the current
+after-the-fact reassert path first, but a guarded demo-only `SetModel` hook is the reference-backed fix
+to test if demo seeking, POV switches, or deploy animations redraw the default model before our frame
+loop can repair it.

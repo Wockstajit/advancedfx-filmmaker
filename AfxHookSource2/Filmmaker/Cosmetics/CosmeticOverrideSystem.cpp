@@ -29,6 +29,13 @@ namespace Filmmaker {
 
 namespace {
 
+// Frames of dense, EVERY-frame composite re-assert after a skin change or a tick-nudge play-out.
+// Frame-based (NOT tick-based) so it ALSO fires while the demo is PAUSED -- the tick-throttled periodic
+// re-assert in RunFrame is a no-op when the demo tick is frozen, which left a change made while paused
+// reverting to the real skin: the ~10-tick nudge plays out (< the 16-tick periodic), the engine rebuilds
+// the composite from the authoritative item during it, and after re-pausing nothing re-applied ours.
+constexpr uint64_t kCompositeHoldFrames = 150;
+
 // Resolves an entity by index the same way MirvCosmetics.cpp / CameraEditorHud.cpp do: bounds +
 // null-list checks before touching the (possibly stale) global pointers.
 CEntityInstance* EntFromIndex(int index) {
@@ -68,6 +75,33 @@ unsigned char* PawnForSteamId(uint64_t steamId) {
 float SafeReadEntityFloat(unsigned char* base, ptrdiff_t off, float fallback) {
 	if (!base || off == 0) return fallback;
 	__try { return *(float*)(base + off); } __except (1) { return fallback; }
+}
+
+// SEH-guarded read of an entity's LIVE rendered model path (CModelState::m_ModelName) via the same
+// body-component/skeleton chain CosmeticDebug.cpp uses. Lets the diagnostic log show whether a knife/
+// weapon entity is actually rendering the swapped model or still the original (shadow_daggers vs the
+// target nomad/bayonet). POD-only body so __try is permitted. out[0]='\0' on any failure.
+void ReadEntityModelPath(CEntityInstance* ent, char* out, size_t outSize) {
+	if (out && outSize) out[0] = '\0';
+	if (!ent || !out || outSize == 0)
+		return;
+	const ClientDllOffsets_t& o = g_clientDllOffsets;
+	if (o.ModelChain.m_CBodyComponent == 0 || o.ModelChain.m_skeletonInstance == 0
+		|| o.ModelChain.m_modelState == 0 || o.ModelChain.m_ModelName == 0)
+		return;
+	unsigned char* p = (unsigned char*)ent;
+	__try {
+		unsigned char* bodyComp = *(unsigned char**)(p + o.ModelChain.m_CBodyComponent);
+		if ((uintptr_t)bodyComp <= 0x10000) return;
+		unsigned char* modelState = bodyComp + o.ModelChain.m_skeletonInstance + o.ModelChain.m_modelState;
+		const char* name = *(const char**)(modelState + o.ModelChain.m_ModelName);
+		if ((uintptr_t)name <= 0x10000) return;
+		size_t i = 0;
+		for (; name[i] && i + 1 < outSize; ++i) out[i] = name[i];
+		out[i] = '\0';
+	} __except (1) {
+		if (outSize) out[0] = '\0';
+	}
 }
 
 // POD result of the SEH-guarded write -- no constructors, safe to return out of __try/__except.
@@ -191,6 +225,28 @@ DirectCompositeResult FireDirectCompositeRefresh(
 		out.faulted = true;
 	}
 	return out;
+}
+
+// Engine named-setter fallback for items with NO networked paint attribute to overwrite (default
+// knives/gloves, freshly-picked-up or viewmodel weapons -- the attrWritten=0 case). Andromeda applies
+// skins this way through the client.dll function C_EconItemView::SetAttributeValueByName, which sets the
+// dynamic attribute on the item view (adding it if absent) instead of overwriting an existing vector
+// slot. SEH-guarded; returns true only if the resolved setter was actually called. The subsequent
+// composite refresh (FireDirectCompositeRefresh) is what makes the new value render.
+bool FireNamedSkinAttributes(unsigned char* itemView, int paintKit, float wear, int seed, int statTrak) {
+	const DirectCompositeFns& fns = ResolveDirectCompositeFns();
+	if (!itemView || !fns.setAttributeValueByName)
+		return false;
+	__try {
+		fns.setAttributeValueByName(itemView, "set item texture prefab", (float)paintKit);
+		fns.setAttributeValueByName(itemView, "set item texture wear", wear);
+		fns.setAttributeValueByName(itemView, "set item texture seed", (float)seed);
+		if (statTrak >= 0)
+			fns.setAttributeValueByName(itemView, "kill eater", (float)statTrak);
+		return true;
+	} __except (1) {
+		return false;
+	}
 }
 
 SOURCESDK::CS2::Cvar_s* FindPaintkitOverrideCvar() {
@@ -320,10 +376,14 @@ bool TryReadWeaponEconInfo(unsigned char* w, ptrdiff_t offXuidLow, ptrdiff_t off
 
 // POD result of the networked-attribute overwrite. `changed` is true when at least one value was
 // actually different from our target (drives the re-composite), `written` counts matched attributes.
+// `hasPaint` is true when a paint-kit attribute (def 6) was actually present to overwrite -- when it is
+// FALSE the item has no networked paint attribute (default knives/gloves, freshly-picked-up or viewmodel
+// entities), so the override must be applied via the engine named-setter fallback instead.
 struct AttrWriteResult {
 	bool ok = false;
 	int written = 0;
 	bool changed = false;
+	bool hasPaint = false;
 };
 
 // THE real skin write (Phase 2 breakthrough). A networked demo weapon stores its actual skin in
@@ -357,7 +417,7 @@ void WriteNetworkedSkinAttributes(unsigned char* itemView, ptrdiff_t networkedOf
 			unsigned char* attr = data + (ptrdiff_t)i * stride;
 			int def = (int)*(uint16_t*)(attr + defOff);
 			float nv;
-			if (def == 6) nv = (float)paintKit;
+			if (def == 6) { nv = (float)paintKit; out->hasPaint = true; }
 			else if (def == 7) nv = (float)seed;
 			else if (def == 8) nv = wear;
 			else if (def == 81 && statTrak >= 0) nv = (float)statTrak;
@@ -542,10 +602,14 @@ void CosmeticOverrideSystem::ResetSessionOverrides(const char* reason) {
 	m_store.SetEnabled(false);
 	m_agentState.clear();
 	m_gloveState.clear();
+	m_knifeSwapState.clear();
 	m_armed = false;
 	m_pendingNudge = false;
 	m_nudgePhase = 0;
 	m_nudgeWasPaused = false;
+	m_framesSinceSeek = 0;     // re-arm the knife-swap stability window on demo load/close
+	m_lastCompositeTick = -1;  // and the periodic composite re-assert
+	m_compositeHoldUntilFrame = 0; // and the dense composite hold window
 	m_store.Save(); // best-effort normalization of the legacy compatibility file
 	if (MvmDebugLog_Active())
 		MvmDebugLog_Linef("cosmetics.session", "cleared runtime overrides: reason=%s enabled=0 profiles=0",
@@ -588,29 +652,43 @@ void CosmeticOverrideSystem::SetVtIdx(int comp, int sec) {
 
 void CosmeticOverrideSystem::SetWeapon(uint64_t steamId, int defIndex, int paintKit, float wear, int seed, int statTrak) {
 	CosmeticProfile& profile = m_store.GetOrCreate(steamId);
-	CosmeticSlot slot = CosmeticCatalog::SlotForDefIndex(defIndex);
 
-	CosmeticItem* item = nullptr;
-	if (slot == CosmeticSlot::Knife) {
-		item = &profile.knife;
-	} else if (slot == CosmeticSlot::Secondary) {
-		item = &profile.secondary;
-	} else {
-		// Primary or None (defIndex 0 = "keep the held weapon's own def") -> primary slot.
-		item = &profile.primary;
+	// Knives have their own single slot + model/type swap; route a knife def there. Every other weapon
+	// def gets its OWN entry in the per-weapon map, so each weapon type the player carries keeps an
+	// independent skin (the "any weapon, per player" model). A defIndex of 0 is rejected -- a per-weapon
+	// override requires an explicit weapon (the old "0 = any in slot" wildcard is gone).
+	if (CosmeticCatalog::IsKnifeDef(defIndex)) {
+		SetKnife(steamId, defIndex, paintKit, wear, seed);
+		return;
 	}
+	if (defIndex <= 0)
+		return;
 
-	item->set = true;
-	item->defIndex = defIndex;
-	item->paintKit = paintKit;
-	item->wear = wear;
-	item->seed = seed;
-	item->statTrak = statTrak;
+	CosmeticItem& item = profile.weapons[defIndex];
+	item.set = true;
+	item.defIndex = defIndex;
+	item.paintKit = paintKit;
+	item.wear = wear;
+	item.seed = seed;
+	item.statTrak = statTrak;
 	// statTrak is left as-supplied for weapons (unlike SetKnife/SetGloves which force -1).
 
 	std::string name = NameForSteamId(steamId);
 	if (!name.empty())
 		profile.name = name;
+}
+
+void CosmeticOverrideSystem::ClearWeapon(uint64_t steamId, int defIndex) {
+	CosmeticProfile* profile = m_store.Find(steamId);
+	if (!profile)
+		return;
+	if (CosmeticCatalog::IsKnifeDef(defIndex)) {
+		profile->knife = CosmeticItem{};
+	} else {
+		profile->weapons.erase(defIndex);
+	}
+	if (profile->Empty())
+		m_store.ClearPlayer(steamId);
 }
 
 void CosmeticOverrideSystem::SetKnife(uint64_t steamId, int defIndex, int paintKit, float wear, int seed) {
@@ -755,22 +833,60 @@ void CosmeticOverrideSystem::RunFrame() {
 	// applied frame (normal playback advances ~1 tick/frame; a seek jumps hundreds-to-thousands) and
 	// SKIP the apply for a short settle window so the list finishes rebuilding before we touch it. The
 	// override is XUID-keyed and re-asserts every frame, so a brief skip is invisible once settled.
-	{
-		int curTick = 0;
-		if (g_MirvTime.GetCurrentDemoTick(curTick)) {
-			if (m_lastApplyTick >= 0) {
-				int d = curTick - m_lastApplyTick;
-				if (d < 0) d = -d;
-				if (d > 64)
-					m_seekSettleFrames = 16; // re-armed on every jump, so it covers a multi-step seek
+	int curTick = 0;
+	bool haveTick = g_MirvTime.GetCurrentDemoTick(curTick);
+	if (haveTick) {
+		if (m_lastApplyTick >= 0) {
+			int d = curTick - m_lastApplyTick;
+			if (d < 0) d = -d;
+			if (d > 64) {
+				m_seekSettleFrames = 16;   // re-armed on every jump, so it covers a multi-step seek
+				m_framesSinceSeek = 0;     // restart the (longer) knife-swap stability window too
+				m_lastCompositeTick = -1;  // force a fresh periodic composite once the seek settles
 			}
-			m_lastApplyTick = curTick;
 		}
+		m_lastApplyTick = curTick;
 	}
 	if (m_seekSettleFrames > 0) {
 		--m_seekSettleFrames;
 		UpdatePaintkitBridge();
 		return;
+	}
+
+	// Knife-swap stability window. The 16-frame settle above is enough for the SEH-guarded POD
+	// attribute writes + the composite refresh, but NOT for the knife model-type swap: its SetModel +
+	// UpdateSubclass re-derive the weapon's VData/animation set, and if that lands on an entity the
+	// engine is still reconstructing after a seek the animation state is left inconsistent and faults
+	// a few SECONDS later (outside the SEH guard) -- the "scrub, knife redeploys, then it crashes"
+	// report. So the knife swap waits for a longer run of uninterrupted frames since the last seek;
+	// rapid stacked scrubs keep resetting m_framesSinceSeek, so it can never fire mid-reconstruction.
+	// Frame-based (not tick-based) so it also advances while paused, where the demo tick is frozen.
+	if (m_framesSinceSeek < 0x40000000) ++m_framesSinceSeek;
+	// Short post-seek settle so the knife model swap fires onto a constructed entity (its scene node is
+	// ready) rather than mid-rebuild where the engine would immediately revert our model. This was 64
+	// frames purely to avoid the unloaded-model anim CRASH on a half-rebuilt entity; CosmeticAnimFix now
+	// neutralizes that crash, so the window is tightened to a few frames -- which closes the visible
+	// window where the knife reverted to its ORIGINAL model (skin already re-applied) right after a seek.
+	const int kKnifeSwapStableFrames = 8;
+	const bool knifeSwapStable = m_framesSinceSeek >= kKnifeSwapStableFrames;
+
+	// Periodic composite re-assert (the "skin only changes once" fix). The engine rebuilds a weapon's
+	// skin composite from the AUTHORITATIVE networked item on every redeploy / data update during
+	// playback, clobbering our one-shot composite -- so an override that fired only on the frame its
+	// value changed renders until the next deploy and then silently reverts to the real skin (exactly
+	// "I changed it again and it showed the default skin"). Re-fire the composite on a demo-tick
+	// throttle so the override keeps rendering through playback. Tick-based -> FPS-independent and a
+	// natural no-op while PAUSED (tick frozen), where the one-shot composite already sticks. The cost
+	// is bounded (a few matched weapons, a few times a demo-second); tune via kCompositeReassertTicks.
+	const int kCompositeReassertTicks = 16; // ~4x per demo-second while playing
+	bool periodicComposite = m_frameCounter < m_compositeHoldUntilFrame; // dense re-assert window (works paused)
+	if (haveTick) {
+		int dc = curTick - m_lastCompositeTick;
+		if (dc < 0) dc = -dc;
+		if (m_lastCompositeTick < 0 || dc >= kCompositeReassertTicks) {
+			periodicComposite = true;
+			m_lastCompositeTick = curTick;
+		}
 	}
 
 	++m_lastStats.frame;
@@ -782,6 +898,7 @@ void CosmeticOverrideSystem::RunFrame() {
 	m_lastStats.attrValuesWritten = 0;
 	m_lastStats.attrValuesChanged = 0;
 	m_lastStats.attrListsEmpty = 0;
+	m_lastStats.namedSetterApplied = 0;
 	m_lastStats.paintkitBridgeValue = 0;
 	m_lastStats.directCompositeCalls = 0;
 	m_lastStats.directCompositeResolved = 0;
@@ -797,7 +914,8 @@ void CosmeticOverrideSystem::RunFrame() {
 	// fire the recompose vcall only if the user armed it via "cosmetics recompose 1", and fire the
 	// resolved direct composite refresh whenever a matched weapon's skin data changed this frame (the
 	// auto-update lever -- makes a UI skin pick render immediately and re-applies after seeks/redeploys).
-	ApplyMatchedWeapons(/*forceStale=*/false, /*fireRebuildCall=*/m_recompose, /*fireDirectComposite=*/m_autoComposite);
+	ApplyMatchedWeapons(/*forceStale=*/false, /*fireRebuildCall=*/m_recompose, /*fireDirectComposite=*/m_autoComposite,
+		/*allowKnifeSwap=*/knifeSwapStable, /*periodicComposite=*/periodicComposite);
 	// Gloves + agent (pawn-level model swap), keyed by owner SteamID like the weapon loop.
 	ApplyPawnCosmetics();
 	// Cumulative (never-reset) apply counters -- so a one-shot/gated apply stays observable in status.
@@ -836,10 +954,12 @@ int CosmeticOverrideSystem::RebuildOnce() {
 	m_lastStats.attrValuesWritten = 0;
 	m_lastStats.attrValuesChanged = 0;
 	m_lastStats.attrListsEmpty = 0;
+	m_lastStats.namedSetterApplied = 0;
 	m_lastStats.directCompositeCalls = 0;
 	m_lastStats.directCompositeResolved = 0;
 	m_lastStats.directCompositeFaulted = 0;
-	return ApplyMatchedWeapons(/*forceStale=*/true, /*fireRebuildCall=*/m_recompose, /*fireDirectComposite=*/false);
+	return ApplyMatchedWeapons(/*forceStale=*/true, /*fireRebuildCall=*/m_recompose, /*fireDirectComposite=*/false,
+		/*allowKnifeSwap=*/true, /*periodicComposite=*/false);
 }
 
 int CosmeticOverrideSystem::CompositeOnce() {
@@ -853,10 +973,12 @@ int CosmeticOverrideSystem::CompositeOnce() {
 	m_lastStats.attrValuesWritten = 0;
 	m_lastStats.attrValuesChanged = 0;
 	m_lastStats.attrListsEmpty = 0;
+	m_lastStats.namedSetterApplied = 0;
 	m_lastStats.directCompositeCalls = 0;
 	m_lastStats.directCompositeResolved = 0;
 	m_lastStats.directCompositeFaulted = 0;
-	return ApplyMatchedWeapons(/*forceStale=*/true, /*fireRebuildCall=*/false, /*fireDirectComposite=*/true);
+	return ApplyMatchedWeapons(/*forceStale=*/true, /*fireRebuildCall=*/false, /*fireDirectComposite=*/true,
+		/*allowKnifeSwap=*/true, /*periodicComposite=*/false);
 }
 
 bool CosmeticOverrideSystem::SetRebuildFlag(const char* name, bool on) {
@@ -972,11 +1094,8 @@ int CosmeticOverrideSystem::ResolveSpectatedPaintkitOverride() const {
 		if (prof->knife.set)
 			item = &prof->knife;
 	} else {
-		CosmeticSlot slot = CosmeticCatalog::SlotForDefIndex(econ.liveDef);
-		const CosmeticItem* cand = (slot == CosmeticSlot::Secondary) ? &prof->secondary
-			: (slot == CosmeticSlot::Primary) ? &prof->primary
-			: nullptr;
-		if (cand && cand->set && (cand->defIndex == 0 || cand->defIndex == econ.liveDef))
+		const CosmeticItem* cand = prof->FindWeapon(econ.liveDef);
+		if (cand && cand->set)
 			item = cand;
 	}
 
@@ -991,6 +1110,10 @@ void CosmeticOverrideSystem::RequestApplyNudge() {
 	// stops -- never one seek per intermediate value.
 	m_pendingNudge = true;
 	m_nudgeRequestFrame = m_frameCounter;
+	// Arm the dense composite re-assert window so the new skin re-composites EVERY frame for a short
+	// burst -- this is what makes a skin change taken while PAUSED actually render (the tick-based
+	// periodic can't fire while paused) and survive the nudge play-out's engine clobber.
+	m_compositeHoldUntilFrame = m_frameCounter + kCompositeHoldFrames;
 }
 
 void CosmeticOverrideSystem::MaybeFireTickNudge() {
@@ -1008,9 +1131,13 @@ void CosmeticOverrideSystem::MaybeFireTickNudge() {
 				MvmDebugLog_Linef("cosmetics.nudge",
 					"DONE re-paused playedTicks=%d enough=%d timedOut=%d",
 					tick - m_nudgeStartTick, enough ? 1 : 0, timedOut ? 1 : 0);
-			// Re-assert the override onto whatever entities the play-out left us with.
+			// Re-assert the override onto whatever entities the play-out left us with, and RE-ARM the dense
+			// composite window: the ~10-tick play-out is shorter than the tick periodic, so the engine
+			// rebuilt the weapon composite during it -- without this the skin reverts to default once paused.
 			m_agentState.clear();
 			m_gloveState.clear();
+			m_knifeSwapState.clear();
+			m_compositeHoldUntilFrame = m_frameCounter + kCompositeHoldFrames;
 			m_nudgePhase = 0;
 			++m_totalNudges;
 		}
@@ -1078,7 +1205,8 @@ void CosmeticOverrideSystem::UpdatePaintkitBridge() {
 		m_lastStats.paintkitBridgeValue = 0;
 }
 
-int CosmeticOverrideSystem::ApplyMatchedWeapons(bool forceStale, bool fireRebuildCall, bool fireDirectComposite) {
+int CosmeticOverrideSystem::ApplyMatchedWeapons(bool forceStale, bool fireRebuildCall, bool fireDirectComposite,
+	bool allowKnifeSwap, bool periodicComposite) {
 	const ClientDllOffsets_t& o = g_clientDllOffsets;
 
 	const int highest = GetHighestEntityIndex();
@@ -1121,17 +1249,23 @@ int CosmeticOverrideSystem::ApplyMatchedWeapons(bool forceStale, bool fireRebuil
 		if (CosmeticCatalog::IsKnifeDef(liveDef)) {
 			if (prof->knife.set) {
 				item = &prof->knife;
-				if (m_knifeModelSwap && item->defIndex > 0 && item->defIndex != liveDef)
+				// Desired knife TYPE swap target, taken from the PROFILE -- NOT gated on
+				// (item->defIndex != liveDef). ApplyCosmeticWrite writes m_iItemDefinitionIndex = target,
+				// so the frame after the first write liveDef == target and the old gate computed 0; since
+				// a profile change/seek also re-arms the 64-frame stability window, the "def differs" frame
+				// and the "stable" frame never coincided and the model swap NEVER fired (confirmed in
+				// mvm_debug: liveDef flipped 525->503 but liveModel stayed knife_skeleton). The per-entity
+				// m_knifeSwapState throttle below still fires SetModel only ONCE per activation, so driving
+				// this purely from the profile is safe.
+				if (m_knifeModelSwap && item->defIndex > 0)
 					knifeDefOverride = item->defIndex;
 			}
 		} else {
-			CosmeticSlot slot = CosmeticCatalog::SlotForDefIndex(liveDef);
-			CosmeticItem* cand = (slot == CosmeticSlot::Secondary) ? &prof->secondary
-				: (slot == CosmeticSlot::Primary) ? &prof->primary
-				: nullptr;
-			// A paint kit is weapon-specific: only apply when the override is "any weapon in this
-			// slot" (defIndex 0) or it explicitly matches the currently-held weapon def.
-			if (cand && cand->set && (cand->defIndex == 0 || cand->defIndex == liveDef))
+			// Per-weapon override: look the held weapon's own def up in the player's weapons map. This
+			// is exactly "this player's M4 -> this M4 skin", independent per weapon type, so every gun
+			// the player carries keeps its own skin.
+			CosmeticItem* cand = prof->FindWeapon(liveDef);
+			if (cand && cand->set)
 				item = cand;
 		}
 
@@ -1159,6 +1293,16 @@ int CosmeticOverrideSystem::ApplyMatchedWeapons(bool forceStale, bool fireRebuil
 			if (attr.written == 0)
 				++m_lastStats.attrListsEmpty;
 		}
+
+		// DEFAULT-ITEM PAINT (the "pistol went to default no-skin" fix): a default/vanilla demo weapon
+		// has NO networked paint attribute (attr.hasPaint == false), so the overwrite path can't paint it
+		// and the named-setter alone did not render (confirmed: a default Deagle stayed default). For
+		// these items, force the legacy fallback path (m_iItemIDHigh = -1) so the client composites from
+		// the m_nFallbackPaintKit/Wear/Seed fields we write -- the proven nSkinz mechanism. Scoped to
+		// no-paint-attr items with an actual paint pick, so painted demo weapons (the AK) keep their HUD
+		// identity via the overwrite path. (Trade-off: the HUD weapon icon for a re-skinned DEFAULT gun
+		// may blank, which is acceptable for movie work and only affects guns that were vanilla in the demo.)
+		bool useFallbackId = m_fallbackId || (!attr.hasPaint && item->paintKit > 0);
 
 		ApplyResult result = ApplyCosmeticWrite(
 			w,
@@ -1189,7 +1333,7 @@ int CosmeticOverrideSystem::ApplyMatchedWeapons(bool forceStale, bool fireRebuil
 			(int32_t)item->statTrak,
 			(uint32_t)xuid,
 			knifeDefOverride,
-			m_fallbackId,
+			useFallbackId,
 			m_rebuildAuto,
 			forceStale,
 			m_rebuildFlags);
@@ -1198,6 +1342,23 @@ int CosmeticOverrideSystem::ApplyMatchedWeapons(bool forceStale, bool fireRebuil
 			++m_lastStats.entitiesPatched;
 		if (result.reverted)
 			++m_lastStats.entitiesReverted;
+
+		// Whether a (re)assert of the skin + composite is warranted this frame: on first apply / a real
+		// change, on the manual rebuild, or on the periodic re-assert that keeps the override rendering
+		// through the engine's per-deploy composite rebuild.
+		bool refreshWarranted = result.needComposite || attr.changed || forceStale || periodicComposite;
+
+		// MISSING-ATTRIBUTE FALLBACK (the attrWritten=0 fix): when the item has no networked paint
+		// attribute to overwrite (attr.hasPaint == false -- default/vanilla weapons, picked-up or
+		// viewmodel entities), apply the skin through the engine named-setter so it still paints. The
+		// composite below renders it. Idempotent, so it is safe even when the composite path also calls
+		// the setter; gated to the refresh cadence so it is not run redundantly every frame.
+		bool namedSetter = false;
+		if (item->paintKit > 0 && !attr.hasPaint && refreshWarranted) {
+			namedSetter = FireNamedSkinAttributes(itemView, item->paintKit, item->wear, item->seed, item->statTrak);
+			if (namedSetter)
+				++m_lastStats.namedSetterApplied;
+		}
 
 		// Optional forced re-composite (OFF by default; see SetRecompose). Writing the fallback
 		// fields + invalidating the init flags is not always enough to make a demo entity visually
@@ -1228,8 +1389,12 @@ int CosmeticOverrideSystem::ApplyMatchedWeapons(bool forceStale, bool fireRebuil
 		// reaches the other weapon's half-built viewmodel and CRASHES on its next animation. The WORLD
 		// (third-person) model/mesh swap below still runs for every matched weapon -- only the
 		// first-person viewmodel mirror is gated to the active weapon.
+		// Resolve the owner pawn + whether THIS entity is its ACTIVE (deployed) weapon, EVERY matched
+		// frame (not gated on a change). The knife swap now fires when the knife BECOMES active even if
+		// the profile was changed earlier (while holstered, or during a seek) -- a standing condition, not
+		// a one-frame event -- and the diagnostic log reports active-ness. ownerPawn != null <=> active.
 		unsigned char* ownerPawn = nullptr;
-		if ((m_modelSwap || fireDirectComposite) && (result.needComposite || attr.changed || forceStale)) {
+		{
 			unsigned char* pawn = PawnForSteamId(xuid);
 			if (pawn) {
 				SOURCESDK::CS2::CBaseHandle aw = ((CEntityInstance*)pawn)->GetActiveWeaponHandle();
@@ -1237,21 +1402,60 @@ int CosmeticOverrideSystem::ApplyMatchedWeapons(bool forceStale, bool fireRebuil
 					ownerPawn = pawn;
 			}
 		}
-		if (m_modelSwap && (result.needComposite || attr.changed || forceStale)) {
+		bool knifeFired = false; // set true if the knife model/type swap actually ran this frame (diag)
+		if (m_modelSwap) {
 			bool isKnife = CosmeticCatalog::IsKnifeDef(liveDef);
-			// ownerPawn is non-null ONLY when THIS weapon is the owner's ACTIVE (deployed) weapon (see
-			// above). Gate the knife model/subclass swap on it: a HOLSTERED knife is never rendered, and
-			// re-running SetModel/UpdateSubclass/SetMeshGroupMask on a holstered knife entity that the
-			// engine keeps recreating during live playback (round restart, weapon switch) is the
-			// long-standing "crash-prone on weapon switch" race. Swapping only the active knife removes
-			// that window while still showing the swap whenever the knife is actually held.
-			if (isKnife && m_knifeModelSwap && knifeDefOverride > 0 && ownerPawn) {
-				uint64_t mask = ResolveMeshMask(item->paintKit, /*knife=*/true,
-					m_meshLegacyMode, m_maskModern, m_maskLegacy);
-				if (mask == 0) mask = m_maskModern; // a knife model always needs a mesh group
-				if (ApplyKnifeModelSwap(w, itemView, ownerPawn, knifeDefOverride, mask))
-					++m_lastStats.knifeModelsApplied;
-			} else if (!isKnife && item->paintKit > 0) {
+			// The non-knife weapon mesh-group fix is cheap (SetMeshGroupMask + PostDataUpdate) and IS
+			// re-asserted on the periodic tick so the skin's mesh stays correct through playback redeploys.
+			bool weaponWork = refreshWarranted;
+			if (isKnife) {
+				// Fire when the knife is the owner's ACTIVE weapon + the post-seek stability window elapsed +
+				// its def is still the wrong type. NO attr-change-this-frame requirement (after a seek the
+				// change and "stable" never coincide -- that is why an edited knife never swapped). A per-owner
+				// throttle keyed on the knife entity index + target def fires it ONCE per activation: the engine
+				// reverts the def every tick, but we re-fire only on entity recreation (new index) or a new
+				// target, never every frame (the per-frame re-swap was the crash).
+				// NOTE: no longer gated on ownerPawn (active). The WORLD (third-person) knife model swap must
+				// run for a HOLSTERED knife too -- otherwise, after a seek recreated the entity, the skin
+				// paint re-applied (ungated) while the model stayed the ORIGINAL knife, showing a mismatched
+				// model+skin (e.g. Butterfly mesh + Bayonet's skin) until the knife was next deployed. The
+				// first-person viewmodel mirror inside ApplyKnifeModelSwap auto-skips when pawnForViewmodel
+				// is null (holstered), and we re-fire on the holstered->active edge to run it once. Safe now
+				// that CosmeticAnimFix neutralizes the unloaded-model anim crash the active-only gate avoided.
+				if (m_knifeModelSwap && knifeDefOverride > 0) {
+					KnifeSwapState& ks = m_knifeSwapState[xuid];
+					bool recreated = (ks.entityIndex != i);
+					bool newTarget = (ks.swappedDef != knifeDefOverride);
+					bool active = (ownerPawn != nullptr);
+					bool becameActive = active && !ks.lastActive; // deploy edge -> run the viewmodel mirror once
+					if (recreated || newTarget || becameActive) {
+						// Always-flushed re-fire decision. recreated=1 (a NEW entity index for the same owner)
+						// is the seek/quick-switch case: the engine destroyed+recreated the knife entity, so
+						// the swap re-fires onto the rebuilt entity. framesSinceSeek shows how settled the
+						// world is; allowSwap=0 means SUPPRESSED until the (short) post-seek window elapses.
+						// active=0 = holstered (world model swap only; viewmodel mirror skipped).
+						if (MvmDebugLog_Active())
+							MvmDebugLog_LinefAlways("knife.fire",
+								"xuid=%llu idx=%d prevIdx=%d liveDef=%d targetDef=%d prevDef=%d recreated=%d newTarget=%d active=%d allowSwap=%d framesSinceSeek=%d -> %s",
+								(unsigned long long)xuid, i, ks.entityIndex, liveDef, knifeDefOverride, ks.swappedDef,
+								recreated ? 1 : 0, newTarget ? 1 : 0, active ? 1 : 0, allowKnifeSwap ? 1 : 0, m_framesSinceSeek,
+								allowKnifeSwap ? "FIRE" : "SUPPRESS-settle");
+						if (allowKnifeSwap) {
+							uint64_t mask = ResolveMeshMask(item->paintKit, /*knife=*/true,
+								m_meshLegacyMode, m_maskModern, m_maskLegacy);
+							if (mask == 0) mask = m_maskModern; // a knife model always needs a mesh group
+							// ownerPawn null when holstered -> world swap runs, viewmodel mirror is skipped.
+							knifeFired = ApplyKnifeModelSwap(w, itemView, ownerPawn, knifeDefOverride, mask, i);
+							if (knifeFired) {
+								++m_lastStats.knifeModelsApplied;
+								ks.entityIndex = i;
+								ks.swappedDef = knifeDefOverride;
+							}
+						}
+					}
+					ks.lastActive = active; // track each matched frame so a holstered->active edge fires once
+				}
+			} else if (item->paintKit > 0 && weaponWork) {
 				uint64_t mask = ResolveMeshMask(item->paintKit, /*knife=*/false,
 					m_meshLegacyMode, m_maskModern, m_maskLegacy);
 				if (mask != 0) {
@@ -1261,7 +1465,7 @@ int CosmeticOverrideSystem::ApplyMatchedWeapons(bool forceStale, bool fireRebuil
 			}
 		}
 
-		if (fireDirectComposite && (result.needComposite || attr.changed || forceStale)) {
+		if (fireDirectComposite && refreshWarranted) {
 			DirectCompositeResult direct = FireDirectCompositeRefresh(
 				w,
 				itemView,
@@ -1286,14 +1490,31 @@ int CosmeticOverrideSystem::ApplyMatchedWeapons(bool forceStale, bool fireRebuil
 		// paint cannot be written there (the skin will not render via the networked-attr path no matter
 		// what). attrOk=0 means the attribute vector itself could not be read. needComposite reflects
 		// whether a value differed this frame (drives the re-composite / model-swap fire).
-		if (MvmDebugLog_Active())
+		if (MvmDebugLog_Active()) {
+			// idx + class distinguish the multiple entities one weapon can have (world model vs first-person
+			// viewmodel vs a picked-up copy). active=1 means it is the owner's deployed weapon. liveModel is
+			// the ACTUAL rendered model path -- a knife swap that did not take shows the original model here.
+			// attrWritten=0 = this entity has NO networked paint attribute to write (can't be skinned via the
+			// networked-attr path) -- the typical attrWritten=0 entity is the viewmodel / a picked-up weapon.
+			const char* cls = ent->GetClassName();
+			char liveModel[160];
+			ReadEntityModelPath(ent, liveModel, sizeof(liveModel));
+			// writePath shows HOW the skin was written: "overwrite" = an existing networked def-6 paint
+			// attr was overwritten; "namedSetter" = no paint attr existed so the engine named-setter
+			// fallback applied it (the attrWritten=0 fix); "none" = neither (e.g. paintKit 0 / vanilla).
+			const char* writePath = attr.hasPaint ? "overwrite"
+				: (useFallbackId ? (namedSetter ? "fallbackId+named" : "fallbackId")
+					: (namedSetter ? "namedSetter" : "none"));
 			MvmDebugLog_Linef("cosmetics.weapon",
-				"xuid=%llu liveDef=%d isKnife=%d knifeSwapDef=%d paint=%d wear=%.3f seed=%d stat=%d "
-				"attrOk=%d attrWritten=%d attrChanged=%d patched=%d needComposite=%d",
-				(unsigned long long)xuid, liveDef, CosmeticCatalog::IsKnifeDef(liveDef) ? 1 : 0,
-				knifeDefOverride, item->paintKit, item->wear, item->seed, item->statTrak,
-				attr.ok ? 1 : 0, attr.written, attr.changed ? 1 : 0,
-				result.patched ? 1 : 0, result.needComposite ? 1 : 0);
+				"idx=%d cls='%s' xuid=%llu liveDef=%d active=%d isKnife=%d knifeSwapDef=%d knifeFired=%d "
+				"allowKnife=%d paint=%d wear=%.3f seed=%d stat=%d attrOk=%d attrWritten=%d hasPaint=%d "
+				"writePath=%s attrChanged=%d patched=%d needComposite=%d liveModel='%s'",
+				i, cls ? cls : "?", (unsigned long long)xuid, liveDef, ownerPawn ? 1 : 0,
+				CosmeticCatalog::IsKnifeDef(liveDef) ? 1 : 0, knifeDefOverride, knifeFired ? 1 : 0,
+				allowKnifeSwap ? 1 : 0, item->paintKit, item->wear, item->seed, item->statTrak,
+				attr.ok ? 1 : 0, attr.written, attr.hasPaint ? 1 : 0, writePath, attr.changed ? 1 : 0,
+				result.patched ? 1 : 0, result.needComposite ? 1 : 0, liveModel);
+		}
 	}
 
 	// GLOVES + AGENT are pawn-level (not econ weapon entities) and are applied separately in

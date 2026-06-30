@@ -36,6 +36,7 @@ struct CosmeticFrameStats {
 	int attrValuesWritten = 0; // def 6/7/8/81 values found and overwritten
 	int attrValuesChanged = 0; // values that differed from the requested override
 	int attrListsEmpty = 0;    // valid vectors with no matching writable skin attrs
+	int namedSetterApplied = 0; // items with no networked paint attr that took the engine named-setter fallback
 	uint64_t frame = 0;        // monotonically increasing apply-frame counter
 	int paintkitBridgeValue = 0; // current cl_paintkit_override bridge value, 0 = inactive/default
 	int directCompositeCalls = 0; // experimental Andromeda-style direct composite refresh calls
@@ -93,10 +94,12 @@ public:
 	bool InDemoContext() const;      // true only while a demo is actively playing
 
 	// --- profile editing (keyed by SteamID64) ---
-	// defIndex 0 on SetWeapon = "keep the held weapon's own def, just restyle it"; the slot
-	// (primary/secondary) is then resolved from the live weapon at apply time. A non-zero defIndex
-	// classifies into primary/secondary via the catalog.
+	// Weapons are stored PER def index: SetWeapon(steamId, AK_def, ...) and SetWeapon(steamId, M4_def,
+	// ...) coexist, so each weapon type the player carries keeps its own skin. defIndex must be an
+	// explicit weapon (<= 0 is rejected); a knife def is routed to the knife slot. ClearWeapon removes
+	// one weapon's override (and prunes the profile if it becomes empty).
 	void SetWeapon(uint64_t steamId, int defIndex, int paintKit, float wear, int seed, int statTrak);
+	void ClearWeapon(uint64_t steamId, int defIndex);
 	void SetKnife(uint64_t steamId, int defIndex, int paintKit, float wear, int seed);
 	void SetGloves(uint64_t steamId, int defIndex, int paintKit, float wear, int seed);
 	void SetAgent(uint64_t steamId, const char* model, int defIndex);
@@ -253,8 +256,14 @@ private:
 	// Shared matched-weapon apply loop, used by both the per-frame pump (RunFrame) and the on-demand
 	// rebuild (RebuildOnce). forceStale forces the visuals-stale field writes even when no value
 	// changed; fireRebuildCall fires the SEH-guarded recompose vcall when armed; fireDirectComposite
-	// fires the experimental resolved-function composite refresh. Returns matched count.
-	int ApplyMatchedWeapons(bool forceStale, bool fireRebuildCall, bool fireDirectComposite);
+	// fires the experimental resolved-function composite refresh. allowKnifeSwap gates the crash-prone
+	// knife model/type swap on a stable-playback window (see RunFrame -- keeps rapid stacked scrubs from
+	// firing it onto a half-rebuilt entity). periodicComposite re-fires the composite/mesh on a demo-tick
+	// throttle so an override keeps rendering through the engine's per-deploy composite rebuild during
+	// playback (the "skin only changes once" fix), not just on the frame its value changed. Returns
+	// matched count.
+	int ApplyMatchedWeapons(bool forceStale, bool fireRebuildCall, bool fireDirectComposite,
+		bool allowKnifeSwap, bool periodicComposite);
 	// Pawn-level cosmetics (gloves + agent model), keyed by owner SteamID like the weapon loop. Walks
 	// player controllers -> profiled pawns and applies the glove/agent model swap. Glove apply is
 	// change-gated (re-fires on glove/paint change, respawn, or m_bNeedToReApplyGloves) to avoid
@@ -316,6 +325,12 @@ private:
 	std::unordered_map<uint64_t, GloveApplyState> m_gloveState;
 	struct AgentApplyState { uint64_t hash = 0; uintptr_t pawn = 0; };
 	std::unordered_map<uint64_t, AgentApplyState> m_agentState;
+	// Per-owner knife model-swap throttle: fire ApplyKnifeModelSwap ONCE per (knife entity index, target
+	// def) so the engine's per-tick def revert doesn't re-fire it every frame (the per-frame re-swap was
+	// the crash). Re-fires when the knife entity is recreated (new index, e.g. redeploy/round) or the
+	// target def changes. Keyed by owner SteamID. Cleared on demo load/close + after a nudge play-out.
+	struct KnifeSwapState { int entityIndex = -1; int swappedDef = 0; bool lastActive = false; };
+	std::unordered_map<uint64_t, KnifeSwapState> m_knifeSwapState;
 	// Cumulative successful-apply counters (never reset per frame); see TotalKnifeApplied() etc.
 	uint64_t m_totalKnife = 0;
 	uint64_t m_totalWeaponMesh = 0;
@@ -334,6 +349,18 @@ private:
 	int m_lastApplyTick = -1;         // demo tick at the previous applied frame (seek detection)
 	int m_seekSettleFrames = 0;       // frames left to SKIP the apply after a seek so the entity list
 	                                  // finishes rebuilding before we touch it again (anti-crash)
+	int m_framesSinceSeek = 0;        // applied frames since the last detected seek. The knife model
+	                                  // swap (SetModel/UpdateSubclass -> rebuilds the weapon's animation
+	                                  // set) waits for a LONGER window than the 16-frame general settle
+	                                  // before firing: if it lands on an entity the engine is still
+	                                  // reconstructing after a (stacked) scrub, the animation state is
+	                                  // left inconsistent and faults seconds later, outside the SEH guard.
+	int m_lastCompositeTick = -1;     // demo tick of the last periodic composite re-assert (skin fix)
+	uint64_t m_compositeHoldUntilFrame = 0; // m_frameCounter until which the composite re-asserts EVERY
+	                                  // frame (frame-based, so it works even while PAUSED -- unlike the
+	                                  // tick periodic). Armed on each profile change AND when a tick-nudge
+	                                  // finishes playing out, so a change made while paused renders and
+	                                  // survives the engine's rebuild during the nudge play-out.
 	// Active nudge ("play out") state machine: 0 = idle, 1 = resumed and waiting to re-pause.
 	int m_nudgePhase = 0;
 	int m_nudgeStartTick = 0;         // demo tick when the resume began (to measure ticks played)
@@ -360,5 +387,14 @@ void Cosmetics_PrintSpectatedDebug(const char* cmd);
 // schema offsets (for an IDA/Ghidra xref pass), the active weapon handle, and the weapon's world
 // model path. Never writes. "cosmetics visualdiag".
 void Cosmetics_PrintVisualDiag(const char* cmd);
+// Compact ONE-LINE snapshot of a weapon's live econ skin state (class + defIndex, the networked
+// dynamic paint/seed/wear def6/7/8, and the fallback paint/wear), emitted to BOTH the game console
+// and the MVM debug log. `phase` labels the line ("before"/"after") so a UI skin click can log the
+// game-side read on both sides of the change, making it obvious whether the click altered what the
+// game reads. To reach a weapon the player OWNS but is not currently holding (holstered/inventory),
+// it first scans the entity list for a weapon owned by `steamId` whose live def == `targetDef`, and
+// only falls back to the spectated player's active/held weapon when targetDef<=0 or none is found.
+// Read-only. (CosmeticDebug.cpp)
+void Cosmetics_LogWeaponSnapshot(const char* cmd, const char* phase, uint64_t steamId, int targetDef);
 
 } // namespace Filmmaker

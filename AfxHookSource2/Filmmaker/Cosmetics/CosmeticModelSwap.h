@@ -58,8 +58,38 @@ uint64_t ResolveMeshMask(int paintKitId, bool knife, int legacyOverride,
 // SetModel(weapon), SetMeshGroupMask(weapon scene node, meshMask) when meshMask>0, writes
 // m_nSubclassID = token(targetDef) + UpdateSubclass(weapon). pawnForViewmodel (may be null) is used to
 // also SetModel the first-person viewmodel knife entity when present. Returns true if SetModel fired.
+// entityIndex is for diagnostics only (the world weapon's entity-list index) -- when mvm_debug is
+// running this path emits always-flushed "knife.swap"/"knife.vm" breadcrumbs around every native call
+// so the last line written before a crash pinpoints which step (SetModel / mesh / subclass / viewmodel
+// mirror / PostDataUpdate) faulted on a freshly-recreated entity during a quick weapon switch.
 bool ApplyKnifeModelSwap(unsigned char* weapon, unsigned char* itemView,
-	unsigned char* pawnForViewmodel, int targetDef, uint64_t meshMask);
+	unsigned char* pawnForViewmodel, int targetDef, uint64_t meshMask, int entityIndex = -1);
+
+// EXPERIMENTAL animgraph reset (candidate fix for the knife-type-swap animation crash, "approach #1").
+// After a knife SetModel, null the entity's animation-graph-instance networked-variables pointer -- the
+// `real-time-internal-overlay-research-main` technique (viewModel->pAnimationGraphInstance->
+// pAnimGraphNetworkedVariables = nullptr) -- so the graph rebuilds for the new model instead of posing it
+// with stale per-model data. The reference value (instance @ entity+0xD08, vars @ +0x2E0) is for the LOCAL
+// VIEWMODEL; the demo WORLD weapon layout differs, so the offsets are TUNABLE from the console
+// ("cosmetics animreset ..."). The write is SEH-guarded + pointer-sanity-checked and logged as a
+// "knife.swap step=animreset" breadcrumb (so a bad offset shows inst=garbage instead of corrupting state).
+void SetAnimGraphReset(bool enabled);
+bool AnimGraphReset();
+void SetAnimGraphResetOffsets(uint32_t instOff, uint32_t varsOff);
+void GetAnimGraphResetOffsets(uint32_t* instOff, uint32_t* varsOff);
+
+// PRECACHE the target model before SetModel ("approach #2", the proven root-cause fix). The knife-type
+// crash is a null per-model animation table: a raw SetModel points the replay weapon at a .vmdl whose
+// resource/anim data was never loaded in this demo (the player never carried that knife), so the engine's
+// async anim pass dereferences a null table (client.dll+0x3561c0 returns null -> +0x3399cc reads [null+8];
+// see docs/cosmetics-cs2-methodology-notes.md §11). PrecacheModelResource does a BLOCKING resource load
+// (resourcesystem.dll CResourceSystem::PreCache, the same call the skybox path uses) on the swap thread so
+// the model + its anim data are present before SetModel/the worker-thread pose. SEH-guarded; no-op if the
+// resource system is unavailable. Default ON; toggle via "cosmetics precache 0|1". Returns true if the
+// blocking load fired. A "knife.swap step=precache" breadcrumb records whether it ran for each swap.
+bool PrecacheModelResource(const char* modelPath);
+void SetPrecacheModels(bool enabled);
+bool PrecacheModels();
 
 // Set a weapon/world entity's mesh-group mask directly (legacy-vs-CS2 correction for a weapon skin
 // override that did NOT change the weapon type). Reads m_pGameSceneNode internally. No-op if mask==0.

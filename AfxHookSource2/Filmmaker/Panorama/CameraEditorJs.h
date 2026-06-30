@@ -488,6 +488,11 @@ R"EDJS(
     var custTargetIndex = -1, custTargetName = 'Player', custTargetTeam = '';
     var custTargetKey = 'pawn:-1', custActiveWeaponDef = 0, custActiveWeaponSlot = '', custDisplayedLoadoutSig = '';
     var custLoadout = { primary: null, secondary: null, knife: null, gloves: null };
+    // Which weapon def the primary/secondary blocks are CURRENTLY editing. 0 = follow the player's
+    // held weapon; > 0 = an explicit weapon the user picked from the weapon selector (so a skin can be
+    // assigned to ANY weapon, not just the one the player is holding). Each weapon def stores its own
+    // skin in the SteamID-keyed backend, so a player can carry a distinct skin on every weapon at once.
+    var custWeaponDef = { primary: 0, secondary: 0 };
     var WEAPON_SLOT_BY_DEF = {
       1:'secondary', 2:'secondary', 3:'secondary', 4:'secondary', 30:'secondary', 32:'secondary', 36:'secondary', 61:'secondary', 63:'secondary', 64:'secondary',
       7:'primary', 8:'primary', 9:'primary', 10:'primary', 11:'primary', 13:'primary', 14:'primary', 16:'primary', 17:'primary', 19:'primary', 23:'primary', 24:'primary', 25:'primary', 26:'primary', 27:'primary', 28:'primary', 29:'primary', 33:'primary', 34:'primary', 35:'primary', 38:'primary', 39:'primary', 60:'primary',
@@ -958,11 +963,49 @@ R"EDJS(
       }
       return [custTargetKey || '', normalizeTeamName(custTargetTeam), part('primary'), part('secondary'), part('knife'), part('gloves'), custLoadout.agentModel || ''].join('|');
     }
+    // Distinct weapons available for a primary/secondary slot (the weapon-selector list). Derives one
+    // entry per weapon def from the full skin catalog, preferring a real weapon name ("AK-47") over the
+    // generic "Default ... skin" label, and carrying that weapon's default thumbnail for the swatch.
+    function weaponsForSlot(slot) {
+      var arr = COSMETICS[slot] || [];
+      var byDef = {}, order = [];
+      for (var i = 0; i < arr.length; i++) {
+        var m = arr[i][2] || {};
+        var def = parseInt(m.def || 0, 10) || 0;
+        if (def <= 0) continue;
+        var label = '' + arr[i][0];
+        var hasSkinName = label.indexOf('|') >= 0;
+        var nm = (hasSkinName ? label.split('|')[0] : label).replace(/^\s+|\s+$/g, '');
+        if (!byDef[def]) { byDef[def] = { name: nm, color: m.color, img: m.img }; order.push(def); }
+        else if (hasSkinName) { byDef[def].name = nm; } // prefer a real "AK-47"-style name
+        if (parseInt(m.paint || 0, 10) === 0 && m.img && !byDef[def].img) byDef[def].img = m.img;
+      }
+      order.sort(function (a, b) { return (byDef[a].name < byDef[b].name) ? -1 : 1; });
+      var out = [];
+      for (var j = 0; j < order.length; j++) {
+        var d = order[j];
+        out.push([byDef[d].name || ('Weapon ' + d), '' + d,
+          { color: byDef[d].color || rarColor(0), def: d, paint: 0, img: byDef[d].img }]);
+      }
+      return out;
+    }
+    // The weapon def the primary/secondary skin dropdown currently targets: an explicitly-picked weapon
+    // if any, else the player's held weapon, else the first weapon in the catalog (so the block is
+    // usable even when the player is not holding a weapon in that slot).
+    function effectiveSlotDef(slot) {
+      if (slot !== 'primary' && slot !== 'secondary') return 0;
+      if (custWeaponDef[slot] > 0) return custWeaponDef[slot];
+      var held = (custLoadout[slot] && parseInt(custLoadout[slot].defIndex || 0, 10)) || 0;
+      if (held > 0) return held;
+      var ws = weaponsForSlot(slot);
+      return ws.length ? (parseInt(ws[0][1], 10) || 0) : 0;
+    }
     function filteredOptions(slot) {
       var arr = COSMETICS[slot] || [];
-      if ((slot === 'primary' || slot === 'secondary') && custLoadout[slot] && custLoadout[slot].defIndex > 0) {
+      if (slot === 'primary' || slot === 'secondary') {
+        var slotDef = effectiveSlotDef(slot);
+        if (slotDef <= 0) return [];
         var weaponOut = [];
-        var slotDef = parseInt(custLoadout[slot].defIndex || 0, 10) || 0;
         for (var wi = 0; wi < arr.length; wi++) {
           var wm = arr[wi][2] || {};
           var wPaint = parseInt(wm.paint || wm.paintKit || 0, 10) || 0;
@@ -972,7 +1015,6 @@ R"EDJS(
         }
         return weaponOut;
       }
-      if (slot === 'primary' || slot === 'secondary') return [];
       if (slot === 'knife') return knifeOptionsWithCurrentDefault(arr);
       if (slot !== 'agent') return arr;
       var team = normalizeTeamName(custTargetTeam);
@@ -1123,6 +1165,7 @@ R"EDJS(
       return 'default';
     }
     function resetSelectionsFromLoadout() {
+      custWeaponDef = { primary: 0, secondary: 0 }; // follow held weapons for a freshly-opened player
       custSel = {
         agent: agentDefaultSelection(),
         primary: loadoutDefaultSelection('primary'),
@@ -1163,6 +1206,7 @@ R"EDJS(
         };
         custWear = custPersist[key].wear || custWear;
         custItemWear = custPersist[key].itemWear || {};
+        custWeaponDef = custPersist[key].weaponDef || { primary: 0, secondary: 0 };
         loadActiveItemWear('primary');
         loadActiveItemWear('secondary');
         loadActiveItemWear('knife');
@@ -1181,7 +1225,7 @@ R"EDJS(
       for (var s in custWear) copyWear[s] = { preset: custWear[s].preset, custom: custWear[s].custom };
       var copyItemWear = {};
       for (var k in custItemWear) copyItemWear[k] = { preset: custItemWear[k].preset, custom: custItemWear[k].custom };
-      custPersist[currentPlayerKey()] = { baseSig: customizeLoadoutSignature(), sel: { agent: custSel.agent, primary: custSel.primary, secondary: custSel.secondary, knife: custSel.knife, gloves: custSel.gloves }, wear: copyWear, itemWear: copyItemWear };
+      custPersist[currentPlayerKey()] = { baseSig: customizeLoadoutSignature(), sel: { agent: custSel.agent, primary: custSel.primary, secondary: custSel.secondary, knife: custSel.knife, gloves: custSel.gloves }, wear: copyWear, itemWear: copyItemWear, weaponDef: { primary: custWeaponDef.primary, secondary: custWeaponDef.secondary } };
     }
 
     // RIGHT: final loadout-style controls. No arms/viewmodel override and no CT/T glove split.
@@ -1193,6 +1237,10 @@ R"EDJS(
       var b = mk('Panel', ctrlCol); b.style.flowChildren = 'down'; b.style.width = '100%'; b.style.marginBottom = '14px';
       var t = lbl(b, title, S.dim, 11); t.style.fontWeight = 'bold'; t.style.letterSpacing = '2px'; t.style.marginBottom = '5px';
       return b;
+    }
+    function miniLabel(parent, text) {
+      var l = lbl(parent, text, S.dim, 10); l.style.marginTop = '4px'; l.style.marginBottom = '2px';
+      l.style.letterSpacing = '1px'; return l;
     }
     function wearBlock(parent, slot) {
       var wrap = mk('Panel', parent); wrap.style.width = '100%'; wrap.style.flowChildren = 'down'; wrap.style.marginTop = '6px';
@@ -1214,9 +1262,15 @@ R"EDJS(
     var agentBlock = slotBlock('AGENT');
     var agentDrop  = itemDrop(agentBlock, 'CustAgent', function (v) { pickCosmetic('agent', v); });
     var primaryBlock = slotBlock('PRIMARY');
+    miniLabel(primaryBlock, 'Weapon');
+    var primaryWeaponDrop = itemDrop(primaryBlock, 'CustPrimaryWeapon', function (v) { pickWeapon('primary', v); });
+    miniLabel(primaryBlock, 'Finish');
     var primaryDrop = itemDrop(primaryBlock, 'CustPrimary', function (v) { pickCosmetic('primary', v); });
     var primaryWear = wearBlock(primaryBlock, 'primary');
     var secondaryBlock = slotBlock('SECONDARY');
+    miniLabel(secondaryBlock, 'Weapon');
+    var secondaryWeaponDrop = itemDrop(secondaryBlock, 'CustSecondaryWeapon', function (v) { pickWeapon('secondary', v); });
+    miniLabel(secondaryBlock, 'Finish');
     var secondaryDrop = itemDrop(secondaryBlock, 'CustSecondary', function (v) { pickCosmetic('secondary', v); });
     var secondaryWear = wearBlock(secondaryBlock, 'secondary');
     var knifeBlock = slotBlock('MELEE / KNIFE');
@@ -1284,6 +1338,13 @@ R"EDJS(
       var def = parseInt(meta.def || 0, 10) || 0;
       var pk = parseInt(meta.paint || meta.paintKit || 0, 10) || 0;
       var wear = wearValue(slot).toFixed(4);
+      // Echo the VERBATIM skin label the user clicked (exactly the dropdown text, e.g. "AK-47 |
+      // Redline" / "Skeleton Knife") to the game console + MVM debug log, so the human-readable name
+      // appears right next to the native before/after weapon snapshot. Strip characters that would
+      // break the console-command tokenizer; the native "uilog" handler joins the tokens back.
+      var label = (opt && opt[0]) ? ('' + opt[0]) : '(unknown)';
+      var safeLabel = label.replace(/["';\r\n]+/g, ' ').replace(/\s+/g, ' ');
+      cmd('mirv_filmmaker cosmetics uilog [' + slot + '] ' + safeLabel + ' (def ' + def + ' paint ' + pk + ' wear ' + wear + ')');
       var sent = false;
       var command = '';
       if ((slot === 'primary' || slot === 'secondary') && def > 0) {
@@ -1317,16 +1378,35 @@ R"EDJS(
       updatePreview();
       applyCosmeticCommand(slot);
     }
+    // Re-target which weapon a primary/secondary block edits (the weapon selector). Resets the finish
+    // dropdown to that weapon's vanilla default and repopulates; does NOT emit a cosmetic command on its
+    // own -- only picking a FINISH applies (so merely browsing weapons changes nothing in the demo).
+    function pickWeapon(slot, value) {
+      if (slot !== 'primary' && slot !== 'secondary') return;
+      var def = parseInt(value, 10) || 0;
+      if (def <= 0) return;
+      saveActiveItemWear(slot);
+      custWeaponDef[slot] = def;
+      custSel[slot] = optionExists(slot, def + ':0') ? (def + ':0') : '0';
+      loadActiveItemWear(slot);
+      persistPlayerSelections();
+      populateCustomize();
+      updatePreview();
+    }
     function populateCustomize() {
       coerceSelection('agent');
       coerceSelection('primary');
       coerceSelection('secondary');
       coerceSelection('knife');
       coerceSelection('gloves');
-      primaryBlock.visible = !!(custLoadout.primary && custLoadout.primary.defIndex > 0);
-      secondaryBlock.visible = !!(custLoadout.secondary && custLoadout.secondary.defIndex > 0);
-      knifeBlock.visible = !!(custLoadout.knife && custLoadout.knife.defIndex > 0);
+      // Primary/secondary blocks are ALWAYS shown now: the weapon selector lets the user assign a skin
+      // to any weapon, including ones the player is not currently holding.
+      primaryBlock.visible = true;
+      secondaryBlock.visible = true;
+      knifeBlock.visible = true;
       agentDrop.update(decoratedOptions('agent'), custSel.agent);
+      primaryWeaponDrop.update(weaponsForSlot('primary'), '' + effectiveSlotDef('primary'));
+      secondaryWeaponDrop.update(weaponsForSlot('secondary'), '' + effectiveSlotDef('secondary'));
       primaryDrop.update(decoratedOptions('primary'), custSel.primary);
       secondaryDrop.update(decoratedOptions('secondary'), custSel.secondary);
       knifeDrop.update(decoratedOptions('knife'), custSel.knife);

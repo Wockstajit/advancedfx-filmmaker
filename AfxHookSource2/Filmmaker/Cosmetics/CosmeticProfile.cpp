@@ -12,28 +12,44 @@
 namespace Filmmaker {
 
 bool CosmeticProfile::Empty() const {
-	return !primary.set && !secondary.set && !knife.set && !gloves.set && !agent.set;
+	if (knife.set || gloves.set || agent.set)
+		return false;
+	for (const auto& [def, item] : weapons)
+		if (item.set)
+			return false;
+	return true;
+}
+
+CosmeticItem* CosmeticProfile::FindWeapon(int defIndex) {
+	auto it = weapons.find(defIndex);
+	return it != weapons.end() ? &it->second : nullptr;
+}
+
+const CosmeticItem* CosmeticProfile::FindWeapon(int defIndex) const {
+	auto it = weapons.find(defIndex);
+	return it != weapons.end() ? &it->second : nullptr;
 }
 
 namespace {
 
-// Slot names as written in / read from the JSON document.
-constexpr const char* kSlotNames[] = { "primary", "secondary", "knife", "gloves" };
+// Single-slot names as written in / read from the JSON document (per-weapon overrides live under the
+// separate "weapons" object, keyed by def index -- see WriteWeapons/ReadWeapons).
+constexpr const char* kSlotNames[] = { "knife", "gloves" };
 
 CosmeticItem* SlotByName(CosmeticProfile& p, const char* name) {
-	if (std::strcmp(name, "primary") == 0) return &p.primary;
-	if (std::strcmp(name, "secondary") == 0) return &p.secondary;
 	if (std::strcmp(name, "knife") == 0) return &p.knife;
 	if (std::strcmp(name, "gloves") == 0) return &p.gloves;
 	return nullptr;
 }
 
-const CosmeticItem* SlotByName(const CosmeticProfile& p, const char* name) {
-	if (std::strcmp(name, "primary") == 0) return &p.primary;
-	if (std::strcmp(name, "secondary") == 0) return &p.secondary;
-	if (std::strcmp(name, "knife") == 0) return &p.knife;
-	if (std::strcmp(name, "gloves") == 0) return &p.gloves;
-	return nullptr;
+// Writes the value fields of one item (no key, no enclosing object) -- the caller opens the object so
+// the same body serves both the named single slots and the def-index-keyed weapons map.
+void WriteItemFields(JsonBuilder& b, const CosmeticItem& item) {
+	b.IntField("defIndex", item.defIndex);
+	b.IntField("paintKit", item.paintKit);
+	b.DoubleField("wear", item.wear);
+	b.IntField("seed", item.seed);
+	b.IntField("statTrak", item.statTrak);
 }
 
 void WriteItem(JsonBuilder& b, const char* slotName, const CosmeticItem& item) {
@@ -41,11 +57,7 @@ void WriteItem(JsonBuilder& b, const char* slotName, const CosmeticItem& item) {
 		return;
 	b.Key(slotName);
 	b.BeginObject();
-	b.IntField("defIndex", item.defIndex);
-	b.IntField("paintKit", item.paintKit);
-	b.DoubleField("wear", item.wear);
-	b.IntField("seed", item.seed);
-	b.IntField("statTrak", item.statTrak);
+	WriteItemFields(b, item);
 	b.EndObject();
 }
 
@@ -114,8 +126,22 @@ bool CosmeticProfileStore::Save() const {
 		b.BeginObject();
 		if (!profile.name.empty())
 			b.StringField("name", profile.name);
-		WriteItem(b, "primary", profile.primary);
-		WriteItem(b, "secondary", profile.secondary);
+		// Per-weapon overrides: a "weapons" object keyed by weapon def index.
+		bool anyWeapon = false;
+		for (const auto& [def, item] : profile.weapons) { if (item.set) { anyWeapon = true; break; } }
+		if (anyWeapon) {
+			b.Key("weapons");
+			b.BeginObject();
+			for (const auto& [def, item] : profile.weapons) {
+				if (!item.set)
+					continue;
+				b.Key(std::to_string(def).c_str());
+				b.BeginObject();
+				WriteItemFields(b, item);
+				b.EndObject();
+			}
+			b.EndObject();
+		}
 		WriteItem(b, "knife", profile.knife);
 		WriteItem(b, "gloves", profile.gloves);
 		if (profile.agent.set) {
@@ -172,6 +198,22 @@ bool CosmeticProfileStore::Load() {
 				if (!item)
 					continue;
 				ReadItem(FindIn(&value, slotName), *item);
+			}
+
+			// Per-weapon overrides under "weapons" (keyed by def index string).
+			if (const JsonValue* weapons = FindIn(&value, "weapons")) {
+				if (weapons->type == JsonValue::Type::Object) {
+					for (const auto& [wkey, wval] : weapons->obj) {
+						int def = (int)std::strtol(wkey.c_str(), nullptr, 10);
+						if (def <= 0 || wval.type != JsonValue::Type::Object)
+							continue;
+						CosmeticItem item;
+						ReadItem(&wval, item);
+						item.defIndex = def; // the map key is authoritative for the weapon identity
+						if (item.set)
+							p.weapons[def] = item;
+					}
+				}
 			}
 
 			if (const JsonValue* agentObj = FindIn(&value, "agent")) {

@@ -47,6 +47,20 @@ bool MvmConsoleCapture_Active();
 // Appends a categorized event. The category + exact payload form the deduplication identity.
 void MvmDebugLog_Linef(const char* category, const char* fmt, ...);
 
+// Like MvmDebugLog_Linef but NEVER deduplicated -- every call writes its own line immediately. Use
+// for discrete user actions (e.g. a UI skin click) where each occurrence matters even when its
+// payload repeats an earlier one; the normal dedup would hide repeat clicks until the log is stopped.
+void MvmDebugLog_LinefAlways(const char* category, const char* fmt, ...);
+
+// Crash breadcrumb: a vectored exception handler (registered while a log is open) logs first-chance
+// ACCESS VIOLATIONS -- faulting module+offset, access type, thread, and the last knife swap context --
+// but ONLY during the short window after MvmCrashWatch_Arm() is called. The step breadcrumbs only
+// cover OUR calls; these crashes fault downstream in the engine while it animates/renders a swapped
+// model, so the LAST "crash.veh" line before the process dies pinpoints WHERE that fault is. Arm() is
+// called by the knife model swap right before it touches the entity, so the window covers the
+// post-swap animation/render frames without logging unrelated handled exceptions the rest of the time.
+void MvmCrashWatch_Arm(int entityIndex, const char* model);
+
 // Logs an engine-tokenized command without losing quoted/space-containing arguments.
 void MvmDebugLog_Command(advancedfx::ICommandArgs* args);
 

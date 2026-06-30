@@ -9,6 +9,7 @@
 #include "CosmeticOverrideSystem.h"
 #include "CosmeticDebugLog.h"
 #include "CosmeticModelSwap.h"
+#include "CosmeticAnimFix.h"
 
 #include "../../../shared/AfxConsole.h"
 
@@ -67,6 +68,7 @@ void PrintUsage(const char* cmd) {
 		"  %s cosmetics debug [0|1]\n"
 		"  %s cosmetics clear\n"
 		"  %s cosmetics clearPlayer <steamId|current>\n"
+		"  %s cosmetics clearWeapon <steamId|current> <defIndex>\n"
 		"  %s cosmetics target current\n"
 		"  %s cosmetics player <steamId|current> weapon <defIndex> [paint=N] [wear=F] [seed=N] [stattrak=N]\n"
 		"  %s cosmetics player <steamId|current> knife <defIndex> [paint=N] [wear=F] [seed=N]\n"
@@ -81,13 +83,17 @@ void PrintUsage(const char* cmd) {
 			"  %s cosmetics composite once [ownerOffsetHex]   (experimental direct composite refresh)\n"
 			"  %s cosmetics autocomposite [0|1]   (auto-refresh skin render on change; default 1)\n"
 			"  %s cosmetics modelswap [0|1 | knife 0|1]   (model swaps incl. knife type; both default on)\n"
+			"  %s cosmetics animreset [0|1 | offsets <instHex> <varsHex>]   (experimental: null animgraph vars after a knife SetModel)\n"
+			"  %s cosmetics precache [0|1]   (blocking-load the knife/agent model before SetModel; default on)\n"
+			"  %s cosmetics animfix [0|1]   (detour client.dll anim builder; empty-list for null out-param; THE knife-crash fix; default on)\n"
 			"  %s cosmetics ticknudge [on|off|<ticks>]   (briefly play the demo after a change so body swaps re-render)\n"
 			"  %s cosmetics debuglog [start|stop]   (timestamped debug log; alias: mvm_debug start|stop)\n"
+			"  %s cosmetics uilog <text>   (echo a verbatim UI label to the console + debug log; sent by the Customize panel)\n"
 			"  %s cosmetics mesh [auto|modern|legacy | masks <m> <l>]   (legacy-vs-CS2 weapon mesh selection)\n"
 			"  %s cosmetics recompose [0|1]   (force material re-composite after writes)\n"
 			"  %s cosmetics vtidx <comp> <sec>   (tune UpdateComposite vtable indices, -1=skip)\n"
 			"  %s cosmetics vtprobe <idx>   (bisect OnDataChanged: call weapon vtable[idx](this,0) now)\n",
-		cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd);
+		cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd);
 }
 
 // Parses ORDER-INDEPENDENT key/value tokens of the form "key=value" (or "key value", to be lenient)
@@ -165,6 +171,21 @@ void DoClearPlayer(int argc, advancedfx::ICommandArgs* args, const char* cmd) {
 	advancedfx::Message("%s cosmetics: cleared profile for steamId %llu.\n", cmd, (unsigned long long)id);
 }
 
+void DoClearWeapon(int argc, advancedfx::ICommandArgs* args, const char* cmd) {
+	if (argc < 5) {
+		advancedfx::Warning("usage: %s cosmetics clearWeapon <steamId|current> <defIndex>\n", cmd);
+		return;
+	}
+	uint64_t id = ResolveSteamIdArg(cmd, args->ArgV(3));
+	if (id == 0)
+		return;
+	int defIndex = atoi(args->ArgV(4));
+	CosmeticsRef().ClearWeapon(id, defIndex);
+	CosmeticsRef().RequestApplyNudge();
+	advancedfx::Message("%s cosmetics: cleared weapon def=%d for steamId %llu.\n",
+		cmd, defIndex, (unsigned long long)id);
+}
+
 void DoTarget(int argc, advancedfx::ICommandArgs* args, const char* cmd) {
 	const char* sub = (argc >= 4) ? args->ArgV(3) : "";
 	if (!TokenIs(sub, "current")) {
@@ -201,10 +222,19 @@ void DoPlayer(int argc, advancedfx::ICommandArgs* args, const char* cmd) {
 		int seed = 0;
 		int statTrak = -1;
 		ParseItemKeyValueArgs(argc, args, 6, &paintKit, &wear, &seed, &statTrak);
+		// UI skin-click diagnostics: log what the UI requested + the game's live read of the weapon
+		// BEFORE the override, apply it NOW (so the skin changes immediately while the weapon is up),
+		// then log the live read AFTER. RebuildOnce is the same immediate-apply the user sees; the crash
+		// being chased happens later on a quick weapon SWITCH (entity recreation), not here.
+		advancedfx::Message("%s cosmetics uiclick request: slot=weapon def=%d paint=%d wear=%.4f seed=%d stattrak=%d (what the UI sent).\n",
+			cmd, defIndex, paintKit, wear, seed, statTrak);
+		Cosmetics_LogWeaponSnapshot(cmd, "before", id, defIndex);
 		CosmeticsRef().SetWeapon(id, defIndex, paintKit, wear, seed, statTrak);
 		advancedfx::Message("%s cosmetics: weapon steamId=%llu def=%d paint=%d wear=%.4f seed=%d stattrak=%d.\n",
 			cmd, (unsigned long long)id, defIndex, paintKit, wear, seed, statTrak);
 		AfterMutation(cmd);
+		CosmeticsRef().RebuildOnce(); // apply the override to live weapons NOW so the change shows immediately
+		Cosmetics_LogWeaponSnapshot(cmd, "after", id, defIndex);
 	} else if (TokenIs(slot, "knife")) {
 		int defIndex = atoi(args->ArgV(5));
 		int paintKit = 0;
@@ -212,10 +242,18 @@ void DoPlayer(int argc, advancedfx::ICommandArgs* args, const char* cmd) {
 		int seed = 0;
 		int statTrak = -1; // unused for knives, parsed for symmetry/leniency only
 		ParseItemKeyValueArgs(argc, args, 6, &paintKit, &wear, &seed, &statTrak);
+		advancedfx::Message("%s cosmetics uiclick request: slot=knife def=%d paint=%d wear=%.4f seed=%d (what the UI sent).\n",
+			cmd, defIndex, paintKit, wear, seed);
+		// Snapshot the active knife (targetDef=0, since a type swap rewrites the live def). Apply NOW so
+		// the knife changes immediately while it is up; the crash being chased is the later re-swap onto
+		// the entity the engine recreates during a quick weapon switch (instrumented in the swap path).
+		Cosmetics_LogWeaponSnapshot(cmd, "before", id, 0);
 		CosmeticsRef().SetKnife(id, defIndex, paintKit, wear, seed);
 		advancedfx::Message("%s cosmetics: knife steamId=%llu def=%d paint=%d wear=%.4f seed=%d.\n",
 			cmd, (unsigned long long)id, defIndex, paintKit, wear, seed);
 		AfterMutation(cmd);
+		CosmeticsRef().RebuildOnce(); // apply NOW so the knife change shows immediately
+		Cosmetics_LogWeaponSnapshot(cmd, "after", id, 0);
 	} else if (TokenIs(slot, "gloves")) {
 		int defIndex = atoi(args->ArgV(5));
 		int paintKit = 0;
@@ -223,6 +261,11 @@ void DoPlayer(int argc, advancedfx::ICommandArgs* args, const char* cmd) {
 		int seed = 0;
 		int statTrak = -1; // unused for gloves, parsed for symmetry/leniency only
 		ParseItemKeyValueArgs(argc, args, 6, &paintKit, &wear, &seed, &statTrak);
+		// Gloves are a PAWN body-level item (not an econ weapon entity), so the weapon snapshot does
+		// not apply; the verbatim name still comes through the JS "uilog" line and the apply happens via
+		// the nudge in AfterMutation.
+		advancedfx::Message("%s cosmetics uiclick request: slot=gloves def=%d paint=%d wear=%.4f seed=%d (what the UI sent).\n",
+			cmd, defIndex, paintKit, wear, seed);
 		CosmeticsRef().SetGloves(id, defIndex, paintKit, wear, seed);
 		advancedfx::Message("%s cosmetics: gloves steamId=%llu def=%d paint=%d wear=%.4f seed=%d.\n",
 			cmd, (unsigned long long)id, defIndex, paintKit, wear, seed);
@@ -375,6 +418,61 @@ void DoModelSwap(int argc, advancedfx::ICommandArgs* args, const char* cmd) {
 	if (!CosmeticsRef().ModelSwapResolved())
 		advancedfx::Warning("%s cosmetics: model-swap client.dll functions did NOT all resolve; knife/agent/glove "
 			"swaps will be skipped (paint-only still works).\n", cmd);
+}
+
+// Experimental animgraph reset (approach #1): after a knife SetModel, null the entity's
+// CAnimationGraphInstance->pAnimGraphNetworkedVariables so the graph rebuilds for the new model. The
+// reference offsets (0xD08/0x2E0) are for the local viewmodel; the demo world weapon differs, so they are
+// live-tunable here. Watch the "knife.swap step=animreset.world" breadcrumb: inst=0 means the instance
+// offset is wrong for the world weapon (tune with "animreset offsets <instHex> <varsHex>").
+void DoAnimReset(int argc, advancedfx::ICommandArgs* args, const char* cmd) {
+	if (argc >= 4) {
+		if (TokenIs(args->ArgV(3), "offsets")) {
+			if (argc < 6) {
+				advancedfx::Warning("usage: %s cosmetics animreset offsets <instOffsetHex> <varsOffsetHex>\n", cmd);
+				return;
+			}
+			uint32_t instOff = (uint32_t)strtoul(args->ArgV(4), nullptr, 0);
+			uint32_t varsOff = (uint32_t)strtoul(args->ArgV(5), nullptr, 0);
+			SetAnimGraphResetOffsets(instOff, varsOff);
+		} else {
+			SetAnimGraphReset(0 != atoi(args->ArgV(3)));
+		}
+	}
+	uint32_t instOff = 0, varsOff = 0;
+	GetAnimGraphResetOffsets(&instOff, &varsOff);
+	advancedfx::Message("%s cosmetics: animreset=%d instOff=0x%x varsOff=0x%x "
+		"(experimental: null entity animgraph networked-vars after a knife SetModel; see knife.swap animreset breadcrumb).\n",
+		cmd, AnimGraphReset() ? 1 : 0, instOff, varsOff);
+}
+
+// Approach #2 (root-cause knife-crash fix): blocking-precache the target model before SetModel so the
+// engine's async anim pass finds non-null per-model anim data instead of crashing (see
+// docs/cosmetics-cs2-methodology-notes.md §11). Default ON. Watch the "knife.swap step=precache" breadcrumb:
+// fired=1 means the blocking load ran; a clean swap with NO "crash.veh client.dll" line afterward = fixed.
+void DoPrecache(int argc, advancedfx::ICommandArgs* args, const char* cmd) {
+	if (argc >= 4)
+		SetPrecacheModels(0 != atoi(args->ArgV(3)));
+	advancedfx::Message("%s cosmetics: precache = %d (blocking-load the knife/agent model before SetModel; "
+		"the root-cause fix for the knife-type-swap crash).\n", cmd, PrecacheModels() ? 1 : 0);
+}
+
+// Approach #3 (the working knife-crash fix): a client.dll detour that substitutes an EMPTY sequence list
+// when the engine's anim builder returns a null out-param for an unloaded model (see CosmeticAnimFix.h).
+// Default ON; installs lazily on the first knife swap. "animfix 0" makes it a pass-through so the crash
+// reproduces (A/B). Reports install state + how many null out-params it has neutralized.
+void DoAnimFix(int argc, advancedfx::ICommandArgs* args, const char* cmd) {
+	EnsureAnimCrashFixInstalled(); // install now so 'animfix' alone reports a meaningful state
+	if (argc >= 4)
+		SetAnimCrashFix(0 != atoi(args->ArgV(3)));
+	advancedfx::Message("%s cosmetics: animfix=%d installed=%d fills=%llu "
+		"(detours client.dll anim builder; substitutes an empty seq-list for a null out-param -> "
+		"knife-type swaps to unloaded models no longer crash).\n",
+		cmd, AnimCrashFix() ? 1 : 0, AnimCrashFixInstalled() ? 1 : 0,
+		(unsigned long long)AnimCrashFixFills());
+	if (!AnimCrashFixInstalled())
+		advancedfx::Warning("%s cosmetics: animfix could NOT install (pattern miss); knife-type swaps to "
+			"unloaded models will still crash.\n", cmd);
 }
 
 // Legacy-vs-CS2 mesh-group selection tuning. "mesh" with no args prints the state; "mesh auto|modern|legacy"
@@ -548,6 +646,27 @@ void DoDebugLog(int argc, advancedfx::ICommandArgs* args, const char* cmd) {
 	}
 }
 
+// Verbatim UI passthrough: the Customize panel sends the EXACT skin label the user clicked (e.g.
+// "AK-47 | Redline", "Skeleton Knife") so the human-readable name appears in the console + MVM debug
+// log right next to the before/after weapon snapshot. The label arrives as argv[3..] (a quoted label
+// is one token; an unquoted one is several) -- joined back with single spaces. Pure logging, no state.
+void DoUiLog(int argc, advancedfx::ICommandArgs* args, const char* cmd) {
+	std::string text;
+	for (int i = 3; i < argc; ++i) {
+		const char* tok = args->ArgV(i);
+		if (!tok || !*tok)
+			continue;
+		if (!text.empty())
+			text += ' ';
+		text += tok;
+	}
+	if (text.empty())
+		text = "(empty)";
+	advancedfx::Message("%s cosmetics uiclick label: %s\n", cmd, text.c_str());
+	if (MvmDebugLog_Active())
+		MvmDebugLog_LinefAlways("cosmetics.uiclick", "label %s", text.c_str());
+}
+
 } // namespace
 
 void Cosmetics_RunCommand(int argc, advancedfx::ICommandArgs* args, const char* cmd) {
@@ -563,6 +682,8 @@ void Cosmetics_RunCommand(int argc, advancedfx::ICommandArgs* args, const char* 
 		DoClear(cmd);
 	} else if (TokenIs(sub, "clearPlayer")) {
 		DoClearPlayer(argc, args, cmd);
+	} else if (TokenIs(sub, "clearWeapon")) {
+		DoClearWeapon(argc, args, cmd);
 	} else if (TokenIs(sub, "target")) {
 		DoTarget(argc, args, cmd);
 	} else if (TokenIs(sub, "player")) {
@@ -583,10 +704,18 @@ void Cosmetics_RunCommand(int argc, advancedfx::ICommandArgs* args, const char* 
 		DoAutoComposite(argc, args, cmd);
 	} else if (TokenIs(sub, "modelswap")) {
 		DoModelSwap(argc, args, cmd);
+	} else if (TokenIs(sub, "animreset")) {
+		DoAnimReset(argc, args, cmd);
+	} else if (TokenIs(sub, "precache")) {
+		DoPrecache(argc, args, cmd);
+	} else if (TokenIs(sub, "animfix")) {
+		DoAnimFix(argc, args, cmd);
 	} else if (TokenIs(sub, "ticknudge")) {
 		DoTickNudge(argc, args, cmd);
 	} else if (TokenIs(sub, "debuglog")) {
 		DoDebugLog(argc, args, cmd);
+	} else if (TokenIs(sub, "uilog")) {
+		DoUiLog(argc, args, cmd);
 	} else if (TokenIs(sub, "mesh")) {
 		DoMesh(argc, args, cmd);
 	} else if (TokenIs(sub, "recompose")) {

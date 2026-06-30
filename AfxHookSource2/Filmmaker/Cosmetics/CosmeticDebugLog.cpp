@@ -49,6 +49,93 @@ std::map<std::string, PendingEvent> g_eventsByIdentity;
 MvmDebugLogStats g_stats;
 uint64_t g_sequence = 0;
 
+// --- crash breadcrumb (vectored exception handler) ------------------------------------------------
+PVOID g_vehHandle = nullptr;
+std::atomic<unsigned long long> g_crashWatchUntilMs(0); // GetTickCount64() deadline; 0 = window closed
+std::atomic<int> g_crashLogged(0);                      // cap how many AVs we record per session
+std::atomic<int> g_lastSwapIdx(-1);
+char g_lastSwapModel[260] = {};                         // racy w.r.t. the VEH thread, acceptable for a crumb
+
+// Our own module handle, resolved once from the address of a global in our data section -- used to skip
+// faults that originate INSIDE AfxHookSource2.dll (those are our own SEH-guarded reads faulting and being
+// caught by __except; noise, not the crash, which is in client.dll/engine).
+HMODULE SelfModule() {
+	static HMODULE s_self = nullptr;
+	if (!s_self)
+		GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+			(LPCSTR)&g_lastSwapModel, &s_self);
+	return s_self;
+}
+
+// First-chance AV logger. Returns CONTINUE_SEARCH ALWAYS -- it never swallows, so the game's own SEH /
+// crash handling proceeds exactly as before; we only observe. Gated to (a) a log being open and (b) the
+// post-swap watch window. SKIPS faults inside our own module (our SEH-guarded reads fault+catch every
+// frame -- in a non-crashing run that flooded the log with hundreds of identical AfxHookSource2.dll lines
+// and could mask the real client.dll crash) and de-dupes consecutive identical fault sites. Defensive:
+// AV only, recursion-guarded, capped.
+LONG CALLBACK MvmVectoredHandler(EXCEPTION_POINTERS* ep) {
+	if (!ep || !ep->ExceptionRecord)
+		return EXCEPTION_CONTINUE_SEARCH;
+	if (ep->ExceptionRecord->ExceptionCode != EXCEPTION_ACCESS_VIOLATION)
+		return EXCEPTION_CONTINUE_SEARCH;
+	if (!g_active.load(std::memory_order_acquire))
+		return EXCEPTION_CONTINUE_SEARCH;
+	if (GetTickCount64() >= g_crashWatchUntilMs.load(std::memory_order_acquire))
+		return EXCEPTION_CONTINUE_SEARCH;
+	static thread_local int s_inHandler = 0; // avoid recursion if logging itself faults
+	if (s_inHandler)
+		return EXCEPTION_CONTINUE_SEARCH;
+	s_inHandler = 1;
+
+	void* addr = ep->ExceptionRecord->ExceptionAddress;
+
+	// Resolve the faulting module FIRST, before the cap, so our own caught faults can't burn the budget.
+	char modName[64] = "?";
+	unsigned long long off = 0;
+	HMODULE hmod = nullptr;
+	if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+			(LPCSTR)addr, &hmod) && hmod) {
+		char full[MAX_PATH];
+		if (GetModuleFileNameA(hmod, full, MAX_PATH)) {
+			const char* base = full;
+			for (const char* p = full; *p; ++p)
+				if (*p == '\\' || *p == '/') base = p + 1;
+			size_t i = 0;
+			for (; base[i] && i + 1 < sizeof(modName); ++i) modName[i] = base[i];
+			modName[i] = '\0';
+		}
+		off = (unsigned long long)((unsigned char*)addr - (unsigned char*)hmod);
+	}
+
+	// Skip our own module (caught SEH reads) and consecutive repeats of the same fault site.
+	static unsigned long long s_lastRip = 0;
+	if ((hmod && hmod == SelfModule()) || (unsigned long long)addr == s_lastRip) {
+		s_inHandler = 0;
+		return EXCEPTION_CONTINUE_SEARCH;
+	}
+	if (g_crashLogged.fetch_add(1, std::memory_order_acq_rel) >= 64) {
+		s_inHandler = 0;
+		return EXCEPTION_CONTINUE_SEARCH;
+	}
+	s_lastRip = (unsigned long long)addr;
+
+	const char* access = "?";
+	unsigned long long target = 0;
+	if (ep->ExceptionRecord->NumberParameters >= 2) {
+		const ULONG_PTR* info = ep->ExceptionRecord->ExceptionInformation;
+		target = (unsigned long long)info[1];
+		access = (info[0] == 0) ? "read" : (info[0] == 1 ? "write" : (info[0] == 8 ? "execute" : "?"));
+	}
+
+	MvmDebugLog_LinefAlways("crash.veh",
+		"ACCESS_VIOLATION %s faultRip=%p mod=%s+0x%llx target=0x%llx thread=%lu lastSwapIdx=%d lastModel='%s'",
+		access, addr, modName, off, target, (unsigned long)GetCurrentThreadId(),
+		g_lastSwapIdx.load(std::memory_order_relaxed), g_lastSwapModel);
+
+	s_inHandler = 0;
+	return EXCEPTION_CONTINUE_SEARCH;
+}
+
 EventMeta CaptureMetaLocked() {
 	EventMeta out;
 	GetLocalTime(&out.time);
@@ -123,7 +210,7 @@ std::string SingleLine(const char* text) {
 	return out;
 }
 
-void LineV(const char* category, const char* fmt, va_list args) {
+void LineV(const char* category, bool dedup, const char* fmt, va_list args) {
 	if (!g_active.load(std::memory_order_acquire))
 		return;
 	std::string message = FormatMessage(fmt, args);
@@ -134,6 +221,18 @@ void LineV(const char* category, const char* fmt, va_list args) {
 	const EventMeta meta = CaptureMetaLocked();
 	++g_stats.eventsReceived;
 	const char* safeCategory = category ? category : "event";
+
+	// Non-deduped path: write the line immediately, every time. Discrete user actions (a skin click)
+	// must never be folded into a repeat summary, or a click that repeats an earlier state would look
+	// like "nothing happened" until the log is stopped.
+	if (!dedup) {
+		PrintMetaLocked(meta, safeCategory);
+		fprintf(g_file, "%s\n", message.c_str());
+		fflush(g_file);
+		++g_stats.uniqueEventsWritten;
+		return;
+	}
+
 	std::string identity(safeCategory);
 	identity.push_back('\n');
 	identity += message;
@@ -196,6 +295,12 @@ bool MvmDebugLog_Start(std::string* outFile) {
 	fflush(g_file);
 	g_active.store(true, std::memory_order_release);
 
+	// Arm the crash breadcrumb handler for this session (only logs within a post-swap window).
+	g_crashLogged.store(0, std::memory_order_release);
+	g_crashWatchUntilMs.store(0, std::memory_order_release);
+	if (!g_vehHandle)
+		g_vehHandle = AddVectoredExceptionHandler(1 /*call first*/, MvmVectoredHandler);
+
 	if (outFile)
 		*outFile = WideToUtf8(g_fileW);
 	return true;
@@ -206,6 +311,11 @@ bool MvmDebugLog_Stop(std::string* outFolder, std::string* outFile, MvmDebugLogS
 	if (!g_file)
 		return false;
 	g_active.store(false, std::memory_order_release);
+	g_crashWatchUntilMs.store(0, std::memory_order_release);
+	if (g_vehHandle) {
+		RemoveVectoredExceptionHandler(g_vehHandle);
+		g_vehHandle = nullptr;
+	}
 	FlushAllRepeatsLocked();
 
 	SYSTEMTIME st;
@@ -236,8 +346,30 @@ MvmDebugLogStats MvmDebugLog_GetStats() {
 void MvmDebugLog_Linef(const char* category, const char* fmt, ...) {
 	va_list ap;
 	va_start(ap, fmt);
-	LineV(category, fmt, ap);
+	LineV(category, /*dedup=*/true, fmt, ap);
 	va_end(ap);
+}
+
+void MvmDebugLog_LinefAlways(const char* category, const char* fmt, ...) {
+	va_list ap;
+	va_start(ap, fmt);
+	LineV(category, /*dedup=*/false, fmt, ap);
+	va_end(ap);
+}
+
+void MvmCrashWatch_Arm(int entityIndex, const char* model) {
+	// Open a 30-second window during which the vectored handler records access violations. Re-armed on
+	// every swap/re-fire, so it stays open across the post-swap animation frames where the crash lands.
+	// Widened from 5s -> 30s after mvm_debug_20260629_125401.log: the crash landed at +5.24s (a delayed
+	// weapon-switch/QQ pose, not the immediate post-swap frame) just outside the old window, so NO crash.veh
+	// line was recorded. Self-module skip + same-RIP de-dup already keep the log from flooding over 30s.
+	g_lastSwapIdx.store(entityIndex, std::memory_order_relaxed);
+	if (model) {
+		size_t i = 0;
+		for (; model[i] && i + 1 < sizeof(g_lastSwapModel); ++i) g_lastSwapModel[i] = model[i];
+		g_lastSwapModel[i] = '\0';
+	}
+	g_crashWatchUntilMs.store(GetTickCount64() + 30000, std::memory_order_release);
 }
 
 void MvmDebugLog_Command(advancedfx::ICommandArgs* args) {
@@ -291,7 +423,7 @@ bool CosmeticsDebugLog_Active() {
 void CosmeticsDebugLog_Linef(const char* fmt, ...) {
 	va_list ap;
 	va_start(ap, fmt);
-	LineV("cosmetics", fmt, ap);
+	LineV("cosmetics", /*dedup=*/true, fmt, ap);
 	va_end(ap);
 }
 
