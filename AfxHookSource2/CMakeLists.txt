@@ -359,6 +359,9 @@ target_sources(${PROJECT_NAME} PRIVATE
     Filmmaker/Cosmetics/CosmeticDebug.cpp
     Filmmaker/Cosmetics/CosmeticDebugLog.cpp
     Filmmaker/Cosmetics/CosmeticDebugLog.h
+    Filmmaker/Cosmetics/CosmeticGloveLabels.cpp
+    Filmmaker/Cosmetics/CosmeticGloveLabels.h
+    Filmmaker/Cosmetics/CosmeticGloveSkinTable.cpp
 
     Filmmaker/Platform/FolderPicker.cpp
     Filmmaker/Platform/FolderPicker.h

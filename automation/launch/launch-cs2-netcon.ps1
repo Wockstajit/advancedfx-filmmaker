@@ -16,6 +16,7 @@ param(
 $ErrorActionPreference = 'Stop'
 $automationRoot = Split-Path -Parent $PSScriptRoot
 $root = Split-Path -Parent $automationRoot
+$agentDebugLog = Join-Path $root 'debug-af2ef9.log'
 . (Join-Path $automationRoot 'lib\AutomationCommon.ps1')
 if ([string]::IsNullOrWhiteSpace($OutDir)) {
     $OutDir = New-AutomationRunFolder -Name 'launch-cs2'
@@ -55,7 +56,8 @@ $argList = @(
     '-addEnv', 'SteamClientLaunch=1',
     '-addEnv', 'SteamGameId=730',
     '-addEnv', 'SteamAppId=730',
-    '-addEnv', 'SteamOverlayGameId=730'
+    '-addEnv', 'SteamOverlayGameId=730',
+    '-addEnv', "MVM_AGENT_DEBUG_LOG=$agentDebugLog"
 )
 
 Write-Host "Launching CS2 (hook + netconport $Port, ${Width}x${Height} windowed)..."

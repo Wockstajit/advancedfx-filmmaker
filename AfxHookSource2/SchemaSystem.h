@@ -114,11 +114,13 @@ struct ClientDllOffsets_t {
 
 	struct C_EconItemView {
 		ptrdiff_t m_bRestoreCustomMaterialAfterPrecache = 0; // bool, optional refresh hint
+		ptrdiff_t m_bDisallowSOC = 0;                        // bool, Andromeda/nerv set false for glove/skin apply
 		ptrdiff_t m_bInventoryImageRgbaRequested = 0; // bool, optional cache invalidation hint
 		ptrdiff_t m_bInventoryImageTriedCache = 0;    // bool, optional cache invalidation hint
 		ptrdiff_t m_szCurrentLoadCachedFileName = 0;  // char[], optional cache invalidation hint
 		ptrdiff_t m_iItemDefinitionIndex = 0; // uint16
 		ptrdiff_t m_iEntityQuality = 0;       // int32 (set to 3 = unusual on knife/glove swap; optional)
+		ptrdiff_t m_iItemID = 0;              // uint64 (full item id; Andromeda/nerv copy for glove resolve)
 		ptrdiff_t m_iItemIDHigh = 0;          // uint32 (-1 forces fallback fields)
 		ptrdiff_t m_iItemIDLow = 0;           // uint32
 		ptrdiff_t m_iAccountID = 0;           // uint32
@@ -163,6 +165,7 @@ struct ClientDllOffsets_t {
 		// m_flLastSpawnTimeIndex (on C_CSPlayerPawnBase) gates re-apply on spawn/round/team change.
 		ptrdiff_t m_bNeedToReApplyGloves = 0; // bool
 		ptrdiff_t m_hHudModelArms = 0;        // CHandle< C_CS2HudModelArms >
+		ptrdiff_t m_nEconGlovesChanged = 0;   // uint8 (OnEconGlovesChanged); bump to signal visual refresh
 		ptrdiff_t m_flLastSpawnTimeIndex = 0; // float (GameTime_t), resolved on C_CSPlayerPawnBase
 	} C_CSPlayerPawn;
 
@@ -175,6 +178,10 @@ struct ClientDllOffsets_t {
 		ptrdiff_t m_skeletonInstance = 0; // CBodyComponentSkeletonInstance::m_skeletonInstance (embedded)
 		ptrdiff_t m_modelState = 0;       // CSkeletonInstance::m_modelState (embedded CModelState)
 		ptrdiff_t m_ModelName = 0;        // CModelState::m_ModelName (CUtlSymbolLarge == const char*)
+		ptrdiff_t m_MeshGroupMask = 0;    // CModelState::m_MeshGroupMask (uint64) -- the LIVE rendered mesh
+		                                  // group selection (legacy CS:GO vs modern CS2 mesh). Read-only
+		                                  // diagnostic: shows whether SetMeshGroupMask stuck + the natural
+		                                  // mask of a correctly-rendering weapon (the right bit values).
 	} ModelChain;
 };
 

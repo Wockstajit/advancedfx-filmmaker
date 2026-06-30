@@ -77,6 +77,17 @@ float SafeReadEntityFloat(unsigned char* base, ptrdiff_t off, float fallback) {
 	__try { return *(float*)(base + off); } __except (1) { return fallback; }
 }
 
+int SafeReadGloveDefIndex(unsigned char* pawn) {
+	const ClientDllOffsets_t& o = g_clientDllOffsets;
+	if (!pawn || o.C_CSPlayerPawn.m_EconGloves == 0 || o.C_EconItemView.m_iItemDefinitionIndex == 0)
+		return 0;
+	__try {
+		return (int)*(uint16_t*)(pawn + o.C_CSPlayerPawn.m_EconGloves + o.C_EconItemView.m_iItemDefinitionIndex);
+	} __except (1) {
+		return 0;
+	}
+}
+
 // SEH-guarded read of an entity's LIVE rendered model path (CModelState::m_ModelName) via the same
 // body-component/skeleton chain CosmeticDebug.cpp uses. Lets the diagnostic log show whether a knife/
 // weapon entity is actually rendering the swapped model or still the original (shadow_daggers vs the
@@ -101,6 +112,31 @@ void ReadEntityModelPath(CEntityInstance* ent, char* out, size_t outSize) {
 		out[i] = '\0';
 	} __except (1) {
 		if (outSize) out[0] = '\0';
+	}
+}
+
+// SEH-guarded read of an entity's LIVE rendered mesh-group mask (CModelState::m_MeshGroupMask) via the
+// same body-component/skeleton chain as ReadEntityModelPath. This is the decisive readback for the
+// legacy-vs-CS2 "model doesn't switch" bug: it shows the weapon's ACTUAL mesh-group selection, so we can
+// see (a) whether our SetMeshGroupMask stuck or the engine reverted it, and (b) the NATURAL mask value
+// of a correctly-rendering weapon (the real legacy/modern bit values, instead of guessing 1/2). Returns
+// 0 on any failure. POD-only body (no C++ objects) so __try is permitted.
+uint64_t ReadEntityMeshGroupMask(CEntityInstance* ent) {
+	if (!ent)
+		return 0;
+	const ClientDllOffsets_t& o = g_clientDllOffsets;
+	if (o.ModelChain.m_CBodyComponent == 0 || o.ModelChain.m_skeletonInstance == 0
+		|| o.ModelChain.m_modelState == 0 || o.ModelChain.m_MeshGroupMask == 0)
+		return 0;
+	unsigned char* p = (unsigned char*)ent;
+	__try {
+		unsigned char* bodyComp = *(unsigned char**)(p + o.ModelChain.m_CBodyComponent);
+		if ((uintptr_t)bodyComp <= 0x10000)
+			return 0;
+		unsigned char* modelState = bodyComp + o.ModelChain.m_skeletonInstance + o.ModelChain.m_modelState;
+		return *(uint64_t*)(modelState + o.ModelChain.m_MeshGroupMask);
+	} __except (1) {
+		return 0;
 	}
 }
 
@@ -577,6 +613,11 @@ CosmeticOverrideSystem& CosmeticsRef() {
 }
 
 void Cosmetics_RunFrame() {
+	// Per-player LIVE skin-state snapshot into the mvm_debug log. Runs BEFORE the apply (and is not
+	// gated on cosmetics being enabled) so the log shows what the game is actually rendering for the
+	// spectated player -- to compare against any override -- on every player switch / seek / weapon /
+	// loadout change. No-op unless mvm_debug is active. (CosmeticDebug.cpp)
+	Cosmetics_TickSkinStateLog();
 	CosmeticsRef().RunFrame();
 }
 
@@ -587,7 +628,8 @@ void CosmeticOverrideSystem::Init() {
 	// older builds and keep a valid, empty compatibility file so a crash/relaunch cannot resurrect
 	// overrides onto a different demo or recreated player entity.
 	m_store.ClearAll();
-	m_store.SetEnabled(false);
+	m_store.SetEnabled(true);
+	m_armed = true;
 	m_store.Save();
 	m_initialized = true;
 }
@@ -599,11 +641,12 @@ void CosmeticOverrideSystem::Shutdown() {
 void CosmeticOverrideSystem::ResetSessionOverrides(const char* reason) {
 	RestorePaintkitBridgeCvar();
 	m_store.ClearAll();
-	m_store.SetEnabled(false);
+	m_store.SetEnabled(true);
+	m_armed = true;
 	m_agentState.clear();
 	m_gloveState.clear();
+	m_lastGloveSpectatedSid = 0;
 	m_knifeSwapState.clear();
-	m_armed = false;
 	m_pendingNudge = false;
 	m_nudgePhase = 0;
 	m_nudgeWasPaused = false;
@@ -612,7 +655,7 @@ void CosmeticOverrideSystem::ResetSessionOverrides(const char* reason) {
 	m_compositeHoldUntilFrame = 0; // and the dense composite hold window
 	m_store.Save(); // best-effort normalization of the legacy compatibility file
 	if (MvmDebugLog_Active())
-		MvmDebugLog_Linef("cosmetics.session", "cleared runtime overrides: reason=%s enabled=0 profiles=0",
+		MvmDebugLog_Linef("cosmetics.session", "cleared runtime overrides: reason=%s enabled=1 profiles=0 armed=1",
 			reason ? reason : "unknown");
 }
 
@@ -625,8 +668,10 @@ bool CosmeticOverrideSystem::InDemoContext() const {
 }
 
 void CosmeticOverrideSystem::SetEnabled(bool e) {
-	m_store.SetEnabled(e);
-	if (e) m_armed = true; // enabling counts as an explicit (re)apply this session
+	(void)e;
+	// Filmmaker demo workflow: cosmetics stay enabled for the whole session.
+	m_store.SetEnabled(true);
+	m_armed = true;
 }
 
 void CosmeticOverrideSystem::Save() {
@@ -717,6 +762,13 @@ void CosmeticOverrideSystem::SetGloves(uint64_t steamId, int defIndex, int paint
 	std::string name = NameForSteamId(steamId);
 	if (!name.empty())
 		profile.name = name;
+
+	// Arm an immediate multi-frame burst even when observer-services returns target -1 (POV demos).
+	GloveApplyState& st = m_gloveState[steamId];
+	st.frames = 4;
+	st.pawnStable = 4;
+	m_gloveBypassSid = steamId;
+	m_gloveBypassFrames = 90;
 }
 
 void CosmeticOverrideSystem::SetAgent(uint64_t steamId, const char* model, int defIndex) {
@@ -813,6 +865,13 @@ void CosmeticOverrideSystem::RunFrame() {
 		}
 	}
 	MaybeFireTickNudge();
+	// Belt-and-suspenders: enabled cosmetics must always be armed in demo context so the apply loop
+	// is not blocked until the first UI mutation (log evidence: armed=0 blocked ~10s of spectating).
+	if (m_store.Enabled() && InDemoContext() && !m_armed) {
+		m_armed = true;
+		if (MvmDebugLog_Active())
+			MvmDebugLog_Linef("cosmetics.armed", "auto-armed in demo context frame=%llu", (unsigned long long)m_frameCounter);
+	}
 	if (MvmDebugLog_Active() && (m_frameCounter % 512) == 0) {
 		MvmDebugLog_Linef("cosmetics.heartbeat",
 			"armed=%d enabled=%d profiles=%zu inDemo=%d totalNudges=%llu",
@@ -879,7 +938,16 @@ void CosmeticOverrideSystem::RunFrame() {
 	// natural no-op while PAUSED (tick frozen), where the one-shot composite already sticks. The cost
 	// is bounded (a few matched weapons, a few times a demo-second); tune via kCompositeReassertTicks.
 	const int kCompositeReassertTicks = 16; // ~4x per demo-second while playing
-	bool periodicComposite = m_frameCounter < m_compositeHoldUntilFrame; // dense re-assert window (works paused)
+	// Dense re-assert window (frame-based so it ALSO works while PAUSED). THROTTLED to every Nth frame,
+	// NOT every frame: a freshly-applied skin (especially a VANILLA gun getting a brand-new finish, or a
+	// glove paint) must STREAM its texture over several frames, and re-firing the composite every frame
+	// perpetually abandons that stream (engine: "Discarding abandoned streaming texture load ..."), so the
+	// skin never finishes loading and renders as default -- exactly the "the skin didn't change" symptom on
+	// guns that had no skin in the demo. Re-compositing every ~16 frames instead lets the stream complete
+	// between attempts while still re-asserting often enough to survive the play-out clobber.
+	const uint64_t kCompositeHoldEveryFrames = 16;
+	bool periodicComposite = (m_frameCounter < m_compositeHoldUntilFrame)
+		&& (m_frameCounter % kCompositeHoldEveryFrames == 0);
 	if (haveTick) {
 		int dc = curTick - m_lastCompositeTick;
 		if (dc < 0) dc = -dc;
@@ -917,6 +985,8 @@ void CosmeticOverrideSystem::RunFrame() {
 	ApplyMatchedWeapons(/*forceStale=*/false, /*fireRebuildCall=*/m_recompose, /*fireDirectComposite=*/m_autoComposite,
 		/*allowKnifeSwap=*/knifeSwapStable, /*periodicComposite=*/periodicComposite);
 	// Gloves + agent (pawn-level model swap), keyed by owner SteamID like the weapon loop.
+	m_gloveApplyBudget = 1;
+	m_constructPaintBudget = 1;
 	ApplyPawnCosmetics();
 	// Cumulative (never-reset) apply counters -- so a one-shot/gated apply stays observable in status.
 	m_totalKnife += m_lastStats.knifeModelsApplied;
@@ -1136,6 +1206,7 @@ void CosmeticOverrideSystem::MaybeFireTickNudge() {
 			// rebuilt the weapon composite during it -- without this the skin reverts to default once paused.
 			m_agentState.clear();
 			m_gloveState.clear();
+			m_lastGloveSpectatedSid = 0;
 			m_knifeSwapState.clear();
 			m_compositeHoldUntilFrame = m_frameCounter + kCompositeHoldFrames;
 			m_nudgePhase = 0;
@@ -1168,6 +1239,7 @@ void CosmeticOverrideSystem::MaybeFireTickNudge() {
 	if (!paused) {
 		m_agentState.clear();
 		m_gloveState.clear();
+		m_lastGloveSpectatedSid = 0;
 		return;
 	}
 
@@ -1177,6 +1249,7 @@ void CosmeticOverrideSystem::MaybeFireTickNudge() {
 	// override re-fires onto any entities the play-out recreates.
 	m_agentState.clear();
 	m_gloveState.clear();
+	m_lastGloveSpectatedSid = 0;
 	m_nudgeWasPaused = true;
 	m_nudgeStartTick = tick;
 	m_nudgePlayStartFrame = m_frameCounter;
@@ -1403,11 +1476,19 @@ int CosmeticOverrideSystem::ApplyMatchedWeapons(bool forceStale, bool fireRebuil
 			}
 		}
 		bool knifeFired = false; // set true if the knife model/type swap actually ran this frame (diag)
+		// Mesh-group (legacy CS:GO vs modern CS2 model) diagnostics for the per-weapon log line below.
+		// A weapon .vmdl carries BOTH meshes; SetMeshGroupMask selects which one renders, and each paint
+		// kit is authored for one. dbgMeshLegacy: 1=legacy / 0=modern / -1=unknown (schema lookup failed)
+		// / -2=not evaluated this frame. When it is -1 the resolved mask is 0 and the mesh is LEFT
+		// UNTOUCHED -- so a skin authored for the OTHER mesh than the one the weapon currently shows will
+		// not render (the user's "the model doesn't switch" symptom).
+		int dbgMeshLegacy = -2;
+		unsigned long long dbgMeshMask = 0;
+		int dbgMeshApplied = 0;
 		if (m_modelSwap) {
 			bool isKnife = CosmeticCatalog::IsKnifeDef(liveDef);
-			// The non-knife weapon mesh-group fix is cheap (SetMeshGroupMask + PostDataUpdate) and IS
-			// re-asserted on the periodic tick so the skin's mesh stays correct through playback redeploys.
-			bool weaponWork = refreshWarranted;
+			// The non-knife weapon mesh-group fix is cheap (SetMeshGroupMask + PostDataUpdate) and is
+			// re-asserted every matched frame when the live mesh mask differs (see the else-branch below).
 			if (isKnife) {
 				// Fire when the knife is the owner's ACTIVE weapon + the post-seek stability window elapsed +
 				// its def is still the wrong type. NO attr-change-this-frame requirement (after a seek the
@@ -1470,12 +1551,25 @@ int CosmeticOverrideSystem::ApplyMatchedWeapons(bool forceStale, bool fireRebuil
 					}
 					ks.lastActive = active; // track each matched frame so a holstered->active edge fires once
 				}
-			} else if (item->paintKit > 0 && weaponWork) {
+			} else if (item->paintKit > 0) {
+				// Mesh-group (legacy CS:GO vs modern CS2 model) selection. Re-asserted EVERY matched frame
+				// -- NOT gated on the composite throttle -- but only actually WRITTEN when the LIVE mesh
+				// mask differs from our target, so we continuously correct an engine revert (the user's
+				// "the model doesn't switch when I pick an older/newer skin" bug) without thrashing the
+				// renderable when it is already right. Mesh selection has no texture stream (unlike the
+				// composite), so frequent re-assert is safe. liveMeshMask in the log shows whether it sticks.
 				uint64_t mask = ResolveMeshMask(item->paintKit, /*knife=*/false,
 					m_meshLegacyMode, m_maskModern, m_maskLegacy);
-				if (mask != 0) {
+				dbgMeshMask = mask;
+				// Surface the raw legacy decision in the log (only while debugging -- it walks the econ
+				// schema). -1 here means the lookup could not classify this paint kit, so the mesh is left
+				// untouched and the skin may not render on whatever mesh the weapon currently shows.
+				if (MvmDebugLog_Active())
+					dbgMeshLegacy = PaintKitLegacyModel(item->paintKit);
+				if (mask != 0 && ReadEntityMeshGroupMask(ent) != mask) {
 					ApplyWeaponMeshMask(w, mask, ownerPawn);
 					++m_lastStats.weaponMeshFixed;
+					dbgMeshApplied = 1;
 				}
 			}
 		}
@@ -1514,6 +1608,10 @@ int CosmeticOverrideSystem::ApplyMatchedWeapons(bool forceStale, bool fireRebuil
 			const char* cls = ent->GetClassName();
 			char liveModel[160];
 			ReadEntityModelPath(ent, liveModel, sizeof(liveModel));
+			// LIVE rendered mesh-group mask (post-apply). Compare across frames: if it != our meshMask on
+			// a later (meshApplied=0) frame, the engine reverted it; the value on a CORRECTLY-rendering
+			// weapon is the real legacy/modern mask to target.
+			unsigned long long liveMeshMask = (unsigned long long)ReadEntityMeshGroupMask(ent);
 			// writePath shows HOW the skin was written: "overwrite" = an existing networked def-6 paint
 			// attr was overwritten; "namedSetter" = no paint attr existed so the engine named-setter
 			// fallback applied it (the attrWritten=0 fix); "none" = neither (e.g. paintKit 0 / vanilla).
@@ -1523,12 +1621,14 @@ int CosmeticOverrideSystem::ApplyMatchedWeapons(bool forceStale, bool fireRebuil
 			MvmDebugLog_Linef("cosmetics.weapon",
 				"idx=%d cls='%s' xuid=%llu liveDef=%d active=%d isKnife=%d knifeSwapDef=%d knifeFired=%d "
 				"allowKnife=%d paint=%d wear=%.3f seed=%d stat=%d attrOk=%d attrWritten=%d hasPaint=%d "
-				"writePath=%s attrChanged=%d patched=%d needComposite=%d liveModel='%s'",
+				"writePath=%s attrChanged=%d patched=%d needComposite=%d "
+				"meshMode=%d meshLegacy=%d meshMask=%llu meshApplied=%d liveMeshMask=%llu liveModel='%s'",
 				i, cls ? cls : "?", (unsigned long long)xuid, liveDef, ownerPawn ? 1 : 0,
 				CosmeticCatalog::IsKnifeDef(liveDef) ? 1 : 0, knifeDefOverride, knifeFired ? 1 : 0,
 				allowKnifeSwap ? 1 : 0, item->paintKit, item->wear, item->seed, item->statTrak,
 				attr.ok ? 1 : 0, attr.written, attr.hasPaint ? 1 : 0, writePath, attr.changed ? 1 : 0,
-				result.patched ? 1 : 0, result.needComposite ? 1 : 0, liveModel);
+				result.patched ? 1 : 0, result.needComposite ? 1 : 0,
+				m_meshLegacyMode, dbgMeshLegacy, dbgMeshMask, dbgMeshApplied, liveMeshMask, liveModel);
 		}
 	}
 
@@ -1548,10 +1648,41 @@ bool CosmeticOverrideSystem::ModelSwapResolved() const {
 // SetModel only fires when the chosen model changes (or the engine recreated the pawn). All entity
 // writes are SEH-guarded inside CosmeticModelSwap.
 int CosmeticOverrideSystem::ApplyPawnCosmetics() {
-	if (!m_modelSwap)
+	if (!m_modelSwap) {
+		if (MvmDebugLog_Active())
+			MvmAgentLog("H1", "CosmeticOverrideSystem.cpp:ApplyPawnCosmetics", "modelswap_disabled", "");
 		return 0;
+	}
 
 	const ClientDllOffsets_t& o = g_clientDllOffsets;
+	if (MvmDebugLog_Active() && o.C_CSPlayerPawn.m_EconGloves == 0) {
+		MvmAgentLog("H4", "CosmeticOverrideSystem.cpp:ApplyPawnCosmetics", "econ_gloves_offset_missing",
+			"\"m_EconGloves\":0");
+	}
+	const uint64_t spectatedSteamId = CurrentSpectatedSteamId();
+	if (spectatedSteamId != 0)
+		m_lastSpectatedSteamId = spectatedSteamId;
+	if (m_gloveBypassFrames > 0)
+		--m_gloveBypassFrames;
+	// Profiled players only get glove writes while spectated; re-arm whenever the spectate target
+	// changes so switching back to a player always runs a fresh burst (not only on first UI set).
+	if (spectatedSteamId != 0 && spectatedSteamId != m_lastGloveSpectatedSid) {
+		if (MvmDebugLog_Active()) {
+			char data[128];
+			std::snprintf(data, sizeof(data),
+				"\"from\":%llu,\"to\":%llu",
+				(unsigned long long)m_lastGloveSpectatedSid, (unsigned long long)spectatedSteamId);
+			MvmAgentLog("H8", "CosmeticOverrideSystem.cpp:ApplyPawnCosmetics",
+				"glove_rearm_spectate_change", data);
+		}
+		m_lastGloveSpectatedSid = spectatedSteamId;
+		CosmeticProfile* sp = m_store.Find(spectatedSteamId);
+		if (sp && sp->gloves.set && sp->gloves.defIndex > 0) {
+			GloveApplyState& gst = m_gloveState[spectatedSteamId];
+			gst.frames = 4;
+			gst.pawnStable = 0;
+		}
+	}
 	const int highest = GetHighestEntityIndex();
 	for (int i = 0; i <= highest; ++i) {
 		CEntityInstance* ctrl = EntFromIndex(i);
@@ -1592,26 +1723,127 @@ int CosmeticOverrideSystem::ApplyPawnCosmetics() {
 
 		// GLOVES. Change-gated multi-frame apply.
 		if (prof->gloves.set && prof->gloves.defIndex > 0 && o.C_CSPlayerPawn.m_EconGloves) {
+			GloveApplyState& st = m_gloveState[steamId];
+			const bool uiBypass = (m_gloveBypassSid == steamId && m_gloveBypassFrames > 0);
+			const bool spectatedMatch = (spectatedSteamId != 0 && steamId == spectatedSteamId);
+			const bool stickyBurst = (spectatedSteamId == 0 && m_lastSpectatedSteamId == steamId && st.frames > 0);
+			if (!spectatedMatch && !uiBypass && !stickyBurst) {
+				if (MvmDebugLog_Active() && (m_lastStats.frame % 64) == 0) {
+					char data[200];
+					std::snprintf(data, sizeof(data),
+						"\"steamId\":%llu,\"spectated\":%llu,\"uiBypass\":%d,\"sticky\":%d,\"framesLeft\":%d",
+						(unsigned long long)steamId, (unsigned long long)spectatedSteamId,
+						uiBypass ? 1 : 0, stickyBurst ? 1 : 0, st.frames);
+					MvmAgentLog("H7", "CosmeticOverrideSystem.cpp:ApplyPawnCosmetics",
+						"glove_skip_not_spectated", data);
+				}
+				continue;
+			}
+
+			// Track pawn recreation before the team gate -- side switches briefly report team=0 and
+			// must still re-arm the burst when the pawn entity is recreated.
+			if (st.pawn != (uintptr_t)pawn) {
+				const bool armRecreate = spectatedMatch || uiBypass;
+				st.pawn = (uintptr_t)pawn;
+				st.pawnStable = 0;
+				if (armRecreate) {
+					st.frames = 4;
+					if (MvmDebugLog_Active()) {
+						char data[96];
+						std::snprintf(data, sizeof(data), "\"steamId\":%llu", (unsigned long long)steamId);
+						MvmAgentLog("H8", "CosmeticOverrideSystem.cpp:ApplyPawnCosmetics",
+							"glove_rearm_pawn_recreate", data);
+					}
+				} else {
+					st.frames = 0;
+				}
+			}
+
+			uint8_t team = 0;
+			if (o.C_BaseEntity.m_iTeamNum) {
+				__try { team = *(uint8_t*)(pawn + o.C_BaseEntity.m_iTeamNum); }
+				__except (1) { team = 0; }
+			}
+			// Spectate/player-switch recreates the pawn with team=0 briefly -- defer writes until valid.
+			if (team != 2 && team != 3) {
+				if (MvmDebugLog_Active() && (m_lastStats.frame % 32) == 0) {
+					char data[128];
+					std::snprintf(data, sizeof(data),
+						"\"steamId\":%llu,\"team\":%u,\"framesLeft\":%d",
+						(unsigned long long)steamId, (unsigned)team, st.frames);
+					MvmAgentLog("H9", "CosmeticOverrideSystem.cpp:ApplyPawnCosmetics",
+						"glove_skip_team_unready", data);
+				}
+				continue;
+			}
+			if (st.pawnStable < 4) {
+				++st.pawnStable;
+				continue;
+			}
+
+			if (st.frames == 0 && (spectatedMatch || uiBypass)) {
+				const int liveDef = SafeReadGloveDefIndex(pawn);
+				bool engineWantsReapply = false;
+				if (o.C_CSPlayerPawn.m_bNeedToReApplyGloves) {
+					__try {
+						engineWantsReapply = *(bool*)(pawn + o.C_CSPlayerPawn.m_bNeedToReApplyGloves);
+					} __except (1) {
+						engineWantsReapply = false;
+					}
+				}
+				if (liveDef != prof->gloves.defIndex || engineWantsReapply) {
+					st.frames = 4;
+					if (MvmDebugLog_Active()) {
+						char data[160];
+						std::snprintf(data, sizeof(data),
+							"\"steamId\":%llu,\"liveDef\":%d,\"wantDef\":%d,\"engineReapply\":%d",
+							(unsigned long long)steamId, liveDef, prof->gloves.defIndex,
+							engineWantsReapply ? 1 : 0);
+						MvmAgentLog("H8", "CosmeticOverrideSystem.cpp:ApplyPawnCosmetics",
+							"glove_rearm_live_mismatch", data);
+					}
+				}
+			}
+
 			uint32_t wearBits = 0;
 			std::memcpy(&wearBits, &prof->gloves.wear, sizeof(wearBits));
 			uint64_t sig = 1469598103934665603ULL;
 			const uint32_t sigParts[] = { (uint32_t)prof->gloves.defIndex,
-				(uint32_t)prof->gloves.paintKit, (uint32_t)prof->gloves.seed, wearBits };
+				(uint32_t)prof->gloves.paintKit, (uint32_t)prof->gloves.seed, wearBits, (uint32_t)team };
 			for (uint32_t part : sigParts) { sig ^= part; sig *= 1099511628211ULL; }
 			float spawn = SafeReadEntityFloat(pawn, o.C_CSPlayerPawn.m_flLastSpawnTimeIndex, -1.0f);
 
-			GloveApplyState& st = m_gloveState[steamId];
-			if (st.sig != sig || st.lastSpawn != spawn || st.pawn != (uintptr_t)pawn) {
+			if (st.sig != sig || st.lastSpawn != spawn) {
 				st.frames = 4; // apply over a few frames (gloves rebuild across frames)
 				st.sig = sig;
 				st.lastSpawn = spawn;
-				st.pawn = (uintptr_t)pawn;
 			}
 			if (st.frames > 0) {
+				if (m_gloveApplyBudget <= 0)
+					continue;
+				--m_gloveApplyBudget;
+				bool composePaint = (st.frames == 4) && m_constructPaintBudget > 0;
+				if (composePaint)
+					--m_constructPaintBudget;
+				if (MvmDebugLog_Active()) {
+					char data[360];
+					std::snprintf(data, sizeof(data),
+						"\"steamId\":%llu,\"wantDef\":%d,\"wantPaint\":%d,\"framesLeft\":%d,\"pawn\":%llu,"
+						"\"team\":%u,\"composePaint\":%d,\"pawnStable\":%d",
+						(unsigned long long)steamId, prof->gloves.defIndex, prof->gloves.paintKit, st.frames,
+						(unsigned long long)(uintptr_t)pawn, (unsigned)team, composePaint ? 1 : 0, st.pawnStable);
+					MvmAgentLog("H6", "CosmeticOverrideSystem.cpp:ApplyPawnCosmetics", "glove_apply_fire", data);
+				}
 				if (ApplyGloveModel(pawn, prof->gloves.defIndex, prof->gloves.paintKit,
-						prof->gloves.wear, prof->gloves.seed, (uint32_t)steamId))
+						prof->gloves.wear, prof->gloves.seed, (uint32_t)steamId, composePaint))
 					++m_lastStats.glovesApplied;
 				--st.frames;
+			} else if (MvmDebugLog_Active() && (m_lastStats.frame % 128) == 0) {
+				char data[192];
+				std::snprintf(data, sizeof(data),
+					"\"steamId\":%llu,\"wantDef\":%d,\"framesLeft\":0,\"sig\":%llu",
+					(unsigned long long)steamId, prof->gloves.defIndex, (unsigned long long)st.sig);
+				MvmAgentLog("H6", "CosmeticOverrideSystem.cpp:ApplyPawnCosmetics", "glove_gate_idle", data);
 			}
 		}
 	}

@@ -125,7 +125,7 @@ bool PostDataUpdate(unsigned char* entity);
 // attributes, then UpdateBodyGroupChoice() + m_bNeedToReApplyGloves=true. It also swaps and refreshes
 // the pawn's HUD-arms model from the glove econ definition. The caller drives the multi-frame
 // re-assert; this performs one frame's write. Returns true if applied.
-bool ApplyGloveModel(unsigned char* pawn, int gloveDef, int paintKit, float wear, int seed,
-	uint32_t accountId);
+	bool ApplyGloveModel(unsigned char* pawn, int gloveDef, int paintKit, float wear, int seed,
+	uint32_t accountId, bool composePaintKit = true);
 
 } // namespace Filmmaker

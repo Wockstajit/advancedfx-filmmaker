@@ -94,7 +94,7 @@ public:
 
 private:
 	std::unordered_map<uint64_t, CosmeticProfile> m_profiles;
-	bool m_enabled = false;
+	bool m_enabled = true;
 };
 
 } // namespace Filmmaker

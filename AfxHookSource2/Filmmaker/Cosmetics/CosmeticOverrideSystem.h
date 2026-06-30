@@ -321,6 +321,7 @@ private:
 		float lastSpawn = -1.0f;
 		uintptr_t pawn = 0;
 		int frames = 0;
+		int pawnStable = 0; // frames with same pawn + valid team before applying
 	};
 	std::unordered_map<uint64_t, GloveApplyState> m_gloveState;
 	struct AgentApplyState { uint64_t hash = 0; uintptr_t pawn = 0; };
@@ -342,6 +343,12 @@ private:
 	int m_tickNudgeTicks = 10;        // how many ticks to play out before re-pausing ("play ~10 ticks")
 	bool m_pendingNudge = false;      // a profile changed; a nudge is due once the debounce elapses
 	uint64_t m_frameCounter = 0;      // main-thread frames since start (debounce/timing clock)
+	int m_gloveApplyBudget = 0;       // max glove applies per frame (set before ApplyPawnCosmetics)
+	int m_constructPaintBudget = 0;   // max construct_paint_kit calls per frame (global)
+	uint64_t m_lastSpectatedSteamId = 0; // sticky fallback while observer target flickers to 0
+	uint64_t m_lastGloveSpectatedSid = 0; // re-arm glove burst when spectate target changes
+	uint64_t m_gloveBypassSid = 0;    // SetGloves arms immediate apply for this owner (UI pick)
+	int m_gloveBypassFrames = 0;      // frames left to bypass the spectate-only gate
 	uint64_t m_nudgeRequestFrame = 0; // m_frameCounter at the last profile change (debounce anchor)
 	uint64_t m_totalNudges = 0;       // cumulative nudges completed (status/proof)
 	bool m_armed = false;             // start-clean: overrides apply only after reapplied this demo
@@ -396,5 +403,34 @@ void Cosmetics_PrintVisualDiag(const char* cmd);
 // only falls back to the spectated player's active/held weapon when targetDef<=0 or none is found.
 // Read-only. (CosmeticDebug.cpp)
 void Cosmetics_LogWeaponSnapshot(const char* cmd, const char* phase, uint64_t steamId, int targetDef);
+
+// LIVE per-player skin-state logging into the mvm_debug log (CosmeticDebug.cpp). This is the
+// "show me what each player actually has equipped at any point" instrument -- NOT a visual overlay,
+// it writes to the mvm_debug console/log only.
+//
+// Cosmetics_TickSkinStateLog() runs once per MAIN-thread frame (from Cosmetics_RunFrame, regardless
+// of whether the override system is enabled) and, ONLY while mvm_debug is active, emits a full
+// snapshot of the currently SPECTATED player's equipped cosmetics whenever something relevant
+// changes: a different player is spectated, the player switches weapons, the player's loadout/skin
+// state changes, or the demo seeks to a different tick. It is a no-op when mvm_debug is off / not in
+// a demo / no player is spectated, so it costs nothing during normal use.
+//
+// Cosmetics_LogLiveSkinState(reason) forces ONE snapshot now (the "cosmetics skinlog" command). The
+// snapshot covers: agent/player model, gloves + glove skin, knife + knife skin, primary + secondary
+// (and every other owned econ weapon) + their skins, each with the LIVE def/paint/seed/wear the game
+// is actually rendering AND the override the system WOULD apply -- so the two can be compared.
+// Read-only; all entity reads are SEH-guarded.
+void Cosmetics_TickSkinStateLog();
+void Cosmetics_LogLiveSkinState(const char* reason);
+
+// Permanent mvm_debug instrumentation (CosmeticDebug.cpp). Parses the Customize panel uilog line
+// (fires immediately before the gloves set command) so glove picks can log the clicked skin name.
+void Cosmetics_StorePendingUiGloveLabel(const char* uilogText);
+
+// Logs a glove UI pick with player name + before/after skin labels (mvm_debug category cosmetics.glove).
+void Cosmetics_LogGlovePick(uint64_t steamId, int newDef, int newPaint, float newWear, int newSeed);
+
+// Logs spectate target changes with player names and glove labels (mvm_debug category cosmetics.spectate).
+void Cosmetics_LogSpectateTargetChange(uint64_t fromSteamId, uint64_t toSteamId, const char* reason);
 
 } // namespace Filmmaker

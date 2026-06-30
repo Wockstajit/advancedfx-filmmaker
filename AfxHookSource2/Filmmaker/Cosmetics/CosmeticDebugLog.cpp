@@ -10,7 +10,6 @@
 #define NOMINMAX
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
-
 #include <cstdio>
 #include <cstdarg>
 #include <atomic>
@@ -355,6 +354,13 @@ void MvmDebugLog_LinefAlways(const char* category, const char* fmt, ...) {
 	va_start(ap, fmt);
 	LineV(category, /*dedup=*/false, fmt, ap);
 	va_end(ap);
+}
+
+void MvmAgentLog(const char* hypothesisId, const char* location, const char* message, const char* dataJson) {
+	(void)hypothesisId;
+	(void)location;
+	(void)message;
+	(void)dataJson;
 }
 
 void MvmCrashWatch_Arm(int entityIndex, const char* model) {

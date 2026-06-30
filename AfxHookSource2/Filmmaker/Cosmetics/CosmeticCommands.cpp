@@ -54,8 +54,6 @@ uint64_t ResolveSteamIdArg(const char* cmd, const char* token) {
 void AfterMutation(const char* cmd) {
 	CosmeticsRef().Arm();               // an explicit apply this session -> allow it to render (start-clean)
 	CosmeticsRef().RequestApplyNudge(); // refresh the demo render after the change (PostDataUpdate + play-out)
-	if (!CosmeticsRef().Enabled())
-		advancedfx::Message("cosmetics are disabled -- run '%s cosmetics enabled 1' to see them.\n", cmd);
 	if (!CosmeticsRef().OffsetsAvailable())
 		advancedfx::Warning("%s cosmetics: econ offsets did not resolve; cosmetics will not render.\n", cmd);
 }
@@ -76,6 +74,7 @@ void PrintUsage(const char* cmd) {
 		"  %s cosmetics player <steamId|current> agent <modelPath|default>\n"
 			"  %s cosmetics diag   (dump the spectated player's live weapon econ state)\n"
 			"  %s cosmetics visualdiag   (read-only: full visual-cache state + flag offsets)\n"
+			"  %s cosmetics skinlog   (log the spectated player's full LIVE skin state to mvm_debug; auto-logs on switch/seek/weapon/loadout change)\n"
 			"  %s cosmetics rebuild once   (re-assert enabled rebuildflags on matched weapons now)\n"
 			"  %s cosmetics rebuild auto [0|1]   (per-frame writing of enabled rebuildflags on change)\n"
 			"  %s cosmetics rebuildflags [<name> 0|1 | all 0|1]   (toggle individual stale-mark writes)\n"
@@ -93,7 +92,7 @@ void PrintUsage(const char* cmd) {
 			"  %s cosmetics recompose [0|1]   (force material re-composite after writes)\n"
 			"  %s cosmetics vtidx <comp> <sec>   (tune UpdateComposite vtable indices, -1=skip)\n"
 			"  %s cosmetics vtprobe <idx>   (bisect OnDataChanged: call weapon vtable[idx](this,0) now)\n",
-		cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd);
+		cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd);
 }
 
 // Parses ORDER-INDEPENDENT key/value tokens of the form "key=value" (or "key value", to be lenient)
@@ -266,7 +265,15 @@ void DoPlayer(int argc, advancedfx::ICommandArgs* args, const char* cmd) {
 		// the nudge in AfterMutation.
 		advancedfx::Message("%s cosmetics uiclick request: slot=gloves def=%d paint=%d wear=%.4f seed=%d (what the UI sent).\n",
 			cmd, defIndex, paintKit, wear, seed);
+		Cosmetics_LogGlovePick(id, defIndex, paintKit, wear, seed);
 		CosmeticsRef().SetGloves(id, defIndex, paintKit, wear, seed);
+		if (MvmDebugLog_Active()) {
+			char data[256];
+			std::snprintf(data, sizeof(data),
+				"\"steamId\":%llu,\"wantDef\":%d,\"wantPaint\":%d,\"wantWear\":%.4f,\"wantSeed\":%d",
+				(unsigned long long)id, defIndex, paintKit, wear, seed);
+			MvmAgentLog("H2", "CosmeticCommands.cpp:SetGloves", "profile_set", data);
+		}
 		advancedfx::Message("%s cosmetics: gloves steamId=%llu def=%d paint=%d wear=%.4f seed=%d.\n",
 			cmd, (unsigned long long)id, defIndex, paintKit, wear, seed);
 		AfterMutation(cmd);
@@ -665,6 +672,7 @@ void DoUiLog(int argc, advancedfx::ICommandArgs* args, const char* cmd) {
 	advancedfx::Message("%s cosmetics uiclick label: %s\n", cmd, text.c_str());
 	if (MvmDebugLog_Active())
 		MvmDebugLog_LinefAlways("cosmetics.uiclick", "label %s", text.c_str());
+	Cosmetics_StorePendingUiGloveLabel(text.c_str());
 }
 
 } // namespace
@@ -692,6 +700,13 @@ void Cosmetics_RunCommand(int argc, advancedfx::ICommandArgs* args, const char* 
 		Cosmetics_PrintSpectatedDebug(cmd);
 	} else if (TokenIs(sub, "visualdiag")) {
 		Cosmetics_PrintVisualDiag(cmd);
+	} else if (TokenIs(sub, "skinlog")) {
+		// Force one LIVE per-player skin-state snapshot into the mvm_debug log right now. (The same
+		// snapshot fires automatically on player switch / seek / weapon / loadout change while
+		// mvm_debug is running -- see Cosmetics_TickSkinStateLog.)
+		Cosmetics_LogLiveSkinState("manual");
+		advancedfx::Message("%s cosmetics: live skin-state snapshot written to the mvm_debug log%s.\n",
+			cmd, MvmDebugLog_Active() ? "" : " (start it first: 'mvm_debug start')");
 	} else if (TokenIs(sub, "rebuild")) {
 		DoRebuild(argc, args, cmd);
 	} else if (TokenIs(sub, "rebuildflags")) {

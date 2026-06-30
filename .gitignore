@@ -6,6 +6,7 @@
 /out
 /packages
 AfxCppCli/build/
+ShaderBuilder/obj/
 FilmmakerDemoInfoGo/FilmmakerDemoInfo.exe
 build-*.bat.log
 *.pdb
@@ -45,6 +46,11 @@ pnpm-debug.log*
 
 # Vendored SDK dumps (do not commit)
 ultralight-free-sdk-*/
+
+# Local/generated CS2 offset reference dumps
+misc/cs2-offsets/source/
+misc/cs2-offsets/cs2-offsets-*.csv
+misc/cs2-offsets/cs2-offsets-meta.json
 
 # Automation: scripts and configs stay tracked; only runtime artifacts are ignored
 automation/runs/

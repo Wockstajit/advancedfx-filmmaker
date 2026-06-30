@@ -52,12 +52,16 @@ void MvmDebugLog_Linef(const char* category, const char* fmt, ...);
 // payload repeats an earlier one; the normal dedup would hide repeat clicks until the log is stopped.
 void MvmDebugLog_LinefAlways(const char* category, const char* fmt, ...);
 
+// Retired agent/debug tooling hook. Intentionally a no-op now: keep the call sites source-compatible
+// while sending nothing to Cursor / NDJSON mirrors. dataJson is ignored.
+void MvmAgentLog(const char* hypothesisId, const char* location, const char* message, const char* dataJson);
+
 // Crash breadcrumb: a vectored exception handler (registered while a log is open) logs first-chance
 // ACCESS VIOLATIONS -- faulting module+offset, access type, thread, and the last knife swap context --
 // but ONLY during the short window after MvmCrashWatch_Arm() is called. The step breadcrumbs only
 // cover OUR calls; these crashes fault downstream in the engine while it animates/renders a swapped
 // model, so the LAST "crash.veh" line before the process dies pinpoints WHERE that fault is. Arm() is
-// called by the knife model swap right before it touches the entity, so the window covers the
+// called by the knife model swap and glove apply right before they touch entities, so the window covers the
 // post-swap animation/render frames without logging unrelated handled exceptions the rest of the time.
 void MvmCrashWatch_Arm(int entityIndex, const char* model);
 

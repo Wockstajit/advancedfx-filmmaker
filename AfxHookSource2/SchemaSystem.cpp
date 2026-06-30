@@ -152,10 +152,12 @@ void initCosmeticsOffsets()
 	ok = ok && getOffset(&g_clientDllOffsets.C_EconEntity.m_AttributeManager, "client.dll", "C_EconEntity", "m_AttributeManager");
 	ok = ok && getOffset(&g_clientDllOffsets.C_AttributeContainer.m_Item, "client.dll", "C_AttributeContainer", "m_Item");
 	ok = ok && getOffset(&g_clientDllOffsets.C_EconItemView.m_iItemDefinitionIndex, "client.dll", "C_EconItemView", "m_iItemDefinitionIndex");
+	getOffset(&g_clientDllOffsets.C_EconItemView.m_iItemID, "client.dll", "C_EconItemView", "m_iItemID");
 	ok = ok && getOffset(&g_clientDllOffsets.C_EconItemView.m_iItemIDHigh, "client.dll", "C_EconItemView", "m_iItemIDHigh");
 	ok = ok && getOffset(&g_clientDllOffsets.C_EconItemView.m_iItemIDLow, "client.dll", "C_EconItemView", "m_iItemIDLow");
 	ok = ok && getOffset(&g_clientDllOffsets.C_EconItemView.m_iAccountID, "client.dll", "C_EconItemView", "m_iAccountID");
 	getOffset(&g_clientDllOffsets.C_EconItemView.m_bRestoreCustomMaterialAfterPrecache, "client.dll", "C_EconItemView", "m_bRestoreCustomMaterialAfterPrecache");
+	getOffset(&g_clientDllOffsets.C_EconItemView.m_bDisallowSOC, "client.dll", "C_EconItemView", "m_bDisallowSOC");
 	getOffset(&g_clientDllOffsets.C_EconItemView.m_bInventoryImageRgbaRequested, "client.dll", "C_EconItemView", "m_bInventoryImageRgbaRequested");
 	getOffset(&g_clientDllOffsets.C_EconItemView.m_bInventoryImageTriedCache, "client.dll", "C_EconItemView", "m_bInventoryImageTriedCache");
 	getOffset(&g_clientDllOffsets.C_EconItemView.m_szCurrentLoadCachedFileName, "client.dll", "C_EconItemView", "m_szCurrentLoadCachedFileName");
@@ -190,6 +192,7 @@ void initCosmeticsOffsets()
 	getOffset(&g_clientDllOffsets.CGameSceneNode.m_pNextSibling, "client.dll", "CGameSceneNode", "m_pNextSibling");
 	getOffset(&g_clientDllOffsets.C_CSPlayerPawn.m_bNeedToReApplyGloves, "client.dll", "C_CSPlayerPawn", "m_bNeedToReApplyGloves");
 	getOffset(&g_clientDllOffsets.C_CSPlayerPawn.m_hHudModelArms, "client.dll", "C_CSPlayerPawn", "m_hHudModelArms");
+	getOffset(&g_clientDllOffsets.C_CSPlayerPawn.m_nEconGlovesChanged, "client.dll", "C_CSPlayerPawn", "m_nEconGlovesChanged");
 	getOffset(&g_clientDllOffsets.C_CSPlayerPawn.m_flLastSpawnTimeIndex, "client.dll", "C_CSPlayerPawnBase", "m_flLastSpawnTimeIndex");
 	// Read-only model-state chain (agent/player-model display). Off the `ok` chain: a missing field
 	// just disables the agent read, not the whole skin-changer. Guarded by != 0 at the read site.
@@ -197,6 +200,7 @@ void initCosmeticsOffsets()
 	getOffset(&g_clientDllOffsets.ModelChain.m_skeletonInstance, "client.dll", "CBodyComponentSkeletonInstance", "m_skeletonInstance");
 	getOffset(&g_clientDllOffsets.ModelChain.m_modelState, "client.dll", "CSkeletonInstance", "m_modelState");
 	getOffset(&g_clientDllOffsets.ModelChain.m_ModelName, "client.dll", "CModelState", "m_ModelName");
+	getOffset(&g_clientDllOffsets.ModelChain.m_MeshGroupMask, "client.dll", "CModelState", "m_MeshGroupMask");
 	g_cosmeticsOffsetsOk = ok;
 }
 
