@@ -1428,7 +1428,22 @@ int CosmeticOverrideSystem::ApplyMatchedWeapons(bool forceStale, bool fireRebuil
 					bool newTarget = (ks.swappedDef != knifeDefOverride);
 					bool active = (ownerPawn != nullptr);
 					bool becameActive = active && !ks.lastActive; // deploy edge -> run the viewmodel mirror once
-					if (recreated || newTarget || becameActive) {
+					// Self-correcting trigger: re-fire whenever the knife's LIVE world model isn't our target.
+					// A demo seek can reconstruct the knife in the SAME entity slot (index unchanged) while
+					// resetting its model to the original -- the index/active-edge throttles never trip, so the
+					// knife kept its ORIGINAL model with the swapped skin until it was re-deployed. Comparing the
+					// actual rendered model path catches that case (and any other silent revert). Settles to
+					// false in one frame once SetModel takes, so it does not thrash.
+					bool modelMismatch = false;
+					{
+						char targetModel[260];
+						if (ResolveKnifeModelPath(knifeDefOverride, itemView, targetModel, sizeof(targetModel)) && targetModel[0]) {
+							char liveKnifeModel[160];
+							ReadEntityModelPath(ent, liveKnifeModel, sizeof(liveKnifeModel));
+							modelMismatch = liveKnifeModel[0] && 0 != _stricmp(liveKnifeModel, targetModel);
+						}
+					}
+					if (recreated || newTarget || becameActive || modelMismatch) {
 						// Always-flushed re-fire decision. recreated=1 (a NEW entity index for the same owner)
 						// is the seek/quick-switch case: the engine destroyed+recreated the knife entity, so
 						// the swap re-fires onto the rebuilt entity. framesSinceSeek shows how settled the
@@ -1436,9 +1451,9 @@ int CosmeticOverrideSystem::ApplyMatchedWeapons(bool forceStale, bool fireRebuil
 						// active=0 = holstered (world model swap only; viewmodel mirror skipped).
 						if (MvmDebugLog_Active())
 							MvmDebugLog_LinefAlways("knife.fire",
-								"xuid=%llu idx=%d prevIdx=%d liveDef=%d targetDef=%d prevDef=%d recreated=%d newTarget=%d active=%d allowSwap=%d framesSinceSeek=%d -> %s",
+								"xuid=%llu idx=%d prevIdx=%d liveDef=%d targetDef=%d prevDef=%d recreated=%d newTarget=%d active=%d modelMismatch=%d allowSwap=%d framesSinceSeek=%d -> %s",
 								(unsigned long long)xuid, i, ks.entityIndex, liveDef, knifeDefOverride, ks.swappedDef,
-								recreated ? 1 : 0, newTarget ? 1 : 0, active ? 1 : 0, allowKnifeSwap ? 1 : 0, m_framesSinceSeek,
+								recreated ? 1 : 0, newTarget ? 1 : 0, active ? 1 : 0, modelMismatch ? 1 : 0, allowKnifeSwap ? 1 : 0, m_framesSinceSeek,
 								allowKnifeSwap ? "FIRE" : "SUPPRESS-settle");
 						if (allowKnifeSwap) {
 							uint64_t mask = ResolveMeshMask(item->paintKit, /*knife=*/true,

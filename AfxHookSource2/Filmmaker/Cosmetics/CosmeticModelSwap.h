@@ -65,6 +65,13 @@ uint64_t ResolveMeshMask(int paintKitId, bool knife, int legacyOverride,
 bool ApplyKnifeModelSwap(unsigned char* weapon, unsigned char* itemView,
 	unsigned char* pawnForViewmodel, int targetDef, uint64_t meshMask, int entityIndex = -1);
 
+// Resolve the WORLD-model .vmdl path a knife-type swap to targetDef would apply -- the SAME resolution
+// ApplyKnifeModelSwap uses internally (GetStaticData on the def-already-set itemView, falling back to the
+// built-in knife def->model table). Lets the apply loop compare against an entity's LIVE model path and
+// re-fire the swap whenever the engine reverted the model (e.g. a demo seek that reused the entity slot,
+// so the index-based throttle never tripped). Returns true and fills out[] on success. SEH-guarded.
+bool ResolveKnifeModelPath(int targetDef, unsigned char* itemView, char* out, size_t outSize);
+
 // EXPERIMENTAL animgraph reset (candidate fix for the knife-type-swap animation crash, "approach #1").
 // After a knife SetModel, null the entity's animation-graph-instance networked-variables pointer -- the
 // `real-time-internal-overlay-research-main` technique (viewModel->pAnimationGraphInstance->

@@ -1056,3 +1056,12 @@ first-person viewmodel mirror inside `ApplyKnifeModelSwap` already auto-skips wh
 viewmodel mirror runs once the knife is deployed. Now the model swap re-applies as reliably and quickly as
 the skin. Live-confirmed by the user. Both relaxations are only safe because CosmeticAnimFix neutralizes the
 unloaded-model anim crash they originally guarded against.
+
+Third seek case (2026-06-29): seeking DIRECTLY to a tick where the knife is already deployed left the
+original model+skin until the knife was re-pulled. Cause: a seek can reconstruct the knife in the SAME
+entity slot (index unchanged) while resetting its model -- so `recreated`/`newTarget`/`becameActive` all stay
+false and the index-based throttle never re-fires, even though the engine reverted the model. Fix: added a
+`modelMismatch` trigger -- read the entity's LIVE world model (`ReadEntityModelPath` / CModelState::m_ModelName)
+and compare it to the resolved target (`ResolveKnifeModelPath`, exposed from CosmeticModelSwap); re-fire the
+swap whenever they differ. Self-correcting against silent reverts; settles to false in one frame once SetModel
+takes, so it does not thrash. Logged as `modelMismatch=N` in the `knife.fire` breadcrumb.

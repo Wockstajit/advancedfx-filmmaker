@@ -590,6 +590,23 @@ void GetAnimGraphResetOffsets(uint32_t* instOff, uint32_t* varsOff) {
 	if (varsOff) *varsOff = g_animVarsOff;
 }
 
+bool ResolveKnifeModelPath(int targetDef, unsigned char* itemView, char* out, size_t outSize) {
+	if (!out || outSize == 0)
+		return false;
+	out[0] = '\0';
+	if (targetDef <= 0)
+		return false;
+	ResolveModelSwapFns();
+	// Same resolution order as ApplyKnifeModelSwap: live econ definition first, built-in table fallback.
+	if (TryGetModelFromStaticData(itemView, out, outSize) && out[0])
+		return true;
+	const char* tbl = KnifeModelForDef(targetDef);
+	if (!tbl)
+		return false;
+	std::snprintf(out, outSize, "%s", tbl);
+	return out[0] != '\0';
+}
+
 bool PrecacheModelResource(const char* modelPath) { ResolveModelSwapFns(); return SafePrecacheModel(modelPath); }
 void SetPrecacheModels(bool enabled) { g_precacheOn = enabled; }
 bool PrecacheModels() { return g_precacheOn; }
