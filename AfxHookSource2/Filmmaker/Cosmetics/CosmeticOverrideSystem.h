@@ -244,7 +244,8 @@ public:
 	// demo is paused, this briefly RESUMES playback for ~m_tickNudgeTicks ticks and then re-pauses --
 	// exactly "let the game play ~10 ticks to see the change," done automatically. Debounced (a slider
 	// drag coalesces into one nudge) and a no-op when the demo is already playing. "cosmetics ticknudge ...".
-	void RequestApplyNudge();                 // schedule a nudge (called on every profile mutation)
+	void RequestCompositeRefresh();           // dense composite re-assert only (weapon skins; no demo_resume)
+	void RequestApplyNudge();                 // composite hold + debounced tick nudge (agent/glove/knife/body)
 	void SetTickNudge(bool e) { m_tickNudge = e; }
 	bool TickNudge() const { return m_tickNudge; }
 	void SetTickNudgeTicks(int t) { m_tickNudgeTicks = (t < 1) ? 1 : t; }
@@ -272,6 +273,9 @@ private:
 	void UpdatePaintkitBridge();
 	// Fire the debounced demo re-seek if a profile change scheduled one (see RequestApplyNudge).
 	void MaybeFireTickNudge();
+	void OnDemoSeekDetected(int tickJump);
+	void AbortActiveTickNudge(const char* reason);
+	void DetectDemoSeekEarly();
 	void ResetSessionOverrides(const char* reason);
 	int ResolveSpectatedPaintkitOverride() const;
 	bool SetPaintkitBridgeCvar(int value);
@@ -353,21 +357,18 @@ private:
 	uint64_t m_totalNudges = 0;       // cumulative nudges completed (status/proof)
 	bool m_armed = false;             // start-clean: overrides apply only after reapplied this demo
 	std::wstring m_lastDemoPath;      // detect demo load/close (path change) -> clear the runtime store
-	int m_lastApplyTick = -1;         // demo tick at the previous applied frame (seek detection)
-	int m_seekSettleFrames = 0;       // frames left to SKIP the apply after a seek so the entity list
-	                                  // finishes rebuilding before we touch it again (anti-crash)
+	int m_seekSettleFrames = 0;       // frames to skip apply after a seek (entity list rebuilding; anti-crash)
+	int m_vmMirrorSettleFrames = 0;  // longer post-seek hold before FP viewmodel mirror (arms children rebuild slower)
+	int m_lastDemoTickObserved = -1;  // demo tick last frame (early seek detect, runs before nudge)
 	int m_framesSinceSeek = 0;        // applied frames since the last detected seek. The knife model
 	                                  // swap (SetModel/UpdateSubclass -> rebuilds the weapon's animation
 	                                  // set) waits for a LONGER window than the 16-frame general settle
 	                                  // before firing: if it lands on an entity the engine is still
 	                                  // reconstructing after a (stacked) scrub, the animation state is
 	                                  // left inconsistent and faults seconds later, outside the SEH guard.
-	int m_lastCompositeTick = -1;     // demo tick of the last periodic composite re-assert (skin fix)
-	uint64_t m_compositeHoldUntilFrame = 0; // m_frameCounter until which the composite re-asserts EVERY
-	                                  // frame (frame-based, so it works even while PAUSED -- unlike the
-	                                  // tick periodic). Armed on each profile change AND when a tick-nudge
-	                                  // finishes playing out, so a change made while paused renders and
-	                                  // survives the engine's rebuild during the nudge play-out.
+	int m_lastCompositeTick = -1;     // (legacy; unused for tick periodic)
+	int m_compositeBurstRemaining = 0; // one-shot composite shots after skin apply (not a 150-frame hammer)
+	std::unordered_map<int, uint64_t> m_lastCompositeFrameByIdx; // per-entity clobber composite debounce
 	// Active nudge ("play out") state machine: 0 = idle, 1 = resumed and waiting to re-pause.
 	int m_nudgePhase = 0;
 	int m_nudgeStartTick = 0;         // demo tick when the resume began (to measure ticks played)
@@ -394,6 +395,9 @@ void Cosmetics_PrintSpectatedDebug(const char* cmd);
 // schema offsets (for an IDA/Ghidra xref pass), the active weapon handle, and the weapon's world
 // model path. Never writes. "cosmetics visualdiag".
 void Cosmetics_PrintVisualDiag(const char* cmd);
+// Spectate a player by SteamID64 without spec_player slot scanning. Skips dead players
+// (health<=0) before touching the observer target. Returns false when skipped/failed.
+bool Cosmetics_SpectateSteamId(const char* cmd, uint64_t targetSteam);
 // Compact ONE-LINE snapshot of a weapon's live econ skin state (class + defIndex, the networked
 // dynamic paint/seed/wear def6/7/8, and the fallback paint/wear), emitted to BOTH the game console
 // and the MVM debug log. `phase` labels the line ("before"/"after") so a UI skin click can log the
@@ -429,6 +433,9 @@ void Cosmetics_StorePendingUiGloveLabel(const char* uilogText);
 
 // Logs a glove UI pick with player name + before/after skin labels (mvm_debug category cosmetics.glove).
 void Cosmetics_LogGlovePick(uint64_t steamId, int newDef, int newPaint, float newWear, int newSeed);
+
+// Logs a weapon UI pick with legacy/mesh diagnostics (mvm_debug category cosmetics.weapon).
+void Cosmetics_LogWeaponPick(uint64_t steamId, int defIndex, int newPaint, float newWear, int newSeed, int statTrak);
 
 // Logs spectate target changes with player names and glove labels (mvm_debug category cosmetics.spectate).
 void Cosmetics_LogSpectateTargetChange(uint64_t fromSteamId, uint64_t toSteamId, const char* reason);

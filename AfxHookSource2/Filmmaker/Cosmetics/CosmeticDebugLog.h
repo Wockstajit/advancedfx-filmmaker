@@ -52,8 +52,8 @@ void MvmDebugLog_Linef(const char* category, const char* fmt, ...);
 // payload repeats an earlier one; the normal dedup would hide repeat clicks until the log is stopped.
 void MvmDebugLog_LinefAlways(const char* category, const char* fmt, ...);
 
-// Retired agent/debug tooling hook. Intentionally a no-op now: keep the call sites source-compatible
-// while sending nothing to Cursor / NDJSON mirrors. dataJson is ignored.
+// Cursor/agent NDJSON hook (see MvmAgentLog in CosmeticDebugLog.cpp). dataJson must be a JSON object
+// fragment like "\"key\":1" or empty/null for {}.
 void MvmAgentLog(const char* hypothesisId, const char* location, const char* message, const char* dataJson);
 
 // Crash breadcrumb: a vectored exception handler (registered while a log is open) logs first-chance

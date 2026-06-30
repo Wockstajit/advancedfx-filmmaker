@@ -16,6 +16,8 @@
 #include "../../SchemaSystem.h"        // g_clientDllOffsets, g_cosmeticsOffsetsOk
 #include "../../MirvTime.h"            // g_MirvTime.GetCurrentDemoTick (seek detection for the live skin log)
 
+#include "../../../deps/release/prop/cs2/sdk_src/public/cdll_int.h"
+
 #include "../../../shared/AfxConsole.h"
 
 #include <climits>
@@ -23,6 +25,8 @@
 #include <cstdio>
 #include <cstring>
 #include <string>
+
+extern SOURCESDK::CS2::ISource2EngineToClient* g_pEngineToClient;
 
 namespace Filmmaker {
 
@@ -680,6 +684,106 @@ void Cosmetics_PrintSpectatedDebug(const char* cmd) {
 	}
 }
 
+bool Cosmetics_SpectateSteamId(const char* cmd, uint64_t targetSteam) {
+	CosmeticOverrideSystem& sys = CosmeticsRef();
+	if (!sys.InDemoContext()) {
+		advancedfx::Warning("%s cosmetics spectate: not in a demo.\n", cmd);
+		return false;
+	}
+	if (targetSteam == 0) {
+		advancedfx::Warning("%s cosmetics spectate: invalid steamId.\n", cmd);
+		return false;
+	}
+
+	int specIndex = 0;
+	int targetSpecIndex = -1;
+	unsigned int targetHealth = 0;
+	const int highest = GetHighestEntityIndex();
+	for (int i = 0; i <= highest; ++i) {
+		CEntityInstance* ent = EntFromIndex(i);
+		if (!ent || !ent->IsPlayerController())
+			continue;
+		specIndex++;
+		if (ent->GetSteamId() != targetSteam)
+			continue;
+
+		SOURCESDK::CS2::CBaseHandle pawnHandle = ent->GetPlayerPawnHandle();
+		if (!pawnHandle.IsValid()) {
+			advancedfx::Message("%s cosmetics spectate: steam=%llu dead (no pawn) -- skipped.\n",
+				cmd, (unsigned long long)targetSteam);
+			return false;
+		}
+		CEntityInstance* pawn = EntFromIndex(pawnHandle.GetEntryIndex());
+		if (!pawn || !pawn->IsPlayerPawn()) {
+			advancedfx::Message("%s cosmetics spectate: steam=%llu dead (pawn gone) -- skipped.\n",
+				cmd, (unsigned long long)targetSteam);
+			return false;
+		}
+		targetHealth = pawn->GetHealth();
+		if (targetHealth <= 0) {
+			advancedfx::Message("%s cosmetics spectate: steam=%llu dead (health=%u) -- skipped.\n",
+				cmd, (unsigned long long)targetSteam, targetHealth);
+			return false;
+		}
+		targetSpecIndex = specIndex;
+		break;
+	}
+	if (targetSpecIndex < 0) {
+		advancedfx::Warning("%s cosmetics spectate: steam=%llu not in match.\n",
+			cmd, (unsigned long long)targetSteam);
+		return false;
+	}
+
+	// Prefer direct observer-target write when the local viewer pawn exists; otherwise
+	// fall back to a single spec_player call (only for alive targets -- never scan 1..10).
+	CEntityInstance* viewerPawn = AfxGetLocalViewerPawn();
+	bool usedObserverWrite = false;
+	if (viewerPawn) {
+		for (int i = 0; i <= highest; ++i) {
+			CEntityInstance* ent = EntFromIndex(i);
+			if (!ent || !ent->IsPlayerController() || ent->GetSteamId() != targetSteam)
+				continue;
+			SOURCESDK::CS2::CBaseHandle targetPawnHandle = ent->GetPlayerPawnHandle();
+			unsigned char* viewer = (unsigned char*)viewerPawn;
+			void* pObs = nullptr;
+			__try {
+				pObs = *(void**)(viewer + g_clientDllOffsets.C_BasePlayerPawn.m_pObserverServices);
+			} __except (EXCEPTION_EXECUTE_HANDLER) {
+				pObs = nullptr;
+			}
+			if (pObs) {
+				unsigned char* obs = (unsigned char*)pObs;
+				__try {
+					*(uint8_t*)(obs + g_clientDllOffsets.CPlayer_ObserverServices.m_iObserverMode) = 2;
+					*(unsigned int*)(obs + g_clientDllOffsets.CPlayer_ObserverServices.m_hObserverTarget) =
+						targetPawnHandle.ToInt();
+					usedObserverWrite = true;
+				} __except (EXCEPTION_EXECUTE_HANDLER) {
+					usedObserverWrite = false;
+				}
+			}
+			break;
+		}
+	}
+
+	if (!g_pEngineToClient) {
+		advancedfx::Warning("%s cosmetics spectate: engine client unavailable.\n", cmd);
+		return false;
+	}
+	if (usedObserverWrite) {
+		g_pEngineToClient->ExecuteClientCmd(0, "spec_mode 2", true);
+	} else {
+		char specCmd[32];
+		std::snprintf(specCmd, sizeof(specCmd), "spec_player %d", targetSpecIndex);
+		g_pEngineToClient->ExecuteClientCmd(0, "spec_mode 2", true);
+		g_pEngineToClient->ExecuteClientCmd(0, specCmd, true);
+	}
+
+	advancedfx::Message("%s cosmetics spectate: steam=%llu specIndex=%d health=%u ok.\n",
+		cmd, (unsigned long long)targetSteam, targetSpecIndex, targetHealth);
+	return true;
+}
+
 void Cosmetics_PrintVisualDiag(const char* cmd) {
 	CosmeticOverrideSystem& sys = CosmeticsRef();
 
@@ -702,6 +806,14 @@ void Cosmetics_PrintVisualDiag(const char* cmd) {
 	CEntityInstance* pawn = EntFromIndex(pawnIndex);
 	if (!pawn || !pawn->IsPlayerPawn()) {
 		advancedfx::Warning("%s cosmetics visualdiag: pawn=%d not resolvable.\n", cmd, pawnIndex);
+		return;
+	}
+	const unsigned int pawnHealth = pawn->GetHealth();
+	advancedfx::Message("  spectatePawn=%d spectateHealth=%u spectateSteam=%llu\n",
+		pawnIndex, pawnHealth, (unsigned long long)steamId);
+	if (pawnHealth <= 0) {
+		advancedfx::Warning("%s cosmetics visualdiag: pawn=%d is dead (health=%u) -- skip.\n",
+			cmd, pawnIndex, pawnHealth);
 		return;
 	}
 	SOURCESDK::CS2::CBaseHandle wh = pawn->GetActiveWeaponHandle();
@@ -958,6 +1070,46 @@ void Cosmetics_LogGlovePick(uint64_t steamId, int newDef, int newPaint, float ne
 	MvmAgentLog("DBG", "CosmeticDebug.cpp:LogGlovePick", "glove_pick", data);
 }
 
+void Cosmetics_LogWeaponPick(uint64_t steamId, int defIndex, int newPaint, float newWear, int newSeed, int statTrak) {
+	if (!MvmDebugLog_Active())
+		return;
+	CosmeticOverrideSystem& sys = CosmeticsRef();
+	const std::string playerName = sys.NameForSteamId(steamId);
+	const char* nameDisp = playerName.empty() ? "(unnamed)" : playerName.c_str();
+
+	int beforePaint = -1;
+	int beforeLegacy = -2;
+	int weaponIdx = -1;
+	CEntityInstance* weapon = FindOwnedWeaponByDef(steamId, defIndex, &weaponIdx);
+	if (weapon) {
+		WeaponSkinLive ws;
+		ReadWeaponSkinLive(weapon, &ws);
+		if (ws.ok) {
+			beforePaint = ws.paint;
+			if (beforePaint > 0)
+				beforeLegacy = PaintKitLegacyModel(beforePaint);
+		}
+	}
+
+	const int wantLegacy = PaintKitLegacyModel(newPaint);
+	const uint64_t wantMask = ResolveMeshMask(newPaint, /*knife=*/false, sys.MeshLegacyMode(),
+		1, 2); // log with default masks; tunables live in sys but 1/2 match defaults
+
+	MvmDebugLog_LinefAlways("cosmetics.weapon",
+		"PICK player='%s' steam=%llu def=%d idx=%d obs=%u before(paint=%d legacy=%d) want(paint=%d legacy=%d mask=%llu wear=%.4f seed=%d st=%d)",
+		nameDisp, (unsigned long long)steamId, defIndex, weaponIdx,
+		(unsigned)sys.CurrentObserverMode(),
+		beforePaint, beforeLegacy, newPaint, wantLegacy, (unsigned long long)wantMask,
+		newWear, newSeed, statTrak);
+	char data[512];
+	std::snprintf(data, sizeof(data),
+		"\"player\":\"%s\",\"steamId\":%llu,\"def\":%d,\"idx\":%d,\"obs\":%u,"
+		"\"beforePaint\":%d,\"beforeLegacy\":%d,\"wantPaint\":%d,\"wantLegacy\":%d,\"wantMask\":%llu",
+		nameDisp, (unsigned long long)steamId, defIndex, weaponIdx, (unsigned)sys.CurrentObserverMode(),
+		beforePaint, beforeLegacy, newPaint, wantLegacy, (unsigned long long)wantMask);
+	MvmAgentLog("FP-VM", "CosmeticDebug.cpp:LogWeaponPick", "weapon_pick", data);
+}
+
 void Cosmetics_LogSpectateTargetChange(uint64_t fromSteamId, uint64_t toSteamId, const char* reason) {
 	if (!MvmDebugLog_Active())
 		return;
@@ -978,8 +1130,9 @@ void Cosmetics_LogSpectateTargetChange(uint64_t fromSteamId, uint64_t toSteamId,
 	const int gloveRearm = (toProf && toProf->gloves.set && toProf->gloves.defIndex > 0) ? 1 : 0;
 
 	MvmDebugLog_LinefAlways("cosmetics.spectate",
-		"SWITCH reason=%s from='%s' steam=%llu gloves='%s' -> to='%s' steam=%llu gloves='%s' profiled=%d gloveRearm=%d",
-		reason ? reason : "?", fromName.c_str(), (unsigned long long)fromSteamId, fromGloves.c_str(),
+		"SWITCH reason=%s obs=%u pawn=%d from='%s' steam=%llu gloves='%s' -> to='%s' steam=%llu gloves='%s' profiled=%d gloveRearm=%d",
+		reason ? reason : "?", (unsigned)sys.CurrentObserverMode(), sys.CurrentSpectatedPawnIndex(),
+		fromName.c_str(), (unsigned long long)fromSteamId, fromGloves.c_str(),
 		toName.c_str(), (unsigned long long)toSteamId, toGloves.c_str(), toProfiled, gloveRearm);
 
 	char data[384];
@@ -1108,6 +1261,24 @@ void Cosmetics_LogLiveSkinState(const char* reason) {
 	}
 	if (logged == 0)
 		MvmDebugLog_LinefAlways("skin.live", "   (no econ weapons owned by this player in the entity list right now)");
+
+	// First-person viewmodel (HUD-arms child) -- often differs from the world weapon entity above.
+	if (pawn && activeIdx >= 0) {
+		CEntityInstance* activeEnt = EntFromIndex(activeIdx);
+		const char* activeCls = activeEnt ? activeEnt->GetClassName() : nullptr;
+		int vmIdx = -1;
+		int vmPaint = -1;
+		uint64_t vmMesh = 0;
+		const bool vmFound = ReadActiveViewmodelWeaponState((unsigned char*)pawn, activeCls,
+			&vmIdx, &vmPaint, &vmMesh);
+		int vmLegacy = (vmPaint > 0) ? PaintKitLegacyModel(vmPaint) : -2;
+		MvmDebugLog_LinefAlways("skin.live",
+			"   viewmodel worldIdx=%d vmIdx=%d cls='%s' vmPaint=%d vmMesh=%llu vmLegacy=%d found=%d",
+			activeIdx, vmIdx, activeCls ? activeCls : "?", vmPaint,
+			(unsigned long long)vmMesh, vmLegacy, vmFound ? 1 : 0);
+	} else {
+		MvmDebugLog_LinefAlways("skin.live", "   viewmodel (no active weapon / pawn)");
+	}
 }
 
 // Per-MAIN-thread-frame change detector for the live skin log. Cheap reads each frame (only while

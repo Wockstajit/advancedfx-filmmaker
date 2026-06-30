@@ -353,6 +353,8 @@ target_sources(${PROJECT_NAME} PRIVATE
     Filmmaker/Cosmetics/CosmeticOverrideSystem.h
     Filmmaker/Cosmetics/CosmeticModelSwap.cpp
     Filmmaker/Cosmetics/CosmeticModelSwap.h
+    Filmmaker/Cosmetics/CosmeticDirectComposite.cpp
+    Filmmaker/Cosmetics/CosmeticDirectComposite.h
     Filmmaker/Cosmetics/CosmeticAnimFix.cpp
     Filmmaker/Cosmetics/CosmeticAnimFix.h
     Filmmaker/Cosmetics/CosmeticCommands.cpp

@@ -47,13 +47,14 @@ uint64_t ResolveSteamIdArg(const char* cmd, const char* token) {
 	return id;
 }
 
-// After a successful profile mutation: arm this demo session and surface the two gating hints (disabled /
-// offsets unresolved) so the user understands why they might not see a change. The confirmation
-// line itself is printed by the caller (so it can use advancedfx::Message's printf-style
-// formatting directly, matching the existing DoCosmetics() style).
-void AfterMutation(const char* cmd) {
-	CosmeticsRef().Arm();               // an explicit apply this session -> allow it to render (start-clean)
-	CosmeticsRef().RequestApplyNudge(); // refresh the demo render after the change (PostDataUpdate + play-out)
+// After a successful profile mutation: arm this demo session. Weapon SKIN changes go straight to
+// composite refresh (no demo_resume flicker). Agent/glove/knife/body swaps still schedule a tick nudge.
+void AfterMutation(const char* cmd, bool scheduleTickNudge) {
+	CosmeticsRef().Arm();
+	if (scheduleTickNudge)
+		CosmeticsRef().RequestApplyNudge();
+	else
+		CosmeticsRef().RequestCompositeRefresh();
 	if (!CosmeticsRef().OffsetsAvailable())
 		advancedfx::Warning("%s cosmetics: econ offsets did not resolve; cosmetics will not render.\n", cmd);
 }
@@ -74,6 +75,7 @@ void PrintUsage(const char* cmd) {
 		"  %s cosmetics player <steamId|current> agent <modelPath|default>\n"
 			"  %s cosmetics diag   (dump the spectated player's live weapon econ state)\n"
 			"  %s cosmetics visualdiag   (read-only: full visual-cache state + flag offsets)\n"
+			"  %s cosmetics spectate <steamId|current>   (first-person spectate by steam; skips dead)\n"
 			"  %s cosmetics skinlog   (log the spectated player's full LIVE skin state to mvm_debug; auto-logs on switch/seek/weapon/loadout change)\n"
 			"  %s cosmetics rebuild once   (re-assert enabled rebuildflags on matched weapons now)\n"
 			"  %s cosmetics rebuild auto [0|1]   (per-frame writing of enabled rebuildflags on change)\n"
@@ -92,7 +94,7 @@ void PrintUsage(const char* cmd) {
 			"  %s cosmetics recompose [0|1]   (force material re-composite after writes)\n"
 			"  %s cosmetics vtidx <comp> <sec>   (tune UpdateComposite vtable indices, -1=skip)\n"
 			"  %s cosmetics vtprobe <idx>   (bisect OnDataChanged: call weapon vtable[idx](this,0) now)\n",
-		cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd);
+		cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd);
 }
 
 // Parses ORDER-INDEPENDENT key/value tokens of the form "key=value" (or "key value", to be lenient)
@@ -227,11 +229,13 @@ void DoPlayer(int argc, advancedfx::ICommandArgs* args, const char* cmd) {
 		// being chased happens later on a quick weapon SWITCH (entity recreation), not here.
 		advancedfx::Message("%s cosmetics uiclick request: slot=weapon def=%d paint=%d wear=%.4f seed=%d stattrak=%d (what the UI sent).\n",
 			cmd, defIndex, paintKit, wear, seed, statTrak);
+		Cosmetics_LogWeaponPick(id, defIndex, paintKit, wear, seed, statTrak);
 		Cosmetics_LogWeaponSnapshot(cmd, "before", id, defIndex);
 		CosmeticsRef().SetWeapon(id, defIndex, paintKit, wear, seed, statTrak);
 		advancedfx::Message("%s cosmetics: weapon steamId=%llu def=%d paint=%d wear=%.4f seed=%d stattrak=%d.\n",
 			cmd, (unsigned long long)id, defIndex, paintKit, wear, seed, statTrak);
-		AfterMutation(cmd);
+		AfterMutation(cmd, false);
+		MvmCrashWatch_Arm(-1, "weapon-paint-apply");
 		CosmeticsRef().RebuildOnce(); // apply the override to live weapons NOW so the change shows immediately
 		Cosmetics_LogWeaponSnapshot(cmd, "after", id, defIndex);
 	} else if (TokenIs(slot, "knife")) {
@@ -250,7 +254,7 @@ void DoPlayer(int argc, advancedfx::ICommandArgs* args, const char* cmd) {
 		CosmeticsRef().SetKnife(id, defIndex, paintKit, wear, seed);
 		advancedfx::Message("%s cosmetics: knife steamId=%llu def=%d paint=%d wear=%.4f seed=%d.\n",
 			cmd, (unsigned long long)id, defIndex, paintKit, wear, seed);
-		AfterMutation(cmd);
+		AfterMutation(cmd, true);
 		CosmeticsRef().RebuildOnce(); // apply NOW so the knife change shows immediately
 		Cosmetics_LogWeaponSnapshot(cmd, "after", id, 0);
 	} else if (TokenIs(slot, "gloves")) {
@@ -276,7 +280,7 @@ void DoPlayer(int argc, advancedfx::ICommandArgs* args, const char* cmd) {
 		}
 		advancedfx::Message("%s cosmetics: gloves steamId=%llu def=%d paint=%d wear=%.4f seed=%d.\n",
 			cmd, (unsigned long long)id, defIndex, paintKit, wear, seed);
-		AfterMutation(cmd);
+		AfterMutation(cmd, true);
 	} else if (TokenIs(slot, "agent")) {
 		const char* model = args->ArgV(5);
 		if (0 != _stricmp(model, "default") && !IsValidAgentModelPath(model)) {
@@ -285,7 +289,7 @@ void DoPlayer(int argc, advancedfx::ICommandArgs* args, const char* cmd) {
 		}
 		CosmeticsRef().SetAgent(id, model, 0);
 		advancedfx::Message("%s cosmetics: agent steamId=%llu model='%s'.\n", cmd, (unsigned long long)id, model);
-		AfterMutation(cmd);
+		AfterMutation(cmd, true);
 	} else {
 		advancedfx::Warning("%s cosmetics player: unknown slot '%s' (expected weapon|knife|gloves|agent).\n", cmd, slot);
 	}
@@ -700,6 +704,14 @@ void Cosmetics_RunCommand(int argc, advancedfx::ICommandArgs* args, const char* 
 		Cosmetics_PrintSpectatedDebug(cmd);
 	} else if (TokenIs(sub, "visualdiag")) {
 		Cosmetics_PrintVisualDiag(cmd);
+	} else if (TokenIs(sub, "spectate")) {
+		if (argc < 4) {
+			advancedfx::Warning("%s cosmetics spectate: usage: spectate <steamId|current>\n", cmd);
+			return;
+		}
+		uint64_t id = ResolveSteamIdArg(cmd, args->ArgV(3));
+		if (id != 0)
+			Cosmetics_SpectateSteamId(cmd, id);
 	} else if (TokenIs(sub, "skinlog")) {
 		// Force one LIVE per-player skin-state snapshot into the mvm_debug log right now. (The same
 		// snapshot fires automatically on player switch / seek / weapon / loadout change while

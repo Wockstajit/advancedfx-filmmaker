@@ -759,6 +759,24 @@ uint8_t AfxGetLocalObserverState(int * outTargetIndex) {
     return mode;
 }
 
+CEntityInstance* AfxGetLocalViewerPawn() {
+    if (!g_ClientDll_GetSplitScreenPlayer)
+        return nullptr;
+    CEntityInstance* controller = g_ClientDll_GetSplitScreenPlayer(0);
+    if (!controller)
+        return nullptr;
+    if (controller->IsPlayerPawn())
+        return controller;
+    auto ph = controller->GetPlayerPawnHandle();
+    if (!ph.IsValid())
+        return nullptr;
+    int idx = ph.GetEntryIndex();
+    if (idx < 0 || idx > GetHighestEntityIndex() || !g_pEntityList || !*g_pEntityList || !g_GetEntityFromIndex)
+        return nullptr;
+    CEntityInstance* pawn = (CEntityInstance*)g_GetEntityFromIndex(*g_pEntityList, idx);
+    return (pawn && pawn->IsPlayerPawn()) ? pawn : nullptr;
+}
+
 // Resolves the player PAWN currently being viewed, returning its entity index or -1.
 //
 // Primary path is the engine observer-services target (AfxGetLocalObserverState). In many CS2

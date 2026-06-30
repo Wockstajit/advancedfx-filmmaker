@@ -35,6 +35,18 @@ param(
 $ErrorActionPreference = 'Stop'
 $automationRoot = Split-Path -Parent $PSScriptRoot
 $root = Split-Path -Parent $automationRoot
+$meshPaintsPath = Join-Path $automationRoot 'config\weapon_mesh_test_paints.json'
+if (-not (Test-Path -LiteralPath $meshPaintsPath)) {
+    throw "Missing $meshPaintsPath — run: python automation/tools/extract_weapon_mesh_test_paints.py"
+}
+$meshPaintsDoc = Get-Content -LiteralPath $meshPaintsPath -Raw -Encoding UTF8 | ConvertFrom-Json
+function Get-WeaponMeshPaints([int]$defIndex) {
+    $key = "$defIndex"
+    if ($meshPaintsDoc.weapons.PSObject.Properties.Name -contains $key) {
+        return $meshPaintsDoc.weapons.$key
+    }
+    return $null
+}
 $outAbs = if ([System.IO.Path]::IsPathRooted($OutDir)) { $OutDir } else { Join-Path $root $OutDir }
 New-Item -ItemType Directory -Path $outAbs -Force | Out-Null
 $logFile = Join-Path $outAbs 'customizer.log'
@@ -125,8 +137,15 @@ try {
         Start-Sleep -Milliseconds 600
     }
     if (-not $steam -or $steam -eq '0') { throw "Could not resolve a spectated player. See $logFile" }
-    Write-Host "Spectating steam=$steam heldDef=$def pawn=$pawn" -ForegroundColor Green
-    Add-Content -LiteralPath $logFile -Value "SPECTATE steam=$steam heldDef=$def pawn=$pawn"
+    $wp = Get-WeaponMeshPaints ([int]$def)
+    if (-not $wp) {
+        throw "No weapon_mesh_test_paints entry for held defIndex=$def. Add it via extract_weapon_mesh_test_paints.py"
+    }
+    $skinPaint = [int]$wp.skinTestPaint.id
+    $meshTogglePaint = [int]$wp.meshTogglePaint
+    $reapplyPaint = [int]$wp.modernPaint.id
+    Write-Host "Spectating steam=$steam heldDef=$def ($($wp.weaponName)) paints: skin=$skinPaint meshToggle=$meshTogglePaint reapply=$reapplyPaint" -ForegroundColor Green
+    Add-Content -LiteralPath $logFile -Value "SPECTATE steam=$steam heldDef=$def weapon=$($wp.weaponName) skinPaint=$skinPaint meshToggle=$meshTogglePaint legacy=$($wp.legacyPaint.id) modern=$($wp.modernPaint.id)"
 
     # ===== STEP 3: baseline default state (authoritative) + screenshots =====
     $st0 = Invoke-Netcon -Commands @('mirv_filmmaker cosmetics status') -ReadSeconds 2.0
@@ -150,7 +169,6 @@ try {
     Set-FirstPerson
 
     # ===== STEP 4-5: weapon skin (FIRST person / viewmodel) =====
-    $skinPaint = 38
     Invoke-Netcon -Commands @("mirv_filmmaker cosmetics player current weapon $def paint $skinPaint wear 0.05 seed 0",
         'mirv_filmmaker cosmetics enabled 1') -ReadSeconds 2.0 | Out-Null
     Start-Sleep -Milliseconds 800
@@ -160,7 +178,7 @@ try {
     $skinNow = Get-Paint $dSkin
     $skinDiff = Diff-Mean $fpDefault $fpSkin $WeaponCrop
     $skinOk = ($skinNow -eq "$skinPaint")
-    Record ("weapon-skin: paint def6 $basePaint->$skinNow (want $skinPaint) -> " + $(if($skinOk){'APPLIED on model'}else{'NOT applied'}) + (" ; fp-crop diff={0:N2}" -f $skinDiff))
+    Record ("weapon-skin: paint def6 $basePaint->$skinNow (want $skinPaint $($wp.skinTestPaint.name)) -> " + $(if($skinOk){'APPLIED on model'}else{'NOT applied'}) + (" ; fp-crop diff={0:N2}" -f $skinDiff))
 
     # ===== STEP 6-9: agent (THIRD person model) =====
     Set-ThirdPerson ([int]$pawn)
@@ -202,7 +220,7 @@ try {
 
     # ===== STEP 10: legacy vs CS2 mesh (same paint, toggle only) =====
     Invoke-Netcon -Commands @('mirv_filmmaker cosmetics mesh modern',
-        "mirv_filmmaker cosmetics player current weapon $def paint 38 wear 0.05 seed 0",'mirv_filmmaker cosmetics enabled 1') -ReadSeconds 2.0 | Out-Null
+        "mirv_filmmaker cosmetics player current weapon $def paint $meshTogglePaint wear 0.05 seed 0",'mirv_filmmaker cosmetics enabled 1') -ReadSeconds 2.0 | Out-Null
     Advance-Ticks
     $meshModern = Capture '50_mesh_modern.png'
     Invoke-Netcon -Commands @('mirv_filmmaker cosmetics mesh legacy') -ReadSeconds 1.5 | Out-Null
@@ -210,7 +228,7 @@ try {
     $meshLegacy = Capture '51_mesh_legacy.png'
     $meshDiff = Diff-Mean $meshModern $meshLegacy $WeaponCrop
     Invoke-Netcon -Commands @('mirv_filmmaker cosmetics mesh auto') -ReadSeconds 1.0 | Out-Null
-    Record ("mesh-toggle(same paint 38): modern-vs-legacy diff={0:N2} (geometry/UV subtle)" -f $meshDiff)
+    Record ("mesh-toggle(same paint $meshTogglePaint $($wp.legacyPaint.name)): modern-vs-legacy diff={0:N2} (geometry/UV subtle)" -f $meshDiff)
 
     # ===== STEP 11-12: reload demo, verify NON-PERSISTENCE (start-clean), then reapply =====
     Write-Host "Reload demo + verify non-persistence..." -ForegroundColor Cyan
@@ -228,12 +246,12 @@ try {
     $persistOk = ($armedR -eq '0') -and ($paintR -eq $basePaint) -and ($agentR -eq $baseAgent)
     Record ("non-persistence: after reload armed=$armedR paint=$paintR(base $basePaint) agent=$agentR -> " + $(if($persistOk){'DEFAULT (no carry-over) PASS'}else{'OVERRIDE PERSISTED (fail)'}))
     # Reapply on purpose -> override returns
-    Invoke-Netcon -Commands @("mirv_filmmaker cosmetics player current weapon $def paint 859 wear 0.20 seed 0",
+    Invoke-Netcon -Commands @("mirv_filmmaker cosmetics player current weapon $def paint $reapplyPaint wear 0.20 seed 0",
         'mirv_filmmaker cosmetics enabled 1') -ReadSeconds 2.0 | Out-Null
     Start-Sleep -Milliseconds 800
     $dRA = Diag; $paintRA = Get-Paint $dRA
-    $reapplyOk = ($paintRA -eq '859')
-    Record ("reapply-after-reload: paint $paintR->$paintRA (want 859) -> " + $(if($reapplyOk){'RETURNS on demand PASS'}else{'did-not-return'}))
+    $reapplyOk = ($paintRA -eq "$reapplyPaint")
+    Record ("reapply-after-reload: paint $paintR->$paintRA (want $reapplyPaint $($wp.modernPaint.name)) -> " + $(if($reapplyOk){'RETURNS on demand PASS'}else{'did-not-return'}))
 
     Write-Host "`n==== SUMMARY ====" -ForegroundColor Cyan
     $results | ForEach-Object { Write-Host $_ }

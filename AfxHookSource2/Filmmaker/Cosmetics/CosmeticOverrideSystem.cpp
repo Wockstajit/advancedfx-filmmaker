@@ -2,6 +2,7 @@
 
 #include "CosmeticCatalog.h"
 #include "CosmeticModelSwap.h"
+#include "CosmeticDirectComposite.h"
 #include "CosmeticDebugLog.h"
 
 #include "../Demo/PlayingDemoPath.h"
@@ -29,12 +30,10 @@ namespace Filmmaker {
 
 namespace {
 
-// Frames of dense, EVERY-frame composite re-assert after a skin change or a tick-nudge play-out.
-// Frame-based (NOT tick-based) so it ALSO fires while the demo is PAUSED -- the tick-throttled periodic
-// re-assert in RunFrame is a no-op when the demo tick is frozen, which left a change made while paused
-// reverting to the real skin: the ~10-tick nudge plays out (< the 16-tick periodic), the engine rebuilds
-// the composite from the authoritative item during it, and after re-pausing nothing re-applied ours.
-constexpr uint64_t kCompositeHoldFrames = 150;
+// One-shot composite burst after a skin apply (avoids the old 150-frame hammer during playback).
+constexpr int kCompositeBurstShots = 2;
+// Min frames between clobber-driven re-composites during demo playback (demo packets reset attrs often).
+constexpr uint64_t kClobberCompositeCooldownFrames = 64;
 
 // Resolves an entity by index the same way MirvCosmetics.cpp / CameraEditorHud.cpp do: bounds +
 // null-list checks before touching the (possibly stale) global pointers.
@@ -115,30 +114,8 @@ void ReadEntityModelPath(CEntityInstance* ent, char* out, size_t outSize) {
 	}
 }
 
-// SEH-guarded read of an entity's LIVE rendered mesh-group mask (CModelState::m_MeshGroupMask) via the
-// same body-component/skeleton chain as ReadEntityModelPath. This is the decisive readback for the
-// legacy-vs-CS2 "model doesn't switch" bug: it shows the weapon's ACTUAL mesh-group selection, so we can
-// see (a) whether our SetMeshGroupMask stuck or the engine reverted it, and (b) the NATURAL mask value
-// of a correctly-rendering weapon (the real legacy/modern bit values, instead of guessing 1/2). Returns
-// 0 on any failure. POD-only body (no C++ objects) so __try is permitted.
-uint64_t ReadEntityMeshGroupMask(CEntityInstance* ent) {
-	if (!ent)
-		return 0;
-	const ClientDllOffsets_t& o = g_clientDllOffsets;
-	if (o.ModelChain.m_CBodyComponent == 0 || o.ModelChain.m_skeletonInstance == 0
-		|| o.ModelChain.m_modelState == 0 || o.ModelChain.m_MeshGroupMask == 0)
-		return 0;
-	unsigned char* p = (unsigned char*)ent;
-	__try {
-		unsigned char* bodyComp = *(unsigned char**)(p + o.ModelChain.m_CBodyComponent);
-		if ((uintptr_t)bodyComp <= 0x10000)
-			return 0;
-		unsigned char* modelState = bodyComp + o.ModelChain.m_skeletonInstance + o.ModelChain.m_modelState;
-		return *(uint64_t*)(modelState + o.ModelChain.m_MeshGroupMask);
-	} __except (1) {
-		return 0;
-	}
-}
+// SEH-guarded read of an entity's LIVE rendered mesh-group mask -- see ReadEntityMeshGroupMask in
+// CosmeticModelSwap.cpp (shared with viewmodel mirror diagnostics).
 
 // POD result of the SEH-guarded write -- no constructors, safe to return out of __try/__except.
 struct ApplyResult {
@@ -159,126 +136,6 @@ bool SafeVCall(void* obj, int idx, int arg) {
 		void* fn = vt[idx];
 		if (!fn) return false;
 		((UpdateComposite_t)fn)(obj, arg);
-		return true;
-	} __except (1) {
-		return false;
-	}
-}
-
-typedef void (__fastcall* DirectUpdateCompositeMaterial_t)(void* compositeOwner, bool force);
-typedef void (__fastcall* DirectUpdateCompositeMaterialSet_t)(void* weapon, bool force);
-typedef void (__fastcall* DirectUpdateSkin_t)(void* weapon, bool force);
-typedef void (__fastcall* DirectSetAttributeValueByName_t)(void* itemView, const char* attrName, float value);
-
-struct DirectCompositeFns {
-	DirectUpdateCompositeMaterial_t updateCompositeMaterial;
-	DirectUpdateCompositeMaterialSet_t updateCompositeMaterialSet;
-	DirectUpdateSkin_t updateSkin;
-	DirectSetAttributeValueByName_t setAttributeValueByName;
-	bool resolved;
-};
-
-struct DirectCompositeResult {
-	bool resolved;
-	bool called;
-	bool faulted;
-};
-
-void* ResolveRelCall(size_t callAddr) {
-	if (!callAddr)
-		return nullptr;
-	int32_t rel = *(int32_t*)(callAddr + 1);
-	return (void*)(callAddr + 5 + rel);
-}
-
-size_t FindClientTextPattern(const char* pattern) {
-	HMODULE client = GetModuleHandleA("client.dll");
-	if (!client)
-		return 0;
-	Afx::BinUtils::ImageSectionsReader sections(client);
-	if (sections.Eof())
-		return 0;
-	Afx::BinUtils::MemRange result = Afx::BinUtils::FindPatternString(sections.GetMemRange(), pattern);
-	return result.IsEmpty() ? 0 : result.Start;
-}
-
-const DirectCompositeFns& ResolveDirectCompositeFns() {
-	static bool s_attempted = false;
-	static DirectCompositeFns s_fns = {};
-	if (s_attempted)
-		return s_fns;
-	s_attempted = true;
-
-	// Static-research signatures from Andromeda-CS2-Base. The two SEARCH_TYPE_CALL patterns resolve
-	// to their E8 target; the others are function prologues and are used directly.
-	// NOTE: FindPatternString consumes TWO hex chars per byte, so a wildcard byte MUST be "??"
-	// (a single "?" is read as half a byte and silently shifts every literal after it -> no match,
-	// which is what previously left resolved=0 even though these AOBs are present in client.dll).
-	size_t updateCompositeCall = FindClientTextPattern("E8 ?? ?? ?? ?? 48 8D 8B ?? ?? ?? ?? 48 89 BC 24");
-	size_t setAttrCall = FindClientTextPattern("E8 ?? ?? ?? ?? 66 41 0F 6E D4");
-	size_t updateCompositeSet = FindClientTextPattern("40 55 53 41 57 48 8D AC 24 00 FE ?? ??");
-	size_t updateSkin = FindClientTextPattern("48 89 5C 24 08 57 48 83 EC 20 8B DA 48 8B F9 E8 ?? ?? ?? ?? F6 C3 01 74 0A 33 D2 48 8B CF E8 ?? ?? ?? ?? 48 8D 8F 60 19 00 00");
-
-	s_fns.updateCompositeMaterial = (DirectUpdateCompositeMaterial_t)ResolveRelCall(updateCompositeCall);
-	s_fns.updateCompositeMaterialSet = (DirectUpdateCompositeMaterialSet_t)updateCompositeSet;
-	s_fns.updateSkin = (DirectUpdateSkin_t)updateSkin;
-	s_fns.setAttributeValueByName = (DirectSetAttributeValueByName_t)ResolveRelCall(setAttrCall);
-	s_fns.resolved = s_fns.updateCompositeMaterial && s_fns.updateCompositeMaterialSet && s_fns.updateSkin;
-	return s_fns;
-}
-
-DirectCompositeResult FireDirectCompositeRefresh(
-	unsigned char* weapon,
-	unsigned char* itemView,
-	ptrdiff_t offRestoreMaterial,
-	ptrdiff_t compositeOwnerOffset,
-	int32_t paintKit,
-	float wear,
-	int32_t seed) {
-	DirectCompositeResult out = {};
-	const DirectCompositeFns& fns = ResolveDirectCompositeFns();
-	out.resolved = fns.resolved;
-	if (!weapon || !itemView || !fns.resolved)
-		return out;
-
-	unsigned char* compositeOwner = weapon + compositeOwnerOffset;
-	__try {
-		if (offRestoreMaterial)
-			*(bool*)(itemView + offRestoreMaterial) = true;
-		if (fns.setAttributeValueByName) {
-			fns.setAttributeValueByName(itemView, "set item texture prefab", (float)paintKit);
-			fns.setAttributeValueByName(itemView, "set item texture wear", wear);
-			fns.setAttributeValueByName(itemView, "set item texture seed", (float)seed);
-		}
-		fns.updateCompositeMaterial(compositeOwner, true);
-		fns.updateCompositeMaterialSet(weapon, false);
-		fns.updateSkin(weapon, true);
-		// Force the renderable to adopt the freshly composited skin NOW (Andromeda fires this right
-		// after UpdateSkin); without it the new composite is not shown until the next networked update.
-		PostDataUpdate(weapon);
-		out.called = true;
-	} __except (1) {
-		out.faulted = true;
-	}
-	return out;
-}
-
-// Engine named-setter fallback for items with NO networked paint attribute to overwrite (default
-// knives/gloves, freshly-picked-up or viewmodel weapons -- the attrWritten=0 case). Andromeda applies
-// skins this way through the client.dll function C_EconItemView::SetAttributeValueByName, which sets the
-// dynamic attribute on the item view (adding it if absent) instead of overwriting an existing vector
-// slot. SEH-guarded; returns true only if the resolved setter was actually called. The subsequent
-// composite refresh (FireDirectCompositeRefresh) is what makes the new value render.
-bool FireNamedSkinAttributes(unsigned char* itemView, int paintKit, float wear, int seed, int statTrak) {
-	const DirectCompositeFns& fns = ResolveDirectCompositeFns();
-	if (!itemView || !fns.setAttributeValueByName)
-		return false;
-	__try {
-		fns.setAttributeValueByName(itemView, "set item texture prefab", (float)paintKit);
-		fns.setAttributeValueByName(itemView, "set item texture wear", wear);
-		fns.setAttributeValueByName(itemView, "set item texture seed", (float)seed);
-		if (statTrak >= 0)
-			fns.setAttributeValueByName(itemView, "kill eater", (float)statTrak);
 		return true;
 	} __except (1) {
 		return false;
@@ -651,8 +508,12 @@ void CosmeticOverrideSystem::ResetSessionOverrides(const char* reason) {
 	m_nudgePhase = 0;
 	m_nudgeWasPaused = false;
 	m_framesSinceSeek = 0;     // re-arm the knife-swap stability window on demo load/close
-	m_lastCompositeTick = -1;  // and the periodic composite re-assert
-	m_compositeHoldUntilFrame = 0; // and the dense composite hold window
+	m_lastDemoTickObserved = -1;
+	m_seekSettleFrames = 0;
+	m_vmMirrorSettleFrames = 0;
+	m_lastCompositeTick = -1;
+	m_compositeBurstRemaining = 0;
+	m_lastCompositeFrameByIdx.clear();
 	m_store.Save(); // best-effort normalization of the legacy compatibility file
 	if (MvmDebugLog_Active())
 		MvmDebugLog_Linef("cosmetics.session", "cleared runtime overrides: reason=%s enabled=1 profiles=0 armed=1",
@@ -849,6 +710,7 @@ void CosmeticOverrideSystem::RunFrame() {
 	// Tick clock + nudge run BEFORE the apply gate so a debounced re-seek still fires after a clear
 	// (which empties the store) and so the clock advances every frame regardless of apply state.
 	++m_frameCounter;
+	if (m_vmMirrorSettleFrames > 0) --m_vmMirrorSettleFrames;
 	// Cosmetic state is scoped to one uninterrupted demo run: clear ONLY when the demo PATH changes (a
 	// different demo loaded, or the demo closed). Overrides are keyed by owner XUID and the apply loop
 	// re-discovers entities every frame, so they intentionally PERSIST across scrubs in BOTH directions
@@ -864,6 +726,7 @@ void CosmeticOverrideSystem::RunFrame() {
 			ResetSessionOverrides(curDemo.empty() ? "demo closed" : "demo path changed");
 		}
 	}
+	DetectDemoSeekEarly();
 	MaybeFireTickNudge();
 	// Belt-and-suspenders: enabled cosmetics must always be armed in demo context so the apply loop
 	// is not blocked until the first UI mutation (log evidence: armed=0 blocked ~10s of spectating).
@@ -884,35 +747,17 @@ void CosmeticOverrideSystem::RunFrame() {
 		return;
 	}
 
-	// SEEK-SAFETY GATE: a demo SEEK/scrub mass-destroys and rebuilds the entity list while the engine
-	// replays packets. Running our apply -- especially the model-swap engine calls (SetModel /
-	// UpdateSubclass / GetActiveWeaponHandle / PostDataUpdate) -- on those half-rebuilt entities races
-	// the reconstruction and crashes (confirmed: a backward scrub with the knife swap active crashed
-	// inside the demo packet processing). Detect a seek as a large demo-tick jump since the previous
-	// applied frame (normal playback advances ~1 tick/frame; a seek jumps hundreds-to-thousands) and
-	// SKIP the apply for a short settle window so the list finishes rebuilding before we touch it. The
-	// override is XUID-keyed and re-asserts every frame, so a brief skip is invisible once settled.
-	int curTick = 0;
-	bool haveTick = g_MirvTime.GetCurrentDemoTick(curTick);
-	if (haveTick) {
-		if (m_lastApplyTick >= 0) {
-			int d = curTick - m_lastApplyTick;
-			if (d < 0) d = -d;
-			if (d > 64) {
-				m_seekSettleFrames = 16;   // re-armed on every jump, so it covers a multi-step seek
-				m_framesSinceSeek = 0;     // restart the (longer) knife-swap stability window too
-				m_lastCompositeTick = -1;  // force a fresh periodic composite once the seek settles
-			}
-		}
-		m_lastApplyTick = curTick;
-	}
+	// SEEK-SAFETY GATE: skip apply while entities rebuild after a demo seek (see DetectDemoSeekEarly).
 	if (m_seekSettleFrames > 0) {
 		--m_seekSettleFrames;
 		UpdatePaintkitBridge();
 		return;
 	}
 
-	// Knife-swap stability window. The 16-frame settle above is enough for the SEH-guarded POD
+	int curTick = 0;
+	bool haveTick = g_MirvTime.GetCurrentDemoTick(curTick);
+
+	// Knife-swap stability window. The seek settle above is enough for the SEH-guarded POD
 	// attribute writes + the composite refresh, but NOT for the knife model-type swap: its SetModel +
 	// UpdateSubclass re-derive the weapon's VData/animation set, and if that lands on an entity the
 	// engine is still reconstructing after a seek the animation state is left inconsistent and faults
@@ -929,33 +774,14 @@ void CosmeticOverrideSystem::RunFrame() {
 	const int kKnifeSwapStableFrames = 8;
 	const bool knifeSwapStable = m_framesSinceSeek >= kKnifeSwapStableFrames;
 
-	// Periodic composite re-assert (the "skin only changes once" fix). The engine rebuilds a weapon's
-	// skin composite from the AUTHORITATIVE networked item on every redeploy / data update during
-	// playback, clobbering our one-shot composite -- so an override that fired only on the frame its
-	// value changed renders until the next deploy and then silently reverts to the real skin (exactly
-	// "I changed it again and it showed the default skin"). Re-fire the composite on a demo-tick
-	// throttle so the override keeps rendering through playback. Tick-based -> FPS-independent and a
-	// natural no-op while PAUSED (tick frozen), where the one-shot composite already sticks. The cost
-	// is bounded (a few matched weapons, a few times a demo-second); tune via kCompositeReassertTicks.
-	const int kCompositeReassertTicks = 16; // ~4x per demo-second while playing
-	// Dense re-assert window (frame-based so it ALSO works while PAUSED). THROTTLED to every Nth frame,
-	// NOT every frame: a freshly-applied skin (especially a VANILLA gun getting a brand-new finish, or a
-	// glove paint) must STREAM its texture over several frames, and re-firing the composite every frame
-	// perpetually abandons that stream (engine: "Discarding abandoned streaming texture load ..."), so the
-	// skin never finishes loading and renders as default -- exactly the "the skin didn't change" symptom on
-	// guns that had no skin in the demo. Re-compositing every ~16 frames instead lets the stream complete
-	// between attempts while still re-asserting often enough to survive the play-out clobber.
-	const uint64_t kCompositeHoldEveryFrames = 16;
-	bool periodicComposite = (m_frameCounter < m_compositeHoldUntilFrame)
-		&& (m_frameCounter % kCompositeHoldEveryFrames == 0);
-	if (haveTick) {
-		int dc = curTick - m_lastCompositeTick;
-		if (dc < 0) dc = -dc;
-		if (m_lastCompositeTick < 0 || dc >= kCompositeReassertTicks) {
-			periodicComposite = true;
-			m_lastCompositeTick = curTick;
-		}
-	}
+	// Composite during playback: demo packets reset networked attrs every tick, so firing a full
+	// direct-composite on every attr.changed (or every 16 demo ticks) visibly flickers between the
+	// demo skin and the override. Instead: a short burst after apply, then clobber-driven re-composite
+	// at most once per kClobberCompositeCooldownFrames per entity. cl_paintkit_override (bridge) is
+	// ON by default so the engine builds with our paint when it does rebuild naturally.
+	const bool burstComposite = m_compositeBurstRemaining > 0;
+	if (burstComposite)
+		--m_compositeBurstRemaining;
 
 	++m_lastStats.frame;
 	m_lastStats.entitiesScanned = 0;
@@ -983,7 +809,7 @@ void CosmeticOverrideSystem::RunFrame() {
 	// resolved direct composite refresh whenever a matched weapon's skin data changed this frame (the
 	// auto-update lever -- makes a UI skin pick render immediately and re-applies after seeks/redeploys).
 	ApplyMatchedWeapons(/*forceStale=*/false, /*fireRebuildCall=*/m_recompose, /*fireDirectComposite=*/m_autoComposite,
-		/*allowKnifeSwap=*/knifeSwapStable, /*periodicComposite=*/periodicComposite);
+		/*allowKnifeSwap=*/knifeSwapStable, /*periodicComposite=*/burstComposite);
 	// Gloves + agent (pawn-level model swap), keyed by owner SteamID like the weapon loop.
 	m_gloveApplyBudget = 1;
 	m_constructPaintBudget = 1;
@@ -1016,6 +842,7 @@ void CosmeticOverrideSystem::RunFrame() {
 int CosmeticOverrideSystem::RebuildOnce() {
 	if (!g_cosmeticsOffsetsOk || !InDemoContext() || m_store.Empty())
 		return 0;
+	MvmCrashWatch_Arm(-1, "weapon-rebuild");
 	m_lastStats.entitiesScanned = 0;
 	m_lastStats.entitiesMatched = 0;
 	m_lastStats.entitiesPatched = 0;
@@ -1028,7 +855,8 @@ int CosmeticOverrideSystem::RebuildOnce() {
 	m_lastStats.directCompositeCalls = 0;
 	m_lastStats.directCompositeResolved = 0;
 	m_lastStats.directCompositeFaulted = 0;
-	return ApplyMatchedWeapons(/*forceStale=*/true, /*fireRebuildCall=*/m_recompose, /*fireDirectComposite=*/false,
+	return ApplyMatchedWeapons(/*forceStale=*/true, /*fireRebuildCall=*/m_recompose,
+		/*fireDirectComposite=*/m_autoComposite,
 		/*allowKnifeSwap=*/true, /*periodicComposite=*/false);
 }
 
@@ -1174,16 +1002,71 @@ int CosmeticOverrideSystem::ResolveSpectatedPaintkitOverride() const {
 	return item->paintKit;
 }
 
+void CosmeticOverrideSystem::RequestCompositeRefresh() {
+	m_compositeBurstRemaining = kCompositeBurstShots;
+}
+
+void CosmeticOverrideSystem::AbortActiveTickNudge(const char* reason) {
+	m_pendingNudge = false;
+	if (m_nudgePhase != 1)
+		return;
+	if (m_nudgeWasPaused && g_pEngineToClient)
+		g_pEngineToClient->ExecuteClientCmd(0, "demo_pause", true);
+	m_nudgePhase = 0;
+	m_nudgeWasPaused = false;
+	if (MvmDebugLog_Active())
+		MvmDebugLog_Linef("cosmetics.nudge", "ABORT %s frame=%llu", reason ? reason : "?",
+			(unsigned long long)m_frameCounter);
+}
+
+void CosmeticOverrideSystem::OnDemoSeekDetected(int tickJump) {
+	AbortActiveTickNudge("seek");
+	m_agentState.clear();
+	m_gloveState.clear();
+	m_lastGloveSpectatedSid = 0;
+	m_knifeSwapState.clear();
+	m_framesSinceSeek = 0;
+	m_lastCompositeTick = -1;
+	m_compositeBurstRemaining = 0;
+	m_lastCompositeFrameByIdx.clear();
+	int settle = 32;
+	if (tickJump > 128) settle = 48;
+	if (tickJump > 512) settle = 64;
+	if (tickJump > 2048) settle = 96;
+	if (tickJump > 8192) settle = 128;
+	// Stack / extend when seeks arrive back-to-back (round skip spam).
+	if (m_seekSettleFrames > 0)
+		m_seekSettleFrames = (settle > m_seekSettleFrames) ? settle : (m_seekSettleFrames + settle / 2);
+	else
+		m_seekSettleFrames = settle;
+	m_vmMirrorSettleFrames = m_seekSettleFrames * 4;
+	if (m_vmMirrorSettleFrames < 96) m_vmMirrorSettleFrames = 96;
+	if (MvmDebugLog_Active()) {
+		MvmDebugLog_Linef("cosmetics.seek", "jump=%d settleFrames=%d vmSettle=%d", tickJump, settle, m_vmMirrorSettleFrames);
+		MvmCrashWatch_Arm(-1, "demo-seek"); // widen crash.veh window across seek/settle for round-skip repros
+	}
+}
+
+void CosmeticOverrideSystem::DetectDemoSeekEarly() {
+	int curTick = 0;
+	if (!g_MirvTime.GetCurrentDemoTick(curTick))
+		return;
+	if (m_lastDemoTickObserved >= 0) {
+		int d = curTick - m_lastDemoTickObserved;
+		if (d < 0) d = -d;
+		if (d > 64)
+			OnDemoSeekDetected(d);
+	}
+	m_lastDemoTickObserved = curTick;
+}
+
 void CosmeticOverrideSystem::RequestApplyNudge() {
+	RequestCompositeRefresh();
 	// Mark a nudge pending and (re)set the debounce anchor to now. A burst of edits (e.g. dragging
 	// the wear slider) keeps pushing the anchor forward, so exactly one seek fires after the user
 	// stops -- never one seek per intermediate value.
 	m_pendingNudge = true;
 	m_nudgeRequestFrame = m_frameCounter;
-	// Arm the dense composite re-assert window so the new skin re-composites EVERY frame for a short
-	// burst -- this is what makes a skin change taken while PAUSED actually render (the tick-based
-	// periodic can't fire while paused) and survive the nudge play-out's engine clobber.
-	m_compositeHoldUntilFrame = m_frameCounter + kCompositeHoldFrames;
 }
 
 void CosmeticOverrideSystem::MaybeFireTickNudge() {
@@ -1208,7 +1091,7 @@ void CosmeticOverrideSystem::MaybeFireTickNudge() {
 			m_gloveState.clear();
 			m_lastGloveSpectatedSid = 0;
 			m_knifeSwapState.clear();
-			m_compositeHoldUntilFrame = m_frameCounter + kCompositeHoldFrames;
+			m_compositeBurstRemaining = kCompositeBurstShots;
 			m_nudgePhase = 0;
 			++m_totalNudges;
 		}
@@ -1217,6 +1100,8 @@ void CosmeticOverrideSystem::MaybeFireTickNudge() {
 
 	if (!m_pendingNudge)
 		return;
+	if (m_seekSettleFrames > 0)
+		return; // defer until entity list settles after a seek
 	if (!m_tickNudge) { m_pendingNudge = false; return; } // disabled: drop the request
 	// Debounce: wait for a short quiet period after the last change so rapid re-picks coalesce.
 	const uint64_t kDebounceFrames = 8;
@@ -1416,10 +1301,18 @@ int CosmeticOverrideSystem::ApplyMatchedWeapons(bool forceStale, bool fireRebuil
 		if (result.reverted)
 			++m_lastStats.entitiesReverted;
 
-		// Whether a (re)assert of the skin + composite is warranted this frame: on first apply / a real
-		// change, on the manual rebuild, or on the periodic re-assert that keeps the override rendering
-		// through the engine's per-deploy composite rebuild.
+		// Whether attrs/mesh need touching this frame (may be every tick during playback).
 		bool refreshWarranted = result.needComposite || attr.changed || forceStale || periodicComposite;
+		// Direct composite + FP mirror: debounced -- NOT on every attr.changed (demo packet clobber).
+		bool compositeWarranted = result.needComposite || forceStale || periodicComposite;
+		if (!compositeWarranted && attr.changed) {
+			uint64_t last = 0;
+			auto it = m_lastCompositeFrameByIdx.find(i);
+			if (it != m_lastCompositeFrameByIdx.end())
+				last = it->second;
+			if (m_frameCounter >= last + kClobberCompositeCooldownFrames)
+				compositeWarranted = true;
+		}
 
 		// MISSING-ATTRIBUTE FALLBACK (the attrWritten=0 fix): when the item has no networked paint
 		// attribute to overwrite (attr.hasPaint == false -- default/vanilla weapons, picked-up or
@@ -1566,15 +1459,32 @@ int CosmeticOverrideSystem::ApplyMatchedWeapons(bool forceStale, bool fireRebuil
 				// untouched and the skin may not render on whatever mesh the weapon currently shows.
 				if (MvmDebugLog_Active())
 					dbgMeshLegacy = PaintKitLegacyModel(item->paintKit);
-				if (mask != 0 && ReadEntityMeshGroupMask(ent) != mask) {
-					ApplyWeaponMeshMask(w, mask, ownerPawn);
-					++m_lastStats.weaponMeshFixed;
-					dbgMeshApplied = 1;
+				if (mask != 0) {
+					uint64_t liveMask = ReadEntityMeshGroupMask(ent);
+					// Re-apply when live mask differs, paint just changed, or an explicit rebuild was requested.
+					bool needMesh = (liveMask != mask) || forceStale || result.needComposite;
+					if (needMesh) {
+						ApplyWeaponMeshMask(w, mask, ownerPawn);
+						++m_lastStats.weaponMeshFixed;
+						dbgMeshApplied = 1;
+					}
+					if (MvmDebugLog_Active() && (needMesh || dbgMeshLegacy < 0)) {
+						uint64_t postMask = ReadEntityMeshGroupMask(ent);
+						MvmDebugLog_LinefAlways("cosmetics.weapon.mesh",
+							"idx=%d def=%d wantPaint=%d wantLegacy=%d wantMask=%llu preMask=%llu postMask=%llu applied=%d paintChanged=%d",
+							i, liveDef, item->paintKit, dbgMeshLegacy,
+							(unsigned long long)mask, (unsigned long long)liveMask,
+							(unsigned long long)postMask, dbgMeshApplied, attr.changed ? 1 : 0);
+					}
+				} else if (MvmDebugLog_Active()) {
+					MvmDebugLog_LinefAlways("cosmetics.weapon.mesh",
+						"SKIP idx=%d def=%d wantPaint=%d legacyLookup=-1 (mesh untouched -- skin may not render)",
+						i, liveDef, item->paintKit);
 				}
 			}
 		}
 
-		if (fireDirectComposite && refreshWarranted) {
+		if (fireDirectComposite && compositeWarranted) {
 			DirectCompositeResult direct = FireDirectCompositeRefresh(
 				w,
 				itemView,
@@ -1585,12 +1495,32 @@ int CosmeticOverrideSystem::ApplyMatchedWeapons(bool forceStale, bool fireRebuil
 				(int32_t)item->seed);
 			if (direct.resolved)
 				m_lastStats.directCompositeResolved = 1;
-			if (direct.called)
+			if (direct.called) {
 				++m_lastStats.directCompositeCalls;
+				m_lastCompositeFrameByIdx[i] = m_frameCounter;
+				if (MvmDebugLog_Active()) {
+					const char* why = result.needComposite ? "apply" : (forceStale ? "force" :
+						(periodicComposite ? "burst" : "clobber"));
+					MvmDebugLog_Linef("cosmetics.composite", "idx=%d def=%d paint=%d reason=%s",
+						i, liveDef, item->paintKit, why);
+				}
+			}
 			if (direct.faulted)
 				m_lastStats.directCompositeFaulted = 1;
-			if (direct.called && ownerPawn)
-				RefreshWeaponViewmodel(ownerPawn);
+		}
+
+		// First-person viewmodel mirror: world weapon composite alone does not skin the HUD-arms child.
+		if (ownerPawn && item->paintKit > 0 && !CosmeticCatalog::IsKnifeDef(liveDef)
+			&& m_vmMirrorSettleFrames <= 0
+			&& (compositeWarranted || dbgMeshApplied || forceStale)) {
+			uint64_t vmMask = dbgMeshMask;
+			if (vmMask == 0)
+				vmMask = ResolveMeshMask(item->paintKit, /*knife=*/false,
+					m_meshLegacyMode, m_maskModern, m_maskLegacy);
+			MirrorWeaponCosmeticsToViewmodel(
+				ownerPawn, w, i, itemView, vmMask,
+				(int32_t)item->paintKit, item->wear, (int32_t)item->seed, item->statTrak,
+				m_compositeOwnerOffset, o.C_EconItemView.m_bRestoreCustomMaterialAfterPrecache);
 		}
 
 		// Per-matched-weapon diagnostic (deduped per unique payload). The decisive field is

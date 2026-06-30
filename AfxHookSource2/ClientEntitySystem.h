@@ -79,6 +79,10 @@ uint8_t AfxGetLocalObserverState(int * outTargetIndex);
 // services fields read 0/-1 even while a player is plainly being spectated. First-person only.
 int AfxGetSpectatedPawnIndex();
 
+// Local demo viewer's pawn (split-screen player 0 controller -> pawn). Used for first-person
+// viewmodel mirror when the spectated remote pawn has no m_hHudModelArms (demo spectate).
+CEntityInstance* AfxGetLocalViewerPawn();
+
 typedef int (__fastcall * GetHighestEntityIndex_t)(void * pEntityList, bool bUnknown);
 typedef void * (__fastcall * GetEntityFromIndex_t)(void * pEntityList, int index);
 

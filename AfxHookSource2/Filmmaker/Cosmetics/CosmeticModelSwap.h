@@ -14,6 +14,8 @@
 #include <cstdint>
 #include <cstddef>
 
+class CEntityInstance;
+
 namespace Filmmaker {
 
 // Resolution status of each model-swap client.dll function (for diagnostics / "cosmetics status").
@@ -105,6 +107,44 @@ void ApplyWeaponMeshMask(unsigned char* weaponEntity, uint64_t meshMask, unsigne
 // Refresh every weapon renderable parented below the pawn's HUD-arms entity. This synchronizes the
 // first-person viewmodel after the world weapon's material/model was rebuilt.
 void RefreshWeaponViewmodel(unsigned char* pawn);
+
+// SEH-guarded read of an entity's live mesh-group mask (CModelState::m_MeshGroupMask). Returns 0 on failure.
+uint64_t ReadEntityMeshGroupMask(CEntityInstance* ent);
+
+// Result of mirroring world-weapon cosmetics onto the matching first-person viewmodel child.
+struct ViewmodelMirrorResult {
+	bool armsFound = false;
+	bool childMatched = false;
+	bool meshWritten = false;
+	bool compositeCalled = false;
+	bool compositeFaulted = false;
+	bool namedSetter = false;
+	int vmEntityIndex = -1;
+	uint64_t meshBefore = 0;
+	uint64_t meshAfter = 0;
+	int paintBefore = -1;
+	int paintAfter = -1;
+};
+
+// Mirror mesh + skin composite from a world weapon onto its first-person viewmodel (HUD-arms child with
+// the same weapon class). This is the fix for "third person correct, first person legacy/default" when
+// HudModelArms exists but the viewmodel never received FireDirectCompositeRefresh.
+ViewmodelMirrorResult MirrorWeaponCosmeticsToViewmodel(
+	unsigned char* pawn,
+	unsigned char* worldWeapon,
+	int worldEntityIndex,
+	unsigned char* worldItemView,
+	uint64_t meshMask,
+	int32_t paintKit,
+	float wear,
+	int32_t seed,
+	int statTrak,
+	ptrdiff_t compositeOwnerOffset,
+	ptrdiff_t offRestoreMaterial);
+
+// Read-only snapshot of the active weapon's first-person viewmodel paint/mesh (for skin.live logging).
+bool ReadActiveViewmodelWeaponState(unsigned char* pawn, const char* wantWeaponClass,
+	int* outVmIndex, int* outPaint, uint64_t* outMeshMask);
 
 // Agent (player) model swap on a pawn entity: SetModel(pawn, modelPath). Returns true if SetModel
 // fired. Unsafe/non-player resource paths are rejected before SetModel.

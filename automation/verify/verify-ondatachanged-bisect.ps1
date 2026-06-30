@@ -30,6 +30,19 @@ param(
 $ErrorActionPreference = 'Stop'
 $automationRoot = Split-Path -Parent $PSScriptRoot
 $root = Split-Path -Parent $automationRoot
+$meshPaintsPath = Join-Path $automationRoot 'config\weapon_mesh_test_paints.json'
+$meshPaintsDoc = if (Test-Path -LiteralPath $meshPaintsPath) {
+    Get-Content -LiteralPath $meshPaintsPath -Raw -Encoding UTF8 | ConvertFrom-Json
+} else { $null }
+function Get-WeaponSkinTestPaint([string]$defKey) {
+    if ($meshPaintsDoc -and $meshPaintsDoc.weapons.PSObject.Properties.Name -contains $defKey) {
+        return [string]$meshPaintsDoc.weapons.$defKey.skinTestPaint.id
+    }
+    # Fallback if config missing (weapon-valid paints only — never knife Fade / Glock Fade 38)
+    $fallback = @{ '7'='282'; '9'='279'; '1'='37'; '40'='222'; '61'='504'; '60'='282'; '34'='33' }
+    if ($fallback.ContainsKey($defKey)) { return $fallback[$defKey] }
+    return '282'
+}
 $outAbs = if ([System.IO.Path]::IsPathRooted($OutDir)) { $OutDir } else { Join-Path $root $OutDir }
 New-Item -ItemType Directory -Path $outAbs -Force | Out-Null
 $logFile = Join-Path $outAbs 'bisect.log'
@@ -73,8 +86,7 @@ function Get-LastMatch([string]$text, [string]$pattern) {
     return $null
 }
 
-# Distinctive paint kits per weapon def (vivid so a successful rebuild is unmistakable).
-$paintMap = @{ '7'='44'; '9'='279'; '1'='37'; '40'='222'; '61'='504'; '60'='282' }
+# Distinctive, weapon-valid paint kits per def (from weapon_mesh_test_paints.json when present).
 
 Write-Host "=== Loading demo ===" -ForegroundColor Cyan
 Invoke-Netcon -Commands @("playdemo `"$Demo`"") -ReadSeconds 9.0 | Out-Null
@@ -96,7 +108,7 @@ for ($try = 0; $try -lt 6; $try++) {
 if (-not $def -or [int]$def -le 0) { throw "Could not resolve a spectated weapon (defIndex). See $logFile" }
 
 $offResolved = Get-LastMatch $diag 'offsetsResolved=(\d)'
-$paint = if ($paintMap.ContainsKey($def)) { $paintMap[$def] } else { '282' }
+$paint = Get-WeaponSkinTestPaint $def
 Write-Host "Spectated weapon defIndex=$def steam=$steam offsetsResolved=$offResolved -> override paintKit=$paint" -ForegroundColor Green
 Add-Content -LiteralPath $logFile -Value "CHOSEN def=$def steam=$steam paint=$paint offsetsResolved=$offResolved"
 
