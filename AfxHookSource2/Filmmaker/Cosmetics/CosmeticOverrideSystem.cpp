@@ -504,7 +504,6 @@ void CosmeticOverrideSystem::ResetSessionOverrides(const char* reason) {
 	m_gloveState.clear();
 	m_lastGloveSpectatedSid = 0;
 	m_knifeSwapState.clear();
-	m_weaponMeshState.clear();
 	m_pendingNudge = false;
 	m_nudgePhase = 0;
 	m_nudgeWasPaused = false;
@@ -1054,7 +1053,6 @@ void CosmeticOverrideSystem::OnDemoSeekDetected(int tickJump) {
 	m_gloveState.clear();
 	m_lastGloveSpectatedSid = 0;
 	m_knifeSwapState.clear();
-	m_weaponMeshState.clear();
 	m_framesSinceSeek = 0;
 	m_lastCompositeTick = -1;
 	m_compositeBurstRemaining = 0;
@@ -1121,7 +1119,6 @@ void CosmeticOverrideSystem::MaybeFireTickNudge() {
 			m_gloveState.clear();
 			m_lastGloveSpectatedSid = 0;
 			m_knifeSwapState.clear();
-			m_weaponMeshState.clear();
 			m_compositeBurstRemaining = kCompositeBurstShots;
 			m_nudgePhase = 0;
 			++m_totalNudges;
@@ -1386,13 +1383,25 @@ int CosmeticOverrideSystem::ApplyMatchedWeapons(bool forceStale, bool fireRebuil
 		// reaches the other weapon's half-built viewmodel and CRASHES on its next animation. The WORLD
 		// (third-person) model/mesh swap below still runs for every matched weapon -- only the
 		// first-person viewmodel mirror is gated to the active weapon.
-		// Resolve the owner pawn + whether THIS entity is its ACTIVE (deployed) weapon, EVERY matched
+		// Resolve the HOLDING pawn + whether THIS entity is its ACTIVE (deployed) weapon, EVERY matched
 		// frame (not gated on a change). The knife swap now fires when the knife BECOMES active even if
 		// the profile was changed earlier (while holstered, or during a seek) -- a standing condition, not
 		// a one-frame event -- and the diagnostic log reports active-ness. ownerPawn != null <=> active.
+		//
+		// Resolve via the weapon ENTITY's own live m_hOwnerEntity (who is actually carrying it right
+		// now), NOT via PawnForSteamId(xuid) -- xuid here is the econ/skin OWNER, a DIFFERENT player than
+		// the holder for a picked-up weapon. Looking up the econ owner's pawn and checking ITS active
+		// weapon handle against `i` can never succeed for a pickup (the econ owner isn't the one holding
+		// this entity -- the picker-upper is), which silently disabled the first-person viewmodel mirror
+		// (RefreshViewmodelWeapons, gated on ownerPawn below) for EVERY picked-up weapon regardless of
+		// what skin was applied. Confirmed live: reskinning a teammate's picked-up AWP via the Customize
+		// UI wrote the new paint attribute every click (uiclick log showed netPaint changing) but the
+		// first-person view never updated, because ownerPawn was always null for that entity.
 		unsigned char* ownerPawn = nullptr;
 		{
-			unsigned char* pawn = PawnForSteamId(xuid);
+			SOURCESDK::CS2::CBaseHandle oh = ent->GetOwnerEntityHandle();
+			CEntityInstance* holder = oh.IsValid() ? EntFromIndex(oh.GetEntryIndex()) : nullptr;
+			unsigned char* pawn = (holder && holder->IsPlayerPawn()) ? (unsigned char*)holder : nullptr;
 			if (pawn) {
 				SOURCESDK::CS2::CBaseHandle aw = ((CEntityInstance*)pawn)->GetActiveWeaponHandle();
 				if (aw.IsValid() && aw.GetEntryIndex() == i)
@@ -1491,31 +1500,37 @@ int CosmeticOverrideSystem::ApplyMatchedWeapons(bool forceStale, bool fireRebuil
 				if (mask != 0) {
 					uint64_t liveMask = ReadEntityMeshGroupMask(ent);
 					// Re-apply when live mask differs, paint just changed, or an explicit rebuild was requested.
-					bool needMesh = (liveMask != mask) || forceStale || result.needComposite;
+					// attr.changed matters even when liveMask == mask already: a same-mesh-group re-pick (e.g.
+					// legacy skin A -> legacy skin B) still needs ApplyWeaponMeshMask/RefreshViewmodelWeapons's
+					// SetMeshGroupMask+PostDataUpdate re-assert on the HUD-arms child so it re-picks up the
+					// world weapon's freshly-composited material -- confirmed live: writing the new paint
+					// attribute alone (mesh unchanged) rendered the DEFAULT/blank weapon in first person, not
+					// the new skin. This previously also re-fired the now-removed MirrorWeaponCosmeticsToViewmodel
+					// call (which caused a fatal OOM crash by treating the HUD-arms child as a C_EconEntity it
+					// isn't -- see the removal comment below); with that call gone, the remaining side effects
+					// here (SetModel/SetMeshGroupMask/ResetAnimGraph/PostDataUpdate) are all safe, legitimate
+					// C_BaseModelEntity-level operations on that entity.
+					bool needMesh = (liveMask != mask) || forceStale || result.needComposite || attr.changed;
 					if (needMesh) {
-						// Space out retries per (entity, target mask) instead of re-firing on literally EVERY
-						// matched frame forever -- some weapons need the correction reasserted indefinitely
-						// (the engine reverts the mesh group every tick; that correction must keep running for
-						// as long as the mismatch persists, so this must NOT give up after N attempts). What it
-						// must not do is hit RefreshViewmodelWeapons's raw scene-graph child walk on
-						// consecutive frames back-to-back -- that walk is what faulted live (WRITE access
-						// violation through a stale-looking pointer, tagged 'weapon-rebuild', reproduced during
-						// rapid automated skin-apply testing), consistent with racing entity/scene-node
-						// recreation when hit every single frame. A short cooldown between attempts on the
-						// SAME target removes that back-to-back density (live-verified: 12-case run with zero
-						// crashes vs. crashing at the same tick without it) while still correcting forever.
-						WeaponMeshState& wms = m_weaponMeshState[i];
-						bool newTarget = (wms.targetMask != mask);
-						if (newTarget) { wms.targetMask = mask; wms.cooldown = 0; }
-						if (wms.cooldown > 0) --wms.cooldown;
-						bool allowFire = newTarget || wms.cooldown == 0;
-						if (allowFire) {
-							ApplyWeaponMeshMask(w, mask, ownerPawn, i);
-							++m_lastStats.weaponMeshFixed;
-							dbgMeshApplied = 1;
-							if (!newTarget)
-								wms.cooldown = 4; // frames to skip before the next retry on this same target
-						}
+						// No cooldown/throttle here -- fire every matched frame the mismatch (or a fresh
+						// paint pick) persists. A throttle was tried (space out retries per entity+target)
+						// to reduce how often RefreshViewmodelWeapons's scene-graph walk ran, back when
+						// MirrorWeaponCosmeticsToViewmodel was ALSO firing on the same trigger and its
+						// broken econ-attribute writes (into a HUD-arms child that isn't a C_EconEntity --
+						// see the removal comment below) caused real crashes. Confirmed live the throttle
+						// itself broke correctness: the engine reverts this weapon's mesh group EVERY
+						// SINGLE FRAME (preMask=2 -> we write postMask=1 -> next frame preMask=2 again,
+						// forever), so any gap between corrections leaves the render sitting in the WRONG
+						// state for however many frames the gap lasts -- confirmed by capturing worldMask=2
+						// via visualdiag moments after a modern-paint apply that should have shown mask=1.
+						// With MirrorWeaponCosmeticsToViewmodel gone, RefreshViewmodelWeapons's own walk is
+						// safe to call unconditionally every frame (SEH-guarded, only touches SetModel/
+						// SetMeshGroupMask/ResetAnimGraph/PostDataUpdate on the C_BaseModelEntity ancestry
+						// this entity legitimately has) -- live-tested crash-free across repeated rapid
+						// same-mesh-group and cross-mesh-group repaints.
+						ApplyWeaponMeshMask(w, mask, ownerPawn, i);
+						++m_lastStats.weaponMeshFixed;
+						dbgMeshApplied = 1;
 					}
 					if (MvmDebugLog_Active() && (needMesh || dbgMeshLegacy < 0)) {
 						uint64_t postMask = ReadEntityMeshGroupMask(ent);
@@ -1558,19 +1573,26 @@ int CosmeticOverrideSystem::ApplyMatchedWeapons(bool forceStale, bool fireRebuil
 				m_lastStats.directCompositeFaulted = 1;
 		}
 
-		// First-person viewmodel mirror: world weapon composite alone does not skin the HUD-arms child.
-		if (ownerPawn && item->paintKit > 0 && !CosmeticCatalog::IsKnifeDef(liveDef)
-			&& m_vmMirrorSettleFrames <= 0
-			&& (compositeWarranted || dbgMeshApplied || forceStale)) {
-			uint64_t vmMask = dbgMeshMask;
-			if (vmMask == 0)
-				vmMask = ResolveMeshMask(item->paintKit, /*knife=*/false,
-					m_meshLegacyMode, m_maskModern, m_maskLegacy);
-			MirrorWeaponCosmeticsToViewmodel(
-				ownerPawn, w, i, itemView, vmMask,
-				(int32_t)item->paintKit, item->wear, (int32_t)item->seed, item->statTrak,
-				m_compositeOwnerOffset, o.C_EconItemView.m_bRestoreCustomMaterialAfterPrecache);
-		}
+		// REMOVED: MirrorWeaponCosmeticsToViewmodel call. Root-caused against the CS2-OFFSETS schema
+		// dump (client_dll.json): the first-person HUD-arms weapon is a C_CS2HudModelWeapon, whose parent
+		// chain is C_CS2HudModelWeapon -> C_CS2HudModelBase -> C_LateUpdatedAnimating -> CBaseAnimGraph ->
+		// C_BaseModelEntity -> C_BaseEntity. C_EconEntity ALSO derives from CBaseAnimGraph but is a
+		// SIBLING branch, not an ancestor -- C_CS2HudModelWeapon has NO C_EconEntity fields at all
+		// (no m_AttributeManager, no fallback paint/wear/seed, nothing). This function computed
+		// "vmWeapon + o.C_EconEntity.m_AttributeManager" and "vmWeapon + m_compositeOwnerOffset" as if it
+		// were a real econ weapon, which are both meaningless reads into unrelated C_CS2HudModelWeapon
+		// memory. Confirmed live: paintBefore/paintAfter always read -1 (garbage "item view" pointer) and
+		// the direct-composite call always faulted (fault=1); re-firing it more often (to fix a separate
+		// same-mesh-group repaint bug) triggered a ~154GB allocation attempt and a fatal OOM crash.
+		//
+		// The actual fix for "first person doesn't show the new skin" is RefreshViewmodelWeapons (called
+		// from ApplyWeaponMeshMask above via ownerPawn) -- it only touches SetModel/SetMeshGroupMask/
+		// ResetAnimGraph/PostDataUpdate, all on the C_BaseModelEntity/CBaseAnimGraph ancestry that
+		// C_CS2HudModelWeapon legitimately shares with real weapons. No econ-attribute write is needed on
+		// the HUD-arms child at all -- the composited material is a shared resource keyed by model path +
+		// mesh group, already generated correctly by the WORLD weapon's own (correctly-offset) composite
+		// call above; the viewmodel just needs to be told to re-pick it up, which the mesh/model mirror
+		// already does.
 
 		// Per-matched-weapon diagnostic (deduped per unique payload). The decisive field is
 		// attrWritten: a demo weapon's REAL skin lives in m_NetworkedDynamicAttributes (def 6 paint /

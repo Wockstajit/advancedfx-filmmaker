@@ -47,8 +47,10 @@ uint64_t ResolveSteamIdArg(const char* cmd, const char* token) {
 	return id;
 }
 
-// After a successful profile mutation: arm this demo session. Weapon SKIN changes go straight to
-// composite refresh (no demo_resume flicker). Agent/glove/knife/body swaps still schedule a tick nudge.
+// After a successful profile mutation: arm this demo session, and (when scheduleTickNudge) briefly
+// auto-play + re-pause so the engine actually renders the frames needed for the change to visually
+// take -- weapon paint (the first-person viewmodel mirror) and agent/glove/knife/body swaps all need
+// this; only bare composite-refresh-only paths should pass false.
 void AfterMutation(const char* cmd, bool scheduleTickNudge) {
 	CosmeticsRef().Arm();
 	if (scheduleTickNudge)
@@ -249,7 +251,14 @@ void DoPlayer(int argc, advancedfx::ICommandArgs* args, const char* cmd) {
 		CosmeticsRef().SetWeapon(id, defIndex, paintKit, wear, seed, statTrak);
 		advancedfx::Message("%s cosmetics: weapon steamId=%llu def=%d paint=%d wear=%.4f seed=%d stattrak=%d.\n",
 			cmd, (unsigned long long)id, defIndex, paintKit, wear, seed, statTrak);
-		AfterMutation(cmd, false);
+		// scheduleTickNudge=true: the first-person viewmodel mirror (RefreshViewmodelWeapons) needs a
+		// few actually-rendered frames for its SetMeshGroupMask/PostDataUpdate to visually take -- while
+		// paused, RebuildOnce()'s immediate re-apply below writes the data but the composited material
+		// doesn't visibly refresh until real frames run. Confirmed live: applying a paint while paused
+		// showed no change at all until a manual tick-skip advanced a few frames, after which it rendered
+		// correctly. The nudge (auto play ~10 ticks, then re-pause) is the existing, already-proven fix
+		// for this exact class of "needs real frames" problem (used by agent/glove/knife swaps below).
+		AfterMutation(cmd, true);
 		MvmCrashWatch_Arm(-1, "weapon-paint-apply");
 		CosmeticsRef().RebuildOnce(); // apply the override to live weapons NOW so the change shows immediately
 		Cosmetics_LogWeaponSnapshot(cmd, "after", id, defIndex);

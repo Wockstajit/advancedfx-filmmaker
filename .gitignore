@@ -51,6 +51,7 @@ ultralight-free-sdk-*/
 misc/cs2-offsets/source/
 misc/cs2-offsets/cs2-offsets-*.csv
 misc/cs2-offsets/cs2-offsets-meta.json
+misc/cs2-offsets/CS2-OFFSETS-main/
 
 # Automation: scripts and configs stay tracked; only runtime artifacts are ignored
 automation/runs/

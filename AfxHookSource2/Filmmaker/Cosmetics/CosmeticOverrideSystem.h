@@ -344,13 +344,6 @@ private:
 	// target def changes. Keyed by owner SteamID. Cleared on demo load/close + after a nudge play-out.
 	struct KnifeSwapState { int entityIndex = -1; int swappedDef = 0; bool lastActive = false; };
 	std::unordered_map<uint64_t, KnifeSwapState> m_knifeSwapState;
-	// Per-weapon-entity mesh-group (legacy/CS2) re-apply throttle -- see the WeaponMeshState usage in
-	// ApplyMatchedWeapons. Keyed by weapon entity index. Spaces out consecutive matched-frame retries of
-	// SetMeshGroupMask + the viewmodel scene-graph walk on the SAME (entity, target mask) instead of
-	// re-firing on literally every single frame back-to-back, which raced entity/scene-node recreation
-	// and crashed -- it still corrects for as long as the mismatch persists, just not every frame.
-	struct WeaponMeshState { uint64_t targetMask = 0; int cooldown = 0; };
-	std::unordered_map<int, WeaponMeshState> m_weaponMeshState;
 	// Cumulative successful-apply counters (never reset per frame); see TotalKnifeApplied() etc.
 	uint64_t m_totalKnife = 0;
 	uint64_t m_totalWeaponMesh = 0;
