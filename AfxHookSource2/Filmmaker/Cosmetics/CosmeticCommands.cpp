@@ -210,11 +210,26 @@ void DoPlayer(int argc, advancedfx::ICommandArgs* args, const char* cmd) {
 			"[paint=N] [wear=F] [seed=N] [stattrak=N]\n", cmd);
 		return;
 	}
-	uint64_t id = ResolveSteamIdArg(cmd, args->ArgV(3));
+	const char* slot = args->ArgV(4);
+	const char* steamToken = args->ArgV(3);
+
+	// Weapon-entity overrides are matched by ApplyMatchedWeapons against the WEAPON's actual econ
+	// owner (OriginalOwnerXuid), which differs from the spectated player's own SteamID when they are
+	// holding a picked-up weapon. "current" must resolve to the HELD WEAPON's owner for this slot, or
+	// the override is filed under the wrong key and silently never matches -- the picked-up weapon
+	// keeps showing its default (no-skin) render regardless of what gets applied to "current" the
+	// player. Only the "weapon" slot is econ-weapon-entity-owned by a possibly-different player this
+	// way; knife/gloves/agent stay keyed to the spectated player (see their own resolution).
+	uint64_t id;
+	if (TokenIs(slot, "weapon") && TokenIs(steamToken, "current")) {
+		id = CosmeticsRef().CurrentActiveWeaponOwnerSteamId();
+		if (id == 0)
+			advancedfx::Warning("%s cosmetics: no active weapon on the spectated player to resolve 'current' to.\n", cmd);
+	} else {
+		id = ResolveSteamIdArg(cmd, steamToken);
+	}
 	if (id == 0)
 		return;
-
-	const char* slot = args->ArgV(4);
 
 	if (TokenIs(slot, "weapon")) {
 		int defIndex = atoi(args->ArgV(5));

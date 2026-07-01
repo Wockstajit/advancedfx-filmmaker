@@ -151,8 +151,15 @@ LONG CALLBACK MvmVectoredHandler(EXCEPTION_POINTERS* ep) {
 		return EXCEPTION_CONTINUE_SEARCH;
 	if (!g_active.load(std::memory_order_acquire))
 		return EXCEPTION_CONTINUE_SEARCH;
-	if (GetTickCount64() >= g_crashWatchUntilMs.load(std::memory_order_acquire))
-		return EXCEPTION_CONTINUE_SEARCH;
+	// Previously gated to a 30s window opened by MvmCrashWatch_Arm() around specific operations
+	// (rebuild/knife-swap/paint-apply) -- but that means any crash NOT adjacent to one of those calls
+	// (e.g. during rapid spectate switching, as observed) writes NOTHING to the log: no crash.veh line,
+	// no clue what happened, just the process restarting. The handler is already safe to run
+	// unconditionally whenever debug logging is on -- it never swallows the exception (always
+	// CONTINUE_SEARCH), skips our own module's routine caught faults, de-dupes consecutive identical
+	// fault sites, and caps at 64 entries -- so there is no flooding risk from removing the window gate.
+	// g_lastSwapIdx/g_lastSwapModel (set by MvmCrashWatch_Arm) still tag the entry with whatever
+	// cosmetics operation happened most recently, even if it is not what caused this particular fault.
 	static thread_local int s_inHandler = 0; // avoid recursion if logging itself faults
 	if (s_inHandler)
 		return EXCEPTION_CONTINUE_SEARCH;

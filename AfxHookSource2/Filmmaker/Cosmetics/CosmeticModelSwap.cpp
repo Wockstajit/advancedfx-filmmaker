@@ -1473,6 +1473,11 @@ void ApplyWeaponMeshMask(unsigned char* weaponEntity, uint64_t meshMask, unsigne
 	if (pawnForViewmodel)
 		RefreshViewmodelWeapons(pawnForViewmodel, nullptr, meshMask, weaponEntity);
 	SafePostDataUpdate(weaponEntity);
+	// NOTE: a trailing re-assert SafeSetMeshMask() call was tried here to fight a mesh-group revert
+	// seen on weapons using the fallback (non-networked) paint path -- live-tested, did NOT converge
+	// (preMask still never matched wantMask next frame) and reverted, so removed. The revert happens
+	// somewhere other than (or in addition to) PostDataUpdate; root cause still open. See
+	// [memory: weapon-mesh-mask-revert-investigation] before trying another patch here.
 }
 
 void RefreshWeaponViewmodel(unsigned char* pawn) {

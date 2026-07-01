@@ -952,6 +952,34 @@ void CosmeticOverrideSystem::RestorePaintkitBridgeCvar() {
 	m_lastStats.paintkitBridgeValue = 0;
 }
 
+uint64_t CosmeticOverrideSystem::CurrentActiveWeaponOwnerSteamId() const {
+	if (!g_cosmeticsOffsetsOk || !InDemoContext())
+		return 0;
+
+	const int pawnIndex = CurrentSpectatedPawnIndex();
+	if (pawnIndex < 0)
+		return 0;
+
+	CEntityInstance* pawn = EntFromIndex(pawnIndex);
+	if (!pawn || !pawn->IsPlayerPawn())
+		return 0;
+
+	SOURCESDK::CS2::CBaseHandle wh = pawn->GetActiveWeaponHandle();
+	CEntityInstance* weapon = wh.IsValid() ? EntFromIndex(wh.GetEntryIndex()) : nullptr;
+	if (!weapon || !LooksLikeWeaponEntity(weapon))
+		return 0;
+
+	const ClientDllOffsets_t& o = g_clientDllOffsets;
+	WeaponEconRead econ;
+	if (!TryReadWeaponEconInfo((unsigned char*)weapon,
+			o.C_EconEntity.m_OriginalOwnerXuidLow, o.C_EconEntity.m_OriginalOwnerXuidHigh,
+			o.C_EconEntity.m_AttributeManager, o.C_AttributeContainer.m_Item,
+			o.C_EconItemView.m_iItemDefinitionIndex, &econ))
+		return 0;
+
+	return econ.xuid;
+}
+
 int CosmeticOverrideSystem::ResolveSpectatedPaintkitOverride() const {
 	if (m_paintkitBridgeForcedValue > 0)
 		return m_paintkitBridgeForcedValue;

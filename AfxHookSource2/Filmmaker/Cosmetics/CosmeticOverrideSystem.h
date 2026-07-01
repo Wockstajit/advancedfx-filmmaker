@@ -116,6 +116,12 @@ public:
 	// --- spectate resolution (for "target current" and debug) ---
 	// SteamID64 of the player the local viewer is currently spectating, or 0 if none/not in-eye.
 	uint64_t CurrentSpectatedSteamId() const;
+	// SteamID64 of the ACTUAL OWNER (econ OriginalOwnerXuid) of the spectated player's currently
+	// active weapon entity, or 0 if unresolved. Differs from CurrentSpectatedSteamId() when the
+	// spectated player is holding a picked-up weapon -- ApplyMatchedWeapons matches weapon-slot
+	// overrides by this same OriginalOwnerXuid, so "current" must resolve here for a weapon-slot
+	// skin change to affect the actual held weapon entity, not the spectated player's own loadout.
+	uint64_t CurrentActiveWeaponOwnerSteamId() const;
 	// Entity index of the spectated pawn, or -1.
 	int CurrentSpectatedPawnIndex() const;
 	// Local observer mode (OBS_MODE_*). 0 = none.
