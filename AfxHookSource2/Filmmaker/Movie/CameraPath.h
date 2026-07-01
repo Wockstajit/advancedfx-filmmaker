@@ -32,6 +32,8 @@
 #include <string>
 #include <vector>
 
+namespace advancedfx { class ICommandArgs; }
+
 namespace Filmmaker {
 
 class CameraPath {
@@ -232,5 +234,9 @@ private:
 };
 
 CameraPath& CameraPathRef();
+
+// Console command entry: handles "mirv_filmmaker marker ...". argc/args/cmd are forwarded
+// from FilmmakerCommand.cpp's dispatcher (args->ArgV(0) == "mirv_filmmaker", ArgV(1) == "marker").
+void Marker_RunCommand(int argc, advancedfx::ICommandArgs* args, const char* cmd);
 
 } // namespace Filmmaker

@@ -285,6 +285,13 @@ target_sources(${PROJECT_NAME} PRIVATE
     Filmmaker/Filmmaker.cpp
     Filmmaker/Filmmaker.h
     Filmmaker/FilmmakerCommand.cpp
+    Filmmaker/FilmmakerCommandUtil.cpp
+    Filmmaker/FilmmakerCommandUtil.h
+    Filmmaker/MarkerCommand.cpp
+    Filmmaker/CameraTimelineCommand.cpp
+    Filmmaker/CameraEditorCommand.cpp
+    Filmmaker/FollowCommand.cpp
+    Filmmaker/GraphEditorCommand.cpp
 
     Filmmaker/Config/DemoFolderStore.cpp
     Filmmaker/Config/DemoFolderStore.h
@@ -319,7 +326,14 @@ target_sources(${PROJECT_NAME} PRIVATE
     Filmmaker/Panorama/CameraTimelineJs.h
     Filmmaker/Panorama/CameraEditorHud.cpp
     Filmmaker/Panorama/CameraEditorHud.h
+    Filmmaker/Panorama/CameraEditorCustomizeState.cpp
+    Filmmaker/Panorama/CameraEditorCustomizeState.h
     Filmmaker/Panorama/CameraEditorJs.h
+    Filmmaker/Panorama/CameraEditorWidgetsJs.h
+    Filmmaker/Panorama/CameraEditorCustomizeJs.h
+    Filmmaker/Panorama/CameraEditorFollowInspectorJs.h
+    Filmmaker/Panorama/CameraEditorPathInspectorJs.h
+    Filmmaker/Panorama/CameraEditorDebugJs.h
     Filmmaker/Panorama/GraphEditorExperimentHud.cpp
     Filmmaker/Panorama/GraphEditorExperimentHud.h
     Filmmaker/Panorama/GraphEditorJs.h
@@ -342,6 +356,13 @@ target_sources(${PROJECT_NAME} PRIVATE
     Filmmaker/Movie/FollowCamera.h
     Filmmaker/Movie/FollowCameraMath.cpp
     Filmmaker/Movie/FollowCameraMath.h
+    Filmmaker/Movie/FollowTargetProviders.cpp
+    Filmmaker/Movie/FollowTargetProviders.h
+    Filmmaker/Movie/FollowTargetDiscovery.cpp
+    Filmmaker/Movie/FollowTargetDiscovery.h
+    Filmmaker/Movie/FollowEventIndex.cpp
+    Filmmaker/Movie/FollowEventIndex.h
+    Filmmaker/Movie/FollowCameraStateJson.cpp
     Filmmaker/Movie/MovieMode.cpp
     Filmmaker/Movie/MovieMode.h
 

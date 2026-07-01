@@ -17,6 +17,8 @@
 #include <string>
 #include <vector>
 
+namespace advancedfx { class ICommandArgs; }
+
 namespace Filmmaker {
 
 class CameraTimelineHud {
@@ -70,5 +72,14 @@ private:
 };
 
 CameraTimelineHud& CameraTimelineHudRef();
+
+// Console command entry: handles "mirv_filmmaker camtl ...". argc/args/cmd are forwarded
+// from FilmmakerCommand.cpp's dispatcher (args->ArgV(0) == "mirv_filmmaker", ArgV(1) == "camtl").
+void CameraTimeline_RunCommand(int argc, advancedfx::ICommandArgs* args, const char* cmd);
+
+// Selects the current (or first) camera-path marker for the editor/timeline, if any exist.
+// Shared by CameraTimelineCommand.cpp ("camtl open/toggle") and CameraEditorCommand.cpp
+// ("editor curveeditor ..."). Returns false (no-op) when the path has no markers.
+bool FocusEditorCameraIfAny();
 
 } // namespace Filmmaker

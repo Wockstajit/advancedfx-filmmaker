@@ -25,6 +25,8 @@
 #include <string>
 #include <vector>
 
+namespace advancedfx { class ICommandArgs; }
+
 namespace Filmmaker {
 
 class GraphEditorExperimentHud {
@@ -105,5 +107,9 @@ private:
 };
 
 GraphEditorExperimentHud& GraphEditorExperimentHudRef();
+
+// Console command entry: handles "mirv_filmmaker grapheditor ...". argc/args/cmd are forwarded
+// from FilmmakerCommand.cpp's dispatcher (args->ArgV(0) == "mirv_filmmaker", ArgV(1) == "grapheditor").
+void GraphEditor_RunCommand(int argc, advancedfx::ICommandArgs* args, const char* cmd);
 
 } // namespace Filmmaker

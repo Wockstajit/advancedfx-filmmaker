@@ -11,6 +11,8 @@
 #include <unordered_map>
 #include <vector>
 
+namespace advancedfx { class ICommandArgs; }
+
 namespace Filmmaker {
 
 // Logical target groups. C4 and dropped/held weapons all live under Weapon and are
@@ -339,5 +341,9 @@ private:
 
 FollowCamera& FollowCameraRef();
 const char* FollowTargetTypeName(FollowTargetType type);
+
+// Console command entry: handles "mirv_filmmaker follow ...". argc/args/cmd are forwarded
+// from FilmmakerCommand.cpp's dispatcher (args->ArgV(0) == "mirv_filmmaker", ArgV(1) == "follow").
+void Follow_RunCommand(int argc, advancedfx::ICommandArgs* args, const char* cmd);
 
 } // namespace Filmmaker

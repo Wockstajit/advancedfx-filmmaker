@@ -38,6 +38,8 @@
 #include <string>
 #include <vector>
 
+namespace advancedfx { class ICommandArgs; }
+
 namespace Filmmaker {
 
 class CameraEditorHud {
@@ -127,5 +129,9 @@ private:
 };
 
 CameraEditorHud& CameraEditorHudRef();
+
+// Console command entry: handles "mirv_filmmaker editor ...". argc/args/cmd are forwarded
+// from FilmmakerCommand.cpp's dispatcher (args->ArgV(0) == "mirv_filmmaker", ArgV(1) == "editor").
+void CameraEditor_RunCommand(int argc, advancedfx::ICommandArgs* args, const char* cmd);
 
 } // namespace Filmmaker

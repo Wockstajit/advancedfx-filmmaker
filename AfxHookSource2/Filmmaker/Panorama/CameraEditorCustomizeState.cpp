@@ -1,0 +1,469 @@
+#include "CameraEditorCustomizeState.h"
+
+#include "../../ClientEntitySystem.h"
+#include "../../SchemaSystem.h"
+
+#include "../../../deps/release/prop/AfxHookSource/SourceSdkShared.h"
+#include "../../../deps/release/prop/cs2/sdk_src/public/cdll_int.h"
+
+#include <cstring>
+#include <sstream>
+#include <string>
+
+namespace Filmmaker {
+
+namespace {
+
+// Local copy of CameraEditorHud.cpp's rounding helper (same 4-line implementation) -- kept
+// file-local rather than shared via a header for a helper this small.
+double r2(double v) {
+	if (!(v == v) || v > 1e15 || v < -1e15) return 0.0; // NaN/inf -> keep JSON valid
+	double s = (v < 0) ? -1.0 : 1.0; return s * (long long)(v * s * 100.0 + 0.5) / 100.0;
+}
+
+std::string JsonEscape(const char* value) {
+	std::string out;
+	if (!value) return out;
+	for (const unsigned char* p = (const unsigned char*)value; *p; ++p) {
+		switch (*p) {
+		case '\\': out += "\\\\"; break;
+		case '"': out += "\\\""; break;
+		case '\b': out += "\\b"; break;
+		case '\f': out += "\\f"; break;
+		case '\n': out += "\\n"; break;
+		case '\r': out += "\\r"; break;
+		case '\t': out += "\\t"; break;
+		default:
+			if (*p >= 0x20) out += (char)*p;
+			break;
+		}
+	}
+	return out;
+}
+
+CEntityInstance* EntityFromIndex(int index) {
+	if (index < 0 || !g_pEntityList || !*g_pEntityList || !g_GetEntityFromIndex)
+		return nullptr;
+	return (CEntityInstance*)g_GetEntityFromIndex(*g_pEntityList, index);
+}
+
+int ActiveWeaponDefIndex(CEntityInstance* pawn) {
+	if (!pawn || !pawn->IsPlayerPawn() || !g_cosmeticsOffsetsOk)
+		return 0;
+	SOURCESDK::CS2::CBaseHandle weaponHandle = pawn->GetActiveWeaponHandle();
+	if (!weaponHandle.IsValid())
+		return 0;
+	CEntityInstance* weapon = EntityFromIndex(weaponHandle.GetEntryIndex());
+	if (!weapon)
+		return 0;
+	const ClientDllOffsets_t& offsets = g_clientDllOffsets;
+	unsigned char* w = (unsigned char*)weapon;
+	unsigned char* itemView = w + offsets.C_EconEntity.m_AttributeManager + offsets.C_AttributeContainer.m_Item;
+	return (int)*(uint16_t*)(itemView + offsets.C_EconItemView.m_iItemDefinitionIndex);
+}
+
+enum class CustomizeWeaponSlot {
+	None,
+	Primary,
+	Secondary,
+	Knife
+};
+
+struct CustomizeWeaponInfo {
+	int entityIndex = -1;
+	int defIndex = 0;
+	int paintKit = 0;
+	float wear = 0.0f;
+};
+
+constexpr int kPaintKitAttributeId = 6;
+constexpr int kPaintWearAttributeId = 8;
+
+bool LooksLikePointer(const void* value) {
+	uintptr_t p = (uintptr_t)value;
+	return p > 0x10000;
+}
+
+struct AttributeVectorView {
+	unsigned char* data = nullptr;
+	int count = 0;
+	int stride = 0;
+};
+
+bool TryMakeAttributeVector(unsigned char* vectorField, AttributeVectorView& out) {
+	out = AttributeVectorView{};
+	const ClientDllOffsets_t& offsets = g_clientDllOffsets;
+	int stride = (int)offsets.CEconItemAttribute.m_size;
+	int minStride = (int)offsets.CEconItemAttribute.m_flValue + (int)sizeof(float);
+	if (stride < minStride)
+		stride = minStride;
+	if (!vectorField || stride <= 0)
+		return false;
+
+	// C_UtlVectorEmbeddedNetworkVar<T> in networked fields is observed as count + pointer,
+	// while standard SDK CUtlVector<T> stores pointer first and count at +0x10. Accept either
+	// so cosmetic reads degrade cleanly across CS2 layout changes.
+	int countA = *(int*)vectorField;
+	unsigned char* dataA = *(unsigned char**)(vectorField + 8);
+	if (countA > 0 && countA <= 128 && LooksLikePointer(dataA)) {
+		out.data = dataA;
+		out.count = countA;
+		out.stride = stride;
+		return true;
+	}
+
+	unsigned char* dataB = *(unsigned char**)vectorField;
+	int countB = *(int*)(vectorField + 16);
+	if (countB > 0 && countB <= 128 && LooksLikePointer(dataB)) {
+		out.data = dataB;
+		out.count = countB;
+		out.stride = stride;
+		return true;
+	}
+
+	return false;
+}
+
+// Searches ONE CAttributeList (embedded at itemView + listOff) for attributeId, writing its float
+// value to `out`. Returns false when the list offset is unresolved, the vector is empty, or the
+// attribute is absent. SEH-guarded: a bad pointer/offset faults here and is swallowed.
+bool TryReadAttrFromList(unsigned char* itemView, ptrdiff_t listOff, int attributeId, float& out) {
+	const ClientDllOffsets_t& offsets = g_clientDllOffsets;
+	if (!itemView || listOff == 0
+		|| offsets.C_AttributeList.m_Attributes == 0
+		|| offsets.CEconItemAttribute.m_iAttributeDefinitionIndex == 0
+		|| offsets.CEconItemAttribute.m_flValue == 0)
+		return false;
+
+	unsigned char* vectorField = itemView + listOff + offsets.C_AttributeList.m_Attributes;
+	AttributeVectorView vec;
+	if (!TryMakeAttributeVector(vectorField, vec))
+		return false;
+
+	const ptrdiff_t defOffset = offsets.CEconItemAttribute.m_iAttributeDefinitionIndex;
+	const ptrdiff_t valueOffset = offsets.CEconItemAttribute.m_flValue;
+	__try {
+		for (int i = 0; i < vec.count; ++i) {
+			unsigned char* attr = vec.data + (ptrdiff_t)i * vec.stride;
+			int def = (int)*(uint16_t*)(attr + defOffset);
+			if (def == attributeId) {
+				out = *(float*)(attr + valueOffset);
+				return true;
+			}
+		}
+	} __except (1) {
+		return false;
+	}
+	return false;
+}
+
+bool TryReadItemAttributeFloat(unsigned char* itemView, int attributeId, float& out) {
+	const ClientDllOffsets_t& offsets = g_clientDllOffsets;
+	// A networked/spectated player's econ attributes (paint kit/wear/seed) live in
+	// m_NetworkedDynamicAttributes; the local "cooked" m_AttributeList is typically empty for them.
+	// Try the networked list first, then the local list (which holds fully-initialized local items).
+	if (TryReadAttrFromList(itemView, offsets.C_EconItemView.m_NetworkedDynamicAttributes, attributeId, out))
+		return true;
+	if (TryReadAttrFromList(itemView, offsets.C_EconItemView.m_AttributeList, attributeId, out))
+		return true;
+	return false;
+}
+
+int ReadItemAttributeInt(unsigned char* itemView, int attributeId, int fallback) {
+	float value = 0.0f;
+	if (!TryReadItemAttributeFloat(itemView, attributeId, value))
+		return fallback;
+	return (int)(value + (value >= 0.0f ? 0.5f : -0.5f));
+}
+
+float ReadItemAttributeFloat(unsigned char* itemView, int attributeId, float fallback) {
+	float value = 0.0f;
+	if (!TryReadItemAttributeFloat(itemView, attributeId, value))
+		return fallback;
+	return value;
+}
+
+CustomizeWeaponSlot SlotForWeaponDef(int defIndex) {
+	switch (defIndex) {
+	case 1: case 2: case 3: case 4: case 30: case 32: case 36: case 61: case 63: case 64:
+		return CustomizeWeaponSlot::Secondary;
+	case 7: case 8: case 9: case 10: case 11: case 13: case 14: case 16: case 17: case 19:
+	case 23: case 24: case 25: case 26: case 27: case 28: case 29: case 33: case 34: case 35:
+	case 38: case 39: case 40: case 60:
+		return CustomizeWeaponSlot::Primary;
+	case 42: case 59: case 500: case 503: case 505: case 506: case 507: case 508: case 509:
+	case 512: case 514: case 515: case 516: case 517: case 518: case 519: case 520: case 521:
+	case 522: case 523: case 525: case 526:
+		return CustomizeWeaponSlot::Knife;
+	default:
+		return CustomizeWeaponSlot::None;
+	}
+}
+
+bool LooksLikeWeaponEntity(CEntityInstance* entity) {
+	const char* className = entity ? entity->GetClassName() : nullptr;
+	const char* clientClass = entity ? entity->GetClientClassName() : nullptr;
+	return (className && std::strstr(className, "weapon_"))
+		|| (className && std::strstr(className, "Weapon"))
+		|| (clientClass && std::strstr(clientClass, "Weapon"));
+}
+
+bool ReadWeaponInfo(int entityIndex, CustomizeWeaponInfo& out) {
+	CEntityInstance* weapon = EntityFromIndex(entityIndex);
+	if (!weapon || !LooksLikeWeaponEntity(weapon) || !g_cosmeticsOffsetsOk)
+		return false;
+
+	const ClientDllOffsets_t& offsets = g_clientDllOffsets;
+	unsigned char* w = (unsigned char*)weapon;
+	unsigned char* itemView = w + offsets.C_EconEntity.m_AttributeManager + offsets.C_AttributeContainer.m_Item;
+	const int defIndex = (int)*(uint16_t*)(itemView + offsets.C_EconItemView.m_iItemDefinitionIndex);
+	if (SlotForWeaponDef(defIndex) == CustomizeWeaponSlot::None)
+		return false;
+
+	out.entityIndex = entityIndex;
+	out.defIndex = defIndex;
+	out.paintKit = ReadItemAttributeInt(itemView, kPaintKitAttributeId, *(int32_t*)(w + offsets.C_EconEntity.m_nFallbackPaintKit));
+	out.wear = ReadItemAttributeFloat(itemView, kPaintWearAttributeId, *(float*)(w + offsets.C_EconEntity.m_flFallbackWear));
+	return true;
+}
+
+void AssignLoadoutSlot(CustomizeWeaponInfo slots[3], const CustomizeWeaponInfo& info) {
+	switch (SlotForWeaponDef(info.defIndex)) {
+	case CustomizeWeaponSlot::Primary:
+		slots[0] = info;
+		break;
+	case CustomizeWeaponSlot::Secondary:
+		slots[1] = info;
+		break;
+	case CustomizeWeaponSlot::Knife:
+		slots[2] = info;
+		break;
+	default:
+		break;
+	}
+}
+
+void BuildLoadoutSlots(CEntityInstance* pawn, int pawnIndex, CustomizeWeaponInfo slots[3]) {
+	if (!pawn)
+		return;
+
+	SOURCESDK::CS2::CBaseHandle activeWeaponHandle = pawn->GetActiveWeaponHandle();
+	if (activeWeaponHandle.IsValid()) {
+		CustomizeWeaponInfo active;
+		if (ReadWeaponInfo(activeWeaponHandle.GetEntryIndex(), active))
+			AssignLoadoutSlot(slots, active);
+	}
+
+	const int highest = GetHighestEntityIndex();
+	for (int i = 0; i <= highest; ++i) {
+		CEntityInstance* entity = EntityFromIndex(i);
+		if (!entity || !LooksLikeWeaponEntity(entity))
+			continue;
+		SOURCESDK::CS2::CBaseHandle owner = entity->GetOwnerEntityHandle();
+		if (!owner.IsValid() || owner.GetEntryIndex() != pawnIndex)
+			continue;
+		CustomizeWeaponInfo info;
+		if (ReadWeaponInfo(i, info))
+			AssignLoadoutSlot(slots, info);
+	}
+}
+
+// Reads the spectated player's equipped glove item view. Unlike weapons, gloves do not have
+// C_EconEntity fallback fields on the pawn; their finish is stored as econ attributes on
+// C_EconItemView.m_AttributeList (paint kit = 6, wear = 8).
+bool ReadGloveInfo(CEntityInstance* pawn, CustomizeWeaponInfo& out) {
+	out = CustomizeWeaponInfo{};
+	if (!pawn || !g_cosmeticsOffsetsOk)
+		return false;
+	const ClientDllOffsets_t& offsets = g_clientDllOffsets;
+	if (offsets.C_CSPlayerPawn.m_EconGloves == 0)
+		return false;
+	unsigned char* p = (unsigned char*)pawn;
+	unsigned char* gloveView = p + offsets.C_CSPlayerPawn.m_EconGloves;
+	int defIndex = (int)*(uint16_t*)(gloveView + offsets.C_EconItemView.m_iItemDefinitionIndex);
+	if (defIndex <= 0 || defIndex == 5028 || defIndex == 5029)
+		return false;
+	int paintKit = ReadItemAttributeInt(gloveView, kPaintKitAttributeId, -1);
+	if (paintKit <= 0)
+		return false;
+	out.entityIndex = -1;
+	out.defIndex = defIndex;
+	out.paintKit = paintKit;
+	out.wear = ReadItemAttributeFloat(gloveView, kPaintWearAttributeId, 0.22f);
+	return true;
+}
+
+void WriteWeaponSlotJson(std::ostringstream& o, const char* name, const CustomizeWeaponInfo& info) {
+	o << ",\"" << name << "\":";
+	if (info.defIndex <= 0) {
+		o << "null";
+		return;
+	}
+	o << "{";
+	o << "\"entityIndex\":" << info.entityIndex;
+	o << ",\"defIndex\":" << info.defIndex;
+	o << ",\"paintKit\":" << info.paintKit;
+	o << ",\"wear\":" << r2(info.wear);
+	o << "}";
+}
+
+// Reads the player's agent/player-model path (read-only) via the model-state chain, for the modal's
+// AGENT display. pawn + m_CBodyComponent(ptr deref) + m_skeletonInstance + m_modelState + m_ModelName.
+// SEH-guarded: a bad pointer/offset faults here and is swallowed; returns false then.
+bool ReadAgentModelPath(CEntityInstance* pawn, char* out, size_t outSize) {
+	if (out && outSize) out[0] = '\0';
+	if (!pawn || !pawn->IsPlayerPawn() || !out || outSize == 0)
+		return false;
+	const ClientDllOffsets_t& o = g_clientDllOffsets;
+	if (o.ModelChain.m_CBodyComponent == 0 || o.ModelChain.m_skeletonInstance == 0
+		|| o.ModelChain.m_modelState == 0 || o.ModelChain.m_ModelName == 0)
+		return false;
+	unsigned char* p = (unsigned char*)pawn;
+	bool ok = false;
+	__try {
+		unsigned char* bodyComp = *(unsigned char**)(p + o.ModelChain.m_CBodyComponent);
+		if ((uintptr_t)bodyComp > 0x10000) {
+			unsigned char* modelState = bodyComp + o.ModelChain.m_skeletonInstance + o.ModelChain.m_modelState;
+			const char* name = *(const char**)(modelState + o.ModelChain.m_ModelName);
+			if ((uintptr_t)name > 0x10000) {
+				size_t i = 0;
+				for (; name[i] && i + 1 < outSize; ++i) out[i] = name[i];
+				out[i] = '\0';
+				ok = (i > 0);
+			}
+		}
+	} __except (1) {
+		ok = false;
+	}
+	return ok;
+}
+
+uint64_t ReadWeaponOwnerXuid(int weaponEntityIndex) {
+	CEntityInstance* weapon = EntityFromIndex(weaponEntityIndex);
+	if (!weapon || !g_cosmeticsOffsetsOk)
+		return 0;
+	const ClientDllOffsets_t& o = g_clientDllOffsets;
+	if (o.C_EconEntity.m_OriginalOwnerXuidLow == 0 || o.C_EconEntity.m_OriginalOwnerXuidHigh == 0)
+		return 0;
+	unsigned char* w = (unsigned char*)weapon;
+	__try {
+		uint32_t xLow = *(uint32_t*)(w + o.C_EconEntity.m_OriginalOwnerXuidLow);
+		uint32_t xHigh = *(uint32_t*)(w + o.C_EconEntity.m_OriginalOwnerXuidHigh);
+		return ((uint64_t)xHigh << 32) | (uint64_t)xLow;
+	} __except (1) {
+		return 0;
+	}
+}
+
+const char* NameForSteamId(uint64_t steamId) {
+	if (steamId == 0)
+		return nullptr;
+	const int highest = GetHighestEntityIndex();
+	for (int i = 0; i <= highest; ++i) {
+		CEntityInstance* ctrl = EntityFromIndex(i);
+		if (!ctrl || !ctrl->IsPlayerController() || ctrl->GetSteamId() != steamId)
+			continue;
+		const char* name = ctrl->GetSanitizedPlayerName();
+		if (name && *name)
+			return name;
+		name = ctrl->GetPlayerName();
+		if (name && *name)
+			return name;
+		return nullptr;
+	}
+	return nullptr;
+}
+
+} // namespace
+
+std::string BuildCustomizeTargetJson(int pawnIndex) {
+	CEntityInstance* pawn = EntityFromIndex(pawnIndex);
+	if (!pawn || !pawn->IsPlayerPawn())
+		return "null";
+
+	CEntityInstance* controller = nullptr;
+	SOURCESDK::CS2::CBaseHandle controllerHandle = pawn->GetPlayerControllerHandle();
+	if (controllerHandle.IsValid())
+		controller = EntityFromIndex(controllerHandle.GetEntryIndex());
+
+	const char* name = nullptr;
+	uint64_t steamId = 0;
+	if (controller && controller->IsPlayerController()) {
+		name = controller->GetSanitizedPlayerName();
+		if (!name || !*name) name = controller->GetPlayerName();
+		steamId = controller->GetSteamId();
+	}
+	if (!name || !*name)
+		name = "Player";
+
+	int activeWeaponIndex = -1;
+	SOURCESDK::CS2::CBaseHandle activeWeaponHandle = pawn->GetActiveWeaponHandle();
+	if (activeWeaponHandle.IsValid())
+		activeWeaponIndex = activeWeaponHandle.GetEntryIndex();
+
+	CustomizeWeaponInfo loadout[3];
+	BuildLoadoutSlots(pawn, pawnIndex, loadout);
+
+	std::ostringstream o;
+	o << "{";
+	o << "\"pawnIndex\":" << pawnIndex;
+	o << ",\"controllerIndex\":" << (controllerHandle.IsValid() ? controllerHandle.GetEntryIndex() : -1);
+	o << ",\"key\":\"" << (steamId ? ("steam:" + std::to_string(steamId)) : ("pawn:" + std::to_string(pawnIndex))) << "\"";
+	o << ",\"steamId\":\"" << (steamId ? std::to_string(steamId) : "") << "\"";
+	o << ",\"name\":\"" << JsonEscape(name) << "\"";
+	o << ",\"team\":" << pawn->GetTeam();
+	o << ",\"activeWeaponIndex\":" << activeWeaponIndex;
+	o << ",\"activeWeaponDefIndex\":" << ActiveWeaponDefIndex(pawn);
+	uint64_t activeOwnerXuid = (activeWeaponIndex >= 0) ? ReadWeaponOwnerXuid(activeWeaponIndex) : 0;
+	const bool activeWeaponPickup = (steamId != 0 && activeOwnerXuid != 0 && activeOwnerXuid != steamId);
+	const char* activeOwnerName = activeWeaponPickup ? NameForSteamId(activeOwnerXuid) : nullptr;
+	o << ",\"activeWeaponOwnerSteamId\":\"" << (activeOwnerXuid ? std::to_string(activeOwnerXuid) : "") << "\"";
+	o << ",\"activeWeaponOwnerName\":\"" << JsonEscape(activeOwnerName ? activeOwnerName : "") << "\"";
+	o << ",\"activeWeaponPickup\":" << (activeWeaponPickup ? "true" : "false");
+	o << ",\"weapons\":{";
+	o << "\"primary\":";
+	if (loadout[0].defIndex > 0) {
+		o << "{\"entityIndex\":" << loadout[0].entityIndex << ",\"defIndex\":" << loadout[0].defIndex
+			<< ",\"paintKit\":" << loadout[0].paintKit << ",\"wear\":" << r2(loadout[0].wear) << "}";
+	} else {
+		o << "null";
+	}
+	WriteWeaponSlotJson(o, "secondary", loadout[1]);
+	WriteWeaponSlotJson(o, "knife", loadout[2]);
+	CustomizeWeaponInfo gloveInfo;
+	const bool hasGloves = ReadGloveInfo(pawn, gloveInfo);
+	o << ",\"gloves\":";
+	if (hasGloves)
+		o << "{\"defIndex\":" << gloveInfo.defIndex << ",\"paintKit\":" << gloveInfo.paintKit << ",\"wear\":" << r2(gloveInfo.wear) << "}";
+	else
+		o << "null";
+	o << "}";
+	// Read-only agent/player-model path for the AGENT slot display (matched to the catalog in JS).
+	char agentModel[256] = {};
+	ReadAgentModelPath(pawn, agentModel, sizeof(agentModel));
+	o << ",\"agentModel\":\"" << JsonEscape(agentModel) << "\"";
+	o << "}";
+	return o.str();
+}
+
+std::string BuildCustomizePlayersJson() {
+	std::ostringstream o;
+	o << "{";
+	bool first = true;
+	const int highest = GetHighestEntityIndex();
+	for (int i = 0; i <= highest; ++i) {
+		CEntityInstance* entity = EntityFromIndex(i);
+		if (!entity || !entity->IsPlayerPawn())
+			continue;
+		std::string target = BuildCustomizeTargetJson(i);
+		if (target == "null")
+			continue;
+		if (!first) o << ",";
+		first = false;
+		o << "\"" << i << "\":" << target;
+	}
+	o << "}";
+	return o.str();
+}
+
+} // namespace Filmmaker
