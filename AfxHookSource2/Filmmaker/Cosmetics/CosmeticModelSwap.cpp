@@ -1463,12 +1463,19 @@ void ApplyWeaponMeshMask(unsigned char* weaponEntity, uint64_t meshMask, unsigne
 	ResolveModelSwapFns();
 	if (meshMask == 0)
 		return;
+	// approach #3 (the fix that actually works for this crash class, see CosmeticAnimFix.h): install the
+	// client.dll anim-builder detour before the mesh-group write below can trigger an animgraph rebuild.
+	// ApplyKnifeModelSwap already does this (its line ~1382); this function did not, even though its own
+	// "approach #1" comment below already identified that a legacy<->CS2 mesh-group toggle hits the SAME
+	// null-out-param worker-thread crash as an unfixed knife swap. Confirmed live: a verify run that only
+	// exercises weapon-slot mesh toggles (never a knife swap, so the detour was never lazily installed by
+	// the knife path) crashed with the identical signature (client.dll read fault at a small offset,
+	// animationsystem.dll execute fault) that the knife investigation already root-caused and fixed.
+	EnsureAnimCrashFixInstalled();
 	SafeSetMeshMask(weaponEntity, meshMask);
-	// Same fix as ApplyKnifeModelSwap's "approach #1": reset the animgraph after the mesh-group write so
-	// the engine rebuilds it for the new mesh rather than posing it with stale per-mesh-group data. A
-	// legacy<->CS2 mesh-group toggle (this function) hits the same worker-thread null-deref the knife
-	// investigation chased -- it was only ever fixed on the knife SetModel path, not here. Order matches
-	// the knife path: mesh write, anim reset, viewmodel mirror, then PostDataUpdate last.
+	// approach #1 (kept, but per the knife investigation this alone does NOT fix the crash -- see
+	// [memory: knife-swap-crash-fix]): reset the animgraph after the mesh-group write so the engine
+	// rebuilds it for the new mesh rather than posing it with stale per-mesh-group data.
 	ResetAnimGraph(weaponEntity, entityIndex, "world");
 	if (pawnForViewmodel)
 		RefreshViewmodelWeapons(pawnForViewmodel, nullptr, meshMask, weaponEntity);

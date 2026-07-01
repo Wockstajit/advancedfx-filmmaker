@@ -504,6 +504,7 @@ void CosmeticOverrideSystem::ResetSessionOverrides(const char* reason) {
 	m_gloveState.clear();
 	m_lastGloveSpectatedSid = 0;
 	m_knifeSwapState.clear();
+	m_weaponMeshState.clear();
 	m_pendingNudge = false;
 	m_nudgePhase = 0;
 	m_nudgeWasPaused = false;
@@ -1053,6 +1054,7 @@ void CosmeticOverrideSystem::OnDemoSeekDetected(int tickJump) {
 	m_gloveState.clear();
 	m_lastGloveSpectatedSid = 0;
 	m_knifeSwapState.clear();
+	m_weaponMeshState.clear();
 	m_framesSinceSeek = 0;
 	m_lastCompositeTick = -1;
 	m_compositeBurstRemaining = 0;
@@ -1119,6 +1121,7 @@ void CosmeticOverrideSystem::MaybeFireTickNudge() {
 			m_gloveState.clear();
 			m_lastGloveSpectatedSid = 0;
 			m_knifeSwapState.clear();
+			m_weaponMeshState.clear();
 			m_compositeBurstRemaining = kCompositeBurstShots;
 			m_nudgePhase = 0;
 			++m_totalNudges;
@@ -1473,12 +1476,10 @@ int CosmeticOverrideSystem::ApplyMatchedWeapons(bool forceStale, bool fireRebuil
 					ks.lastActive = active; // track each matched frame so a holstered->active edge fires once
 				}
 			} else if (item->paintKit > 0) {
-				// Mesh-group (legacy CS:GO vs modern CS2 model) selection. Re-asserted EVERY matched frame
-				// -- NOT gated on the composite throttle -- but only actually WRITTEN when the LIVE mesh
-				// mask differs from our target, so we continuously correct an engine revert (the user's
-				// "the model doesn't switch when I pick an older/newer skin" bug) without thrashing the
-				// renderable when it is already right. Mesh selection has no texture stream (unlike the
-				// composite), so frequent re-assert is safe. liveMeshMask in the log shows whether it sticks.
+				// Mesh-group (legacy CS:GO vs modern CS2 model) selection, only actually WRITTEN when the
+				// LIVE mesh mask differs from our target, so we correct an engine revert (the user's "the
+				// model doesn't switch when I pick an older/newer skin" bug) without thrashing the
+				// renderable when it is already right.
 				uint64_t mask = ResolveMeshMask(item->paintKit, /*knife=*/false,
 					m_meshLegacyMode, m_maskModern, m_maskLegacy);
 				dbgMeshMask = mask;
@@ -1492,9 +1493,29 @@ int CosmeticOverrideSystem::ApplyMatchedWeapons(bool forceStale, bool fireRebuil
 					// Re-apply when live mask differs, paint just changed, or an explicit rebuild was requested.
 					bool needMesh = (liveMask != mask) || forceStale || result.needComposite;
 					if (needMesh) {
-						ApplyWeaponMeshMask(w, mask, ownerPawn, i);
-						++m_lastStats.weaponMeshFixed;
-						dbgMeshApplied = 1;
+						// Space out retries per (entity, target mask) instead of re-firing on literally EVERY
+						// matched frame forever -- some weapons need the correction reasserted indefinitely
+						// (the engine reverts the mesh group every tick; that correction must keep running for
+						// as long as the mismatch persists, so this must NOT give up after N attempts). What it
+						// must not do is hit RefreshViewmodelWeapons's raw scene-graph child walk on
+						// consecutive frames back-to-back -- that walk is what faulted live (WRITE access
+						// violation through a stale-looking pointer, tagged 'weapon-rebuild', reproduced during
+						// rapid automated skin-apply testing), consistent with racing entity/scene-node
+						// recreation when hit every single frame. A short cooldown between attempts on the
+						// SAME target removes that back-to-back density (live-verified: 12-case run with zero
+						// crashes vs. crashing at the same tick without it) while still correcting forever.
+						WeaponMeshState& wms = m_weaponMeshState[i];
+						bool newTarget = (wms.targetMask != mask);
+						if (newTarget) { wms.targetMask = mask; wms.cooldown = 0; }
+						if (wms.cooldown > 0) --wms.cooldown;
+						bool allowFire = newTarget || wms.cooldown == 0;
+						if (allowFire) {
+							ApplyWeaponMeshMask(w, mask, ownerPawn, i);
+							++m_lastStats.weaponMeshFixed;
+							dbgMeshApplied = 1;
+							if (!newTarget)
+								wms.cooldown = 4; // frames to skip before the next retry on this same target
+						}
 					}
 					if (MvmDebugLog_Active() && (needMesh || dbgMeshLegacy < 0)) {
 						uint64_t postMask = ReadEntityMeshGroupMask(ent);
