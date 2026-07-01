@@ -487,6 +487,7 @@ R"EDJS(
     var custPersist = {};
     var custTargetIndex = -1, custTargetName = 'Player', custTargetTeam = '';
     var custTargetKey = 'pawn:-1', custActiveWeaponDef = 0, custActiveWeaponSlot = '', custDisplayedLoadoutSig = '';
+    var custActiveWeaponPickup = false, custActiveWeaponOwnerSteam = '', custActiveWeaponOwnerName = '';
     var custLoadout = { primary: null, secondary: null, knife: null, gloves: null };
     // Which weapon def the primary/secondary blocks are CURRENTLY editing. 0 = follow the player's
     // held weapon; > 0 = an explicit weapon the user picked from the weapon selector (so a skin can be
@@ -652,6 +653,14 @@ R"EDJS(
     var custClose = btn(custHead, '✕', function () { closeCustomize(); }, S.value);
     custClose.style.marginRight = '0px'; custClose.style.width = '42px';
     custClose.__lbl.style.fontSize = '18px'; custClose.__lbl.style.horizontalAlign = 'center';
+
+    var custPickupBanner = mk('Panel', custWin); custPickupBanner.visible = false; custPickupBanner.hittest = false;
+    custPickupBanner.style.width = '100%'; custPickupBanner.style.flowChildren = 'down';
+    custPickupBanner.style.paddingLeft = '22px'; custPickupBanner.style.paddingRight = '22px';
+    custPickupBanner.style.paddingTop = '10px'; custPickupBanner.style.paddingBottom = '10px';
+    custPickupBanner.style.backgroundColor = '#3a2a10cc'; custPickupBanner.style.borderBottom = '1px solid #ffb34755';
+    var custPickupLbl = lbl(custPickupBanner, '', '#ffdba6', 13);
+    custPickupLbl.style.fontWeight = 'bold'; custPickupLbl.style.whiteSpace = 'normal';
 
     var custBody = mk('Panel', custWin); custBody.style.flowChildren = 'right'; custBody.style.width = '100%';
     custBody.style.height = 'fill-parent-flow(1.0)';
@@ -860,6 +869,8 @@ R"EDJS(
     // preview for a few frames from render() (layout settles a frame or two after visible flips).
     var previewPokeFrames = 0;
     function pokePreviewSoon() { previewPokeFrames = 16; }
+)EDJS"
+R"EDJS(
     function maintainPreview() {
       if (!custOverlay.visible) return;
       // Keep the composition-layer panel marked ready EVERY frame while the modal is open. Without
@@ -999,6 +1010,38 @@ R"EDJS(
       if (held > 0) return held;
       var ws = weaponsForSlot(slot);
       return ws.length ? (parseInt(ws[0][1], 10) || 0) : 0;
+    }
+    function weaponLabelForDef(def) {
+      def = parseInt(def || 0, 10) || 0;
+      if (def <= 0) return 'weapon';
+      var slot = WEAPON_SLOT_BY_DEF[def] || '';
+      if (slot === 'primary' || slot === 'secondary') {
+        var ws = weaponsForSlot(slot);
+        for (var i = 0; i < ws.length; i++) if (parseInt(ws[i][1], 10) === def) return ws[i][0];
+      }
+      return 'Weapon ' + def;
+    }
+    function shouldRoutePickupToOwner(slot) {
+      if (slot !== 'primary' && slot !== 'secondary') return false;
+      if (!custActiveWeaponPickup || !custActiveWeaponOwnerSteam || custActiveWeaponDef <= 0) return false;
+      if (custActiveWeaponSlot !== slot) return false;
+      return effectiveSlotDef(slot) === custActiveWeaponDef;
+    }
+    function resolveCosmeticTarget(slot) {
+      var target = (custTargetKey && custTargetKey.indexOf('steam:') === 0)
+        ? custTargetKey.substring(6) : 'current';
+      if (shouldRoutePickupToOwner(slot)) return custActiveWeaponOwnerSteam;
+      return target;
+    }
+    function updatePickupBanner() {
+      if (!custActiveWeaponPickup || !custActiveWeaponOwnerSteam) {
+        custPickupBanner.visible = false;
+        return;
+      }
+      var wn = weaponLabelForDef(custActiveWeaponDef);
+      var on = custActiveWeaponOwnerName || ('Player ' + custActiveWeaponOwnerSteam);
+      custPickupLbl.text = 'Holding ' + on + '\'s ' + wn + ' (picked up). Finish changes apply to ' + on + '\'s ' + wn + ' loadout, not ' + (custTargetName || 'this player') + '.';
+      custPickupBanner.visible = true;
     }
     function filteredOptions(slot) {
       var arr = COSMETICS[slot] || [];
@@ -1327,12 +1370,10 @@ R"EDJS(
       // custWear[slot] -- doing so silently dropped every agent pick (no command was ever sent).
       if (custTargetIndex < 0) return;
       if (slot !== 'agent' && !custWear[slot]) return;
-      // Target the player by SteamID -- the backend store is SteamID-keyed so the override follows
-      // them across pawn recreation / round reset / death / observer switch / demo seek. The C++
-      // state pushes custTargetKey as "steam:<id>" for real players; fall back to "current" (the
-      // live spectated player) when no SteamID was resolved (e.g. bots).
-      var target = (custTargetKey && custTargetKey.indexOf('steam:') === 0)
-        ? custTargetKey.substring(6) : 'current';
+      // Target the player by SteamID -- the backend store is SteamID-keyed. Picked-up weapons keep the
+      // original owner's econ id, so route finish commands to that owner when editing the held pickup.
+      var target = resolveCosmeticTarget(slot);
+      var routedPickup = shouldRoutePickupToOwner(slot);
       var opt = selOpt(slot, custSel[slot]);
       var meta = opt ? (opt[2] || {}) : {};
       var def = parseInt(meta.def || 0, 10) || 0;
@@ -1344,7 +1385,8 @@ R"EDJS(
       // break the console-command tokenizer; the native "uilog" handler joins the tokens back.
       var label = (opt && opt[0]) ? ('' + opt[0]) : '(unknown)';
       var safeLabel = label.replace(/["';\r\n]+/g, ' ').replace(/\s+/g, ' ');
-      cmd('mirv_filmmaker cosmetics uilog [' + slot + '] ' + safeLabel + ' (def ' + def + ' paint ' + pk + ' wear ' + wear + ')');
+      var routeNote = routedPickup ? (' [owner ' + custActiveWeaponOwnerSteam + ']') : '';
+      cmd('mirv_filmmaker cosmetics uilog [' + slot + '] ' + safeLabel + routeNote + ' (def ' + def + ' paint ' + pk + ' wear ' + wear + ')');
       var sent = false;
       var command = '';
       if ((slot === 'primary' || slot === 'secondary') && def > 0) {
@@ -1415,6 +1457,7 @@ R"EDJS(
       updateWearControl('secondary');
       updateWearControl('knife');
       updateWearControl('gloves');
+      updatePickupBanner();
     }
     function openCustomize() {
       closeAllDrops(); closeSettings();
@@ -2407,6 +2450,9 @@ R"EDJS(
       custTargetKey = custTargetIndex >= 0 ? ('pawn:' + custTargetIndex) : 'pawn:-1';
       custActiveWeaponDef = 0;
       custActiveWeaponSlot = '';
+      custActiveWeaponPickup = false;
+      custActiveWeaponOwnerSteam = '';
+      custActiveWeaponOwnerName = '';
       if (ct && typeof ct.pawnIndex === 'number' && ct.pawnIndex >= 0) {
         custTargetIndex = ct.pawnIndex;
         custTargetKey = ct.key || ('pawn:' + ct.pawnIndex);
@@ -2414,6 +2460,9 @@ R"EDJS(
         custTargetTeam = ct.team;
         custActiveWeaponDef = parseInt(ct.activeWeaponDefIndex || 0, 10) || 0;
         custActiveWeaponSlot = WEAPON_SLOT_BY_DEF[custActiveWeaponDef] || '';
+        custActiveWeaponPickup = !!ct.activeWeaponPickup;
+        custActiveWeaponOwnerSteam = ct.activeWeaponOwnerSteamId ? ('' + ct.activeWeaponOwnerSteamId) : '';
+        custActiveWeaponOwnerName = ct.activeWeaponOwnerName ? ('' + ct.activeWeaponOwnerName) : '';
       }
       if (custTargetIndex < 0 && typeof ff.targetIndex === 'number' && ff.targetIndex >= 0) custTargetIndex = ff.targetIndex;
       var cand = ff.candidates || [];
@@ -2427,6 +2476,9 @@ R"EDJS(
         custTargetTeam = ct.team;
         custActiveWeaponDef = parseInt(ct.activeWeaponDefIndex || 0, 10) || 0;
         custActiveWeaponSlot = WEAPON_SLOT_BY_DEF[custActiveWeaponDef] || '';
+        custActiveWeaponPickup = !!ct.activeWeaponPickup;
+        custActiveWeaponOwnerSteam = ct.activeWeaponOwnerSteamId ? ('' + ct.activeWeaponOwnerSteamId) : '';
+        custActiveWeaponOwnerName = ct.activeWeaponOwnerName ? ('' + ct.activeWeaponOwnerName) : '';
       }
       if (!(ct && typeof ct.pawnIndex === 'number' && ct.pawnIndex >= 0))
         custTargetKey = custTargetIndex >= 0 ? ('pawn:' + custTargetIndex) : 'pawn:-1';
@@ -2435,6 +2487,7 @@ R"EDJS(
       custTargetName = nm || (custTargetIndex >= 0 ? ('Player #' + custTargetIndex) : 'Player');
       custTargetTeam = tm;
       applyCustomizeTargetLoadout(ct);
+      updatePickupBanner();
       var nextLoadoutSig = customizeLoadoutSignature();
       if (custOverlay.visible && (custTargetKey !== prevTargetKey || custDisplayedLoadoutSig !== nextLoadoutSig)) {
         restorePlayerSelections();

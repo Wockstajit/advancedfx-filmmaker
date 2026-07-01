@@ -388,6 +388,42 @@ bool ReadAgentModelPath(CEntityInstance* pawn, char* out, size_t outSize) {
 	return ok;
 }
 
+uint64_t ReadWeaponOwnerXuid(int weaponEntityIndex) {
+	CEntityInstance* weapon = EntityFromIndex(weaponEntityIndex);
+	if (!weapon || !g_cosmeticsOffsetsOk)
+		return 0;
+	const ClientDllOffsets_t& o = g_clientDllOffsets;
+	if (o.C_EconEntity.m_OriginalOwnerXuidLow == 0 || o.C_EconEntity.m_OriginalOwnerXuidHigh == 0)
+		return 0;
+	unsigned char* w = (unsigned char*)weapon;
+	__try {
+		uint32_t xLow = *(uint32_t*)(w + o.C_EconEntity.m_OriginalOwnerXuidLow);
+		uint32_t xHigh = *(uint32_t*)(w + o.C_EconEntity.m_OriginalOwnerXuidHigh);
+		return ((uint64_t)xHigh << 32) | (uint64_t)xLow;
+	} __except (1) {
+		return 0;
+	}
+}
+
+const char* NameForSteamId(uint64_t steamId) {
+	if (steamId == 0)
+		return nullptr;
+	const int highest = GetHighestEntityIndex();
+	for (int i = 0; i <= highest; ++i) {
+		CEntityInstance* ctrl = EntityFromIndex(i);
+		if (!ctrl || !ctrl->IsPlayerController() || ctrl->GetSteamId() != steamId)
+			continue;
+		const char* name = ctrl->GetSanitizedPlayerName();
+		if (name && *name)
+			return name;
+		name = ctrl->GetPlayerName();
+		if (name && *name)
+			return name;
+		return nullptr;
+	}
+	return nullptr;
+}
+
 std::string BuildCustomizeTargetJson(int pawnIndex) {
 	CEntityInstance* pawn = EntityFromIndex(pawnIndex);
 	if (!pawn || !pawn->IsPlayerPawn())
@@ -426,6 +462,12 @@ std::string BuildCustomizeTargetJson(int pawnIndex) {
 	o << ",\"team\":" << pawn->GetTeam();
 	o << ",\"activeWeaponIndex\":" << activeWeaponIndex;
 	o << ",\"activeWeaponDefIndex\":" << ActiveWeaponDefIndex(pawn);
+	uint64_t activeOwnerXuid = (activeWeaponIndex >= 0) ? ReadWeaponOwnerXuid(activeWeaponIndex) : 0;
+	const bool activeWeaponPickup = (steamId != 0 && activeOwnerXuid != 0 && activeOwnerXuid != steamId);
+	const char* activeOwnerName = activeWeaponPickup ? NameForSteamId(activeOwnerXuid) : nullptr;
+	o << ",\"activeWeaponOwnerSteamId\":\"" << (activeOwnerXuid ? std::to_string(activeOwnerXuid) : "") << "\"";
+	o << ",\"activeWeaponOwnerName\":\"" << JsonEscape(activeOwnerName ? activeOwnerName : "") << "\"";
+	o << ",\"activeWeaponPickup\":" << (activeWeaponPickup ? "true" : "false");
 	o << ",\"weapons\":{";
 	o << "\"primary\":";
 	if (loadout[0].defIndex > 0) {

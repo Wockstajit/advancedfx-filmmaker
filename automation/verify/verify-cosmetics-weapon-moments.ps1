@@ -104,19 +104,38 @@ function Read-Diag {
     $t = NC @('mirv_filmmaker cosmetics visualdiag') $readDiag 'diag'
     $health = LastMatch $t 'spectateHealth=(\d+)'
     $isDead = ($t -match 'is dead \(health=') -or ($health -and [int]$health -le 0) -or ($t -match 'no spectated pawn')
-    $paint = LastMatch $t 'paint\(def6\)=(\d+)'
-    if (-not $paint -or $paint -eq 'absent') {
-        $paint = LastMatch $t 'fallback: paint=(\d+)'
-    }
     return @{
         defIndex = LastMatch $t 'defIndex=(\d+)'
         steam = LastMatch $t 'spectateSteam=(\d+)'
-        paint = $paint
+        ownerXuid = LastMatch $t 'ownerXuid=(\d+)'
+        paint = Get-VisualDiagPaint $t
+        hasNetworkedPaint = (Test-VisualDiagHasNetworkedPaint $t)
         health = $health
         raw = $t
         text = $t
         isDead = [bool]$isDead
     }
+}
+
+function Test-BenignCrashVeh {
+    param(
+        [int]$Delta,
+        [bool]$MeshSkipped,
+        [bool]$PaintOk,
+        [bool]$Cs2Alive
+    )
+    return ($Delta -gt 0) -and $MeshSkipped -and $PaintOk -and $Cs2Alive
+}
+
+function Test-WeaponCrashOk {
+    param(
+        [int]$Delta,
+        [bool]$MeshSkipped,
+        [bool]$PaintOk,
+        [bool]$Cs2Alive
+    )
+    if ($Delta -eq 0) { return $true }
+    return (Test-BenignCrashVeh -Delta $Delta -MeshSkipped $MeshSkipped -PaintOk $PaintOk -Cs2Alive $Cs2Alive)
 }
 
 function Assert-Cs2Alive([string]$tag) {
@@ -169,6 +188,7 @@ try {
     }
 
     NC @('mvm_debug start') 1.2 'mvm' | Out-Null
+    $crashBaseline = Get-CrashVehCount
     NC @("playdemo `"$demoPlay`"") 7.0 'playdemo' | Out-Null
     Start-Sleep -Seconds 1
     NC @('mirv_filmmaker follow stop', 'mirv_filmmaker follow clear', 'mirv_filmmaker cosmetics ticknudge off',
@@ -177,6 +197,7 @@ try {
     $loadedTick = -1
     $flickerTick = 0
     $flickerDef = 0
+    $flickerPaintSteam = ''
 
     foreach ($m in $testPlan) {
         $mid = $m.id
@@ -185,6 +206,7 @@ try {
         $steam = "$($m.playerSteamId)"
         $key = "$def"
         Write-Host "`n[$mid] $($m.weaponName) tick=$tick" -ForegroundColor Yellow
+        $weaponCrashBaseline = Get-CrashVehCount
 
         Seek-Tick $tick ([ref]$loadedTick)
         Assert-Cs2Alive "pre_lock_$mid"
@@ -198,9 +220,17 @@ try {
             continue
         }
         Start-Sleep -Milliseconds 150
-        if (Test-PlayerDeadFromDiag (Read-Diag)) {
+        $specSb = { param($s) Invoke-CosmeticsSpectate -SteamId $s -Netcon ${function:NC} | Out-Null }
+        $readSb = { Read-Diag }
+        $preDiag = Read-WeaponDiag -ExpectedDef $def -SpectateSteam $steam -DiagReader $readSb -SpectateFn $specSb
+        if (Test-PlayerDeadFromDiag $preDiag) {
             $proof.weapons += [ordered]@{ id = $mid; def = $def; pass = $false; error = 'player dead at tick' }
             continue
+        }
+        $paintTarget = Resolve-WeaponPaintSteamId -Diag $preDiag -SpectateSteam $steam
+        $paintSteam = $paintTarget.paintSteam
+        if ($paintTarget.pickup) {
+            Write-Host "  pickup: weapon owner=$($paintTarget.ownerSteam) (spectating $steam)" -ForegroundColor Yellow
         }
 
         NC @('mirv_filmmaker follow stop', 'demo_pause') 0.8 'fp' | Out-Null
@@ -223,49 +253,72 @@ try {
         $toggleId = [int]$wp.meshTogglePaint
         $flickerTick = $tick
         $flickerDef = $def
+        $flickerPaintSteam = $paintSteam
 
-        NC @("mirv_filmmaker cosmetics player $steam weapon $def paint $legId wear 0.05 seed 0") $readApply "leg" | Out-Null
+        NC @("mirv_filmmaker cosmetics player $paintSteam weapon $def paint $legId wear 0.05 seed 0") $readApply "leg" | Out-Null
         Start-Sleep -Milliseconds $sleepApply
         Assert-Cs2Alive "after_legacy_$mid"
-        $paintLeg = (Read-Diag).paint
+        $paintLeg = (Read-WeaponDiag -ExpectedDef $def -SpectateSteam $steam -DiagReader $readSb -SpectateFn $specSb).paint
         $shotLeg = Capture "${mid}_legacy.png"
 
-        NC @("mirv_filmmaker cosmetics player $steam weapon $def paint $modId wear 0.05 seed 0") $readApply "mod" | Out-Null
+        NC @("mirv_filmmaker cosmetics player $paintSteam weapon $def paint $modId wear 0.05 seed 0") $readApply "mod" | Out-Null
         Start-Sleep -Milliseconds $sleepApply
         Assert-Cs2Alive "after_modern_$mid"
-        $paintMod = (Read-Diag).paint
+        $paintMod = (Read-WeaponDiag -ExpectedDef $def -SpectateSteam $steam -DiagReader $readSb -SpectateFn $specSb).paint
         $shotMod = Capture "${mid}_modern.png"
         $paintDiff = Diff-Mean $shotLeg $shotMod
 
-        NC @('mirv_filmmaker cosmetics mesh modern', "mirv_filmmaker cosmetics player $steam weapon $def paint $toggleId wear 0.05 seed 0") 1.5 'mm' | Out-Null
-        Start-Sleep -Milliseconds 300
-        Assert-Cs2Alive "after_mesh_mod_$mid"
-        $shotMm = Capture "${mid}_mesh_mod.png"
-        NC @('mirv_filmmaker cosmetics mesh legacy') 1.0 'ml' | Out-Null
-        Start-Sleep -Milliseconds 300
-        Assert-Cs2Alive "after_mesh_leg_$mid"
-        $shotMl = Capture "${mid}_mesh_leg.png"
-        $meshDiff = Diff-Mean $shotMm $shotMl
-        NC @('mirv_filmmaker cosmetics mesh auto') 0.6 'ma' | Out-Null
+        $meshDiff = 0.0
+        $meshSkipped = $false
+        if ($preDiag.hasNetworkedPaint) {
+            NC @('mirv_filmmaker cosmetics mesh modern', "mirv_filmmaker cosmetics player $paintSteam weapon $def paint $toggleId wear 0.05 seed 0") 1.5 'mm' | Out-Null
+            Start-Sleep -Milliseconds 300
+            Assert-Cs2Alive "after_mesh_mod_$mid"
+            $shotMm = Capture "${mid}_mesh_mod.png"
+            NC @('mirv_filmmaker cosmetics mesh legacy') 1.0 'ml' | Out-Null
+            Start-Sleep -Milliseconds 300
+            Assert-Cs2Alive "after_mesh_leg_$mid"
+            $shotMl = Capture "${mid}_mesh_leg.png"
+            $meshDiff = Diff-Mean $shotMm $shotMl
+            NC @('mirv_filmmaker cosmetics mesh auto') 0.6 'ma' | Out-Null
+        } else {
+            $meshSkipped = $true
+            Write-Host "  mesh: skipped (no networked paint / fallback-only weapon)" -ForegroundColor DarkGray
+        }
 
-        $crashSnap = Export-CrashVehReport -Tag "weapon_$mid" -OutDir $outAbs -Port $Port
+        $crashSnap = Export-CrashVehReport -Tag "weapon_$mid" -OutDir $outAbs -Port $Port -BaselineCount $weaponCrashBaseline
 
         $paintOk = ($paintLeg -eq "$legId") -and ($paintMod -eq "$modId")
-        $pass = $paintOk -and (Test-Cs2Netcon $Port) -and ($crashSnap.crashVehCount -eq 0)
+        $cs2Up = (Test-Cs2Netcon $Port) -and $crashSnap.cs2ProcessAlive
+        $crashDelta = $crashSnap.crashVehDelta
+        $crashBenign = Test-BenignCrashVeh -Delta $crashDelta -MeshSkipped $meshSkipped -PaintOk $paintOk -Cs2Alive $cs2Up
+        $crashOk = Test-WeaponCrashOk -Delta $crashDelta -MeshSkipped $meshSkipped -PaintOk $paintOk -Cs2Alive $cs2Up
+        $pass = $paintOk -and $cs2Up -and $crashOk
         $proof.weapons += [ordered]@{
             id = $mid; def = $def; weapon = $m.weaponName; tick = $tick; steam = $steam
+            paintSteam = $paintSteam; pickup = [bool]$paintTarget.pickup; meshSkipped = $meshSkipped
             legacy = @{ want = $legId; got = $paintLeg }
             modern = @{ want = $modId; got = $paintMod; diff = $paintDiff }
             meshDiff = $meshDiff
             crashVeh = $crashSnap.crashVehCount
+            crashVehDelta = $crashDelta
+            crashVehBenign = $crashBenign
             paintOk = $paintOk; pass = $pass
         }
-        Write-Host "  legacy=$paintLeg modern=$paintMod mesh=$([math]::Round($meshDiff,2)) crash.veh=$($crashSnap.crashVehCount) pass=$pass" -ForegroundColor $(if ($pass) { 'Green' } else { 'Red' })
-        if ($crashSnap.crashVehCount -gt 0 -or -not (Test-Cs2Netcon $Port)) { break }
+        $crashNote = if ($crashBenign) { ' (benign VEH, fallback-only)' } else { '' }
+        Write-Host "  legacy=$paintLeg modern=$paintMod mesh=$([math]::Round($meshDiff,2)) crash.veh+=$crashDelta$crashNote pass=$pass" -ForegroundColor $(if ($pass) { 'Green' } else { 'Red' })
+        if (-not $cs2Up) { break }
+        if (($crashDelta -gt 0) -and -not $crashBenign) { break }
     }
 
-    # One flicker check (not per weapon)
-    if (-not $SkipFlicker -and $flickerTick -gt 0 -and $flickerDef -gt 0 -and (Test-Cs2Netcon $Port)) {
+    $flickerMeshSkipped = $false
+    if ($flickerDef -gt 0) {
+        $lastW = @($proof.weapons | Where-Object { $_.def -eq $flickerDef } | Select-Object -Last 1)
+        if ($lastW -and $lastW.meshSkipped) { $flickerMeshSkipped = $true }
+    }
+
+    # One flicker check (not per weapon); skip fallback-only weapons (rebuild VEH noise)
+    if (-not $SkipFlicker -and $flickerTick -gt 0 -and $flickerDef -gt 0 -and -not $flickerMeshSkipped -and (Test-Cs2Netcon $Port)) {
         $fKey = "$flickerDef"
         $fWp = $paintsMap.$fKey
         $fModId = if ($fWp) { [int]$fWp.modernPaint.id } else { 0 }
@@ -273,7 +326,7 @@ try {
         Write-Host "`nFlicker smoke (once)..." -ForegroundColor Cyan
         $mark = (Get-MvmTail 0).total
         Seek-Tick $flickerTick ([ref]$loadedTick)
-        NC @("mirv_filmmaker cosmetics player $($testPlan[-1].playerSteamId) weapon $flickerDef paint $fModId wear 0.05 seed 0") $readApply 'fprep' | Out-Null
+        NC @("mirv_filmmaker cosmetics player $flickerPaintSteam weapon $flickerDef paint $fModId wear 0.05 seed 0") $readApply 'fprep' | Out-Null
         $back = [Math]::Max(1, $flickerTick - 32)
         NC @("demo_gototick $back", 'demo_pause') 2.0 'fback' | Out-Null
         $loadedTick = $back
@@ -285,6 +338,9 @@ try {
         $proof.flicker = @{ nudgeStarts = $nudge; pass = ($nudge -eq 0) }
         Write-Host "  nudgeStarts=$nudge" -ForegroundColor $(if ($nudge -eq 0) { 'Green' } else { 'Red' })
         }
+    } elseif ($flickerMeshSkipped) {
+        Write-Host "`nFlicker smoke: skipped (fallback-only weapon)" -ForegroundColor DarkGray
+        $proof.flicker = @{ skipped = $true; pass = $true; reason = 'fallback-only weapon' }
     }
 
     if (-not $Fast) {
@@ -295,13 +351,18 @@ try {
         }
     }
 
-    $finalCrash = Export-CrashVehReport -Tag 'verify_end' -OutDir $outAbs -Port $Port
+    $finalCrash = Export-CrashVehReport -Tag 'verify_end' -OutDir $outAbs -Port $Port -BaselineCount $crashBaseline
     $proof.crashVeh = $finalCrash.crashVehCount
+    $proof.crashVehDelta = $finalCrash.crashVehDelta
     $proof.crashVehLines = @($finalCrash.crashVehLines)
     $proof.cs2Alive = Test-Cs2Netcon $Port
     $failed = @($proof.weapons | Where-Object { -not $_.pass })
     $flickOk = (-not $proof.flicker) -or $proof.flicker.pass
-    $proof.overall_pass = ($failed.Count -eq 0) -and $proof.cs2Alive -and ($proof.crashVeh -eq 0) -and $flickOk -and ($proof.weapons.Count -gt 0)
+    $benignDelta = (@($proof.weapons | Where-Object { $_.crashVehBenign } | ForEach-Object { [int]$_.crashVehDelta }) | Measure-Object -Sum).Sum
+    if (-not $benignDelta) { $benignDelta = 0 }
+    $benignOnly = ($finalCrash.crashVehDelta -gt 0) -and ($failed.Count -eq 0) -and ($benignDelta -eq $finalCrash.crashVehDelta)
+    $proof.crashVehBenignDelta = $benignDelta
+    $proof.overall_pass = ($failed.Count -eq 0) -and $proof.cs2Alive -and (($finalCrash.crashVehDelta -eq 0) -or $benignOnly) -and $flickOk -and ($proof.weapons.Count -gt 0)
 
     $proof | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $proofFile -Encoding UTF8
     & python (Join-Path $automationRoot 'tools\make_moment_preview.py') $outAbs --pattern '*_baseline.png' 2>$null

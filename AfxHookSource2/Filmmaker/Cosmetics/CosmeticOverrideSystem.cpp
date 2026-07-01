@@ -464,51 +464,6 @@ ApplyResult ApplyCosmeticWrite(
 
 } // namespace
 
-CosmeticOverrideSystem& CosmeticsRef();
-
-static CEntityInstance* EntFromIndexForHolder(int index) {
-	if (index < 0 || index > GetHighestEntityIndex() || !g_pEntityList || !*g_pEntityList || !g_GetEntityFromIndex)
-		return nullptr;
-	return (CEntityInstance*)g_GetEntityFromIndex(*g_pEntityList, index);
-}
-
-uint64_t SteamIdFromWeaponHolderPawn(CEntityInstance* weapon) {
-	if (!weapon || g_clientDllOffsets.C_BaseEntity.m_hOwnerEntity == 0)
-		return 0;
-	SOURCESDK::CS2::CBaseHandle oh = weapon->GetOwnerEntityHandle();
-	if (!oh.IsValid())
-		return 0;
-	CEntityInstance* ownerEnt = EntFromIndexForHolder(oh.GetEntryIndex());
-	if (!ownerEnt || !ownerEnt->IsPlayerPawn())
-		return 0;
-	const int pawnIdx = oh.GetEntryIndex();
-	const int highest = GetHighestEntityIndex();
-	for (int i = 0; i <= highest; ++i) {
-		CEntityInstance* ctrl = EntFromIndexForHolder(i);
-		if (!ctrl || !ctrl->IsPlayerController())
-			continue;
-		if (ctrl->GetPlayerPawnHandle().GetEntryIndex() == pawnIdx)
-			return ctrl->GetSteamId();
-	}
-	return 0;
-}
-
-uint64_t SteamIdForWeaponProfileLookup(CEntityInstance* weapon, int weaponEntityIndex) {
-	uint64_t holderSteam = SteamIdFromWeaponHolderPawn(weapon);
-	if (holderSteam != 0)
-		return holderSteam;
-	const int spectPawnIdx = CosmeticsRef().CurrentSpectatedPawnIndex();
-	if (spectPawnIdx < 0 || weaponEntityIndex < 0)
-		return 0;
-	CEntityInstance* pawn = EntFromIndexForHolder(spectPawnIdx);
-	if (!pawn || !pawn->IsPlayerPawn())
-		return 0;
-	SOURCESDK::CS2::CBaseHandle aw = pawn->GetActiveWeaponHandle();
-	if (!aw.IsValid() || aw.GetEntryIndex() != weaponEntityIndex)
-		return 0;
-	return CosmeticsRef().CurrentSpectatedSteamId();
-}
-
 CosmeticOverrideSystem& CosmeticsRef() {
 	static CosmeticOverrideSystem s;
 	return s;
@@ -1025,16 +980,10 @@ int CosmeticOverrideSystem::ResolveSpectatedPaintkitOverride() const {
 			o.C_EconItemView.m_iItemDefinitionIndex, &econ))
 		return 0;
 
-	uint64_t profileSteam = econ.xuid;
-	const CosmeticProfile* prof = m_store.Find(profileSteam);
-	const uint64_t holderSteam = SteamIdForWeaponProfileLookup(weapon, wh.IsValid() ? wh.GetEntryIndex() : -1);
-	if (holderSteam != 0) {
-		const CosmeticProfile* holderProf = m_store.Find(holderSteam);
-		if (holderProf) {
-			profileSteam = holderSteam;
-			prof = holderProf;
-		}
-	}
+	if (econ.xuid == 0)
+		return 0;
+
+	const CosmeticProfile* prof = m_store.Find(econ.xuid);
 	if (!prof)
 		return 0;
 
@@ -1243,16 +1192,7 @@ int CosmeticOverrideSystem::ApplyMatchedWeapons(bool forceStale, bool fireRebuil
 		if (xuid == 0)
 			continue;
 
-		uint64_t profileSteam = xuid;
-		CosmeticProfile* prof = m_store.Find(profileSteam);
-		const uint64_t holderSteam = SteamIdForWeaponProfileLookup(ent, i);
-		if (holderSteam != 0) {
-			CosmeticProfile* holderProf = m_store.Find(holderSteam);
-			if (holderProf) {
-				profileSteam = holderSteam;
-				prof = holderProf;
-			}
-		}
+		CosmeticProfile* prof = m_store.Find(xuid);
 		if (!prof)
 			continue;
 

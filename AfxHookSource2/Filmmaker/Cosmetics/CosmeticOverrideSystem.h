@@ -26,8 +26,6 @@ namespace advancedfx { class ICommandArgs; }
 
 namespace Filmmaker {
 
-class CEntityInstance;
-
 // Per-frame application stats, surfaced by "cosmetics status" / debug overlay.
 struct CosmeticFrameStats {
 	int entitiesScanned = 0;   // econ entities walked this frame
@@ -71,10 +69,7 @@ struct CosmeticRebuildFlags {
 	bool attrParity = false;     // CAttributeManager::m_iReapplyProvisionParity ++ (attr cache bump)
 };
 
-// Demo picked-up weapons often keep OriginalOwnerXuid from a prior owner. Resolve the profile SteamID
-// from m_hOwnerEntity when present, else from the spectated pawn's active weapon handle.
-uint64_t SteamIdFromWeaponHolderPawn(CEntityInstance* weapon);
-uint64_t SteamIdForWeaponProfileLookup(CEntityInstance* weapon, int weaponEntityIndex);
+// Demo picked-up weapons keep OriginalOwnerXuid from a prior owner (see customize UI pickup routing).
 
 class CosmeticOverrideSystem {
 public:

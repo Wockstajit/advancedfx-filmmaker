@@ -937,7 +937,7 @@ CEntityInstance* FindOwnedWeaponByDef(uint64_t steamId, int targetDef, int* outI
 			uint64_t xuid = ((uint64_t)xHigh << 32) | (uint64_t)xLow;
 			unsigned char* itemView = w + o.C_EconEntity.m_AttributeManager + o.C_AttributeContainer.m_Item;
 			int liveDef = (int)*(uint16_t*)(itemView + o.C_EconItemView.m_iItemDefinitionIndex);
-			match = (liveDef == targetDef && (xuid == steamId || SteamIdForWeaponProfileLookup(ent, i) == steamId));
+			match = (xuid == steamId && liveDef == targetDef);
 		} __except (1) {
 			match = false;
 		}
