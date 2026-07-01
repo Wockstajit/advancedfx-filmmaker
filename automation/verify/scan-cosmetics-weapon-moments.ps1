@@ -39,11 +39,14 @@ $root = Split-Path -Parent $automationRoot
 
 if (-not $Thorough -and -not $PSBoundParameters.ContainsKey('Fast')) { $Fast = $true }
 if ($Fast) {
-    if ($MaxProbeTicks -le 0) { $MaxProbeTicks = 5 }
-    if (-not $PSBoundParameters.ContainsKey('MaxGunHoldersPerTick')) { $MaxGunHoldersPerTick = 2 }
-    if (-not $PSBoundParameters.ContainsKey('StopAfterUniqueWeapons')) { $StopAfterUniqueWeapons = 6 }
+    if ($MaxProbeTicks -le 0) { $MaxProbeTicks = 30 }
+    if (-not $PSBoundParameters.ContainsKey('MaxGunHoldersPerTick')) { $MaxGunHoldersPerTick = 4 }
+    if (-not $PSBoundParameters.ContainsKey('StopAfterUniqueWeapons')) { $StopAfterUniqueWeapons = 24 }
+} elseif ($Thorough) {
+    if ($MaxProbeTicks -le 0) { $MaxProbeTicks = 0 }
+    if (-not $PSBoundParameters.ContainsKey('StopAfterUniqueWeapons')) { $StopAfterUniqueWeapons = 48 }
 } elseif ($MaxProbeTicks -le 0) {
-    $MaxProbeTicks = 10
+    $MaxProbeTicks = 20
 }
 
 $Script:PrimaryDefs = @(7,8,9,10,11,13,14,16,17,19,23,24,25,26,27,28,29,33,34,35,38,39,40,60)
@@ -51,7 +54,6 @@ $Script:SecondaryDefs = @(1,2,3,4,30,32,36,61,63,64)
 $Script:KnifeDefs = @(42,59,500,503,505,506,507,508,509,512,514,515,516,517,518,519,520,521,522,523,525,526)
 $Script:DiagReadSec = if ($Fast) { 0.65 } else { 1.2 }
 $Script:SeekReadSec = if ($Fast) { 2.0 } else { 4.5 }
-$Script:SpecSleepMs = if ($Fast) { 150 } else { 350 }
 
 function Test-Netcon([int]$p) {
     $t = [System.Net.Sockets.TcpClient]::new()
@@ -96,30 +98,39 @@ function Get-SkipReason([int]$def) {
 }
 
 function Parse-VisualDiag([string]$text) {
-    $health = LastMatch $text 'spectateHealth=(\d+)'
-    $isDead = ($text -match 'is dead \(health=') -or ($health -and [int]$health -le 0) -or ($text -match 'no spectated pawn')
-    return @{
-        defIndex = LastMatch $text 'defIndex=(\d+)'
-        steam = LastMatch $text 'spectateSteam=(\d+)'
-        pawn = LastMatch $text 'spectatePawn=(\d+)'
-        health = $health
-        weaponClass = LastMatch $text "class='([^']+)'"
-        paint = LastMatch $text 'paint\(def6\)=(\d+)'
-        raw = $text
-        isDead = [bool]$isDead
-    }
+    $d = Parse-VisualDiagFields $text
+    return $d
 }
 
-function New-RawMoment([hashtable]$diag, [int]$tick, [string]$anim, [string]$reason) {
+function New-RawMoment(
+    [hashtable]$diag, [int]$tick, [string]$anim, [string]$reason, [string]$ownershipHint = 'unknown',
+    [string]$playerName = '', [object]$team = $null, [bool]$settled = $true, [string]$ownerEntityId = ''
+) {
+    $holder = "$($diag.steam)"
+    $owner = if ($diag.ownerXuid) { "$($diag.ownerXuid)" } else { $holder }
+    $pickup = ($owner -and $holder -and $owner -ne '0' -and $holder -ne '0' -and $owner -ne $holder)
+    $otype = if ($pickup) { 'pickup' } elseif ($ownershipHint -in @('pickup', 'owned')) { $ownershipHint } else { 'owned' }
     return [ordered]@{
         tick = $tick
-        playerSteamId = $diag.steam
+        playerSteamId = $holder
+        holderSteamId = $holder
         playerEntityId = $diag.pawn
-        playerName = ''
+        playerName = $playerName
+        team = $team
+        weaponEntityId = $diag.weaponEntityId
+        weaponOwnerSteamId = $owner
+        ownerSteamId = $owner
+        ownerEntityId = $(if ($pickup) { $ownerEntityId } else { $diag.pawn })
+        ownershipType = $otype
+        ownershipHint = $ownershipHint
         weaponDefIndex = [int]$diag.defIndex
         weaponClass = $diag.weaponClass
         paintIndex = if ($diag.paint) { [int]$diag.paint } else { 0 }
+        hasNetworkedPaint = [bool]$diag.hasNetworkedPaint
+        worldMeshMask = $diag.worldMeshMask
+        vmMeshMask = $diag.vmMeshMask
         animationState = $anim
+        settled = [bool]$settled
         reason = $reason
         activeWeapon = $true
     }
@@ -155,9 +166,53 @@ function Read-Diag {
     return Parse-VisualDiag (NC @('mirv_filmmaker cosmetics visualdiag') $Script:DiagReadSec 'diag')
 }
 
+function Test-MomentSettled([hashtable]$d0) {
+    <#
+    A candidate found at the seek tick might be mid weapon-draw/switch -- the model
+    hasn't fully appeared yet (exactly what the spec says to avoid). Nudge a few
+    ticks forward with mirv_skip (cheap: paused-frame stepping, not a re-seek -- see
+    [memory: demo-seek-cost-model]) and require the def index to hold steady. Also
+    catches a reload edge via the m_nCustomEconReloadEventId counter so a genuinely
+    reloading moment can be tagged instead of mislabeled 'idle'.
+    #>
+    NC @('mirv_skip tick 8') 0.6 'settle' | Out-Null
+    Start-Sleep -Milliseconds 120
+    $d1 = Read-Diag
+    $defStable = ("$($d1.defIndex)" -eq "$($d0.defIndex)") -and $d1.defIndex
+    $reloadEdge = $false
+    if ($null -ne $d0.reloadEvent -and $null -ne $d1.reloadEvent -and "$($d0.reloadEvent)" -ne "$($d1.reloadEvent)") {
+        $reloadEdge = $true
+    }
+    return @{ diag = $d1; settled = [bool]$defStable; reloadEdge = $reloadEdge }
+}
+
+function Resolve-OwnerEntityId([string]$ownerSteam, [string]$holderSteam) {
+    # Best-effort: briefly spectate the weapon's owner to log their pawn entity id
+    # ("original owner player id"), then hand spectate back to the holder.
+    if (-not $ownerSteam -or $ownerSteam -eq '0' -or $ownerSteam -eq $holderSteam) { return '' }
+    $spec = Invoke-CosmeticsSpectate -SteamId $ownerSteam -Netcon ${function:NC}
+    $entId = ''
+    if ($spec.ok -and -not $spec.dead) {
+        Start-Sleep -Milliseconds 100
+        $od = Read-Diag
+        if ($od.pawn) { $entId = "$($od.pawn)" }
+    }
+    Invoke-CosmeticsSpectate -SteamId $holderSteam -Netcon ${function:NC} | Out-Null
+    Start-Sleep -Milliseconds 100
+    return $entId
+}
+
 function Seek-Tick([int]$tick) {
     NC @("demo_gototick $tick", 'demo_pause') $Script:SeekReadSec "seek_$tick" | Out-Null
     Start-Sleep -Milliseconds $(if ($Fast) { 200 } else { 500 })
+    # Don't trust the fixed read window above as proof the seek finished -- a
+    # cold/long seek can still be mid-replay when it expires (confirmed live in
+    # the verify script: the engine landed ~138 ticks past target on the first
+    # seek of a session). Poll the engine's own tick counter until it matches.
+    $landed = Wait-DemoTickLanded -TargetTick $tick -Netcon ${function:NC}
+    if (-not $landed.landed) {
+        Write-Host "  WARN: seek to $tick did not settle (actual=$($landed.actual)) after extra wait" -ForegroundColor Yellow
+    }
 }
 
 function Find-GunHoldersAtTick([int]$tick, [object[]]$targets) {
@@ -171,6 +226,13 @@ function Find-GunHoldersAtTick([int]$tick, [object[]]$targets) {
         return @()
     }
 
+    # Test-MomentSettled's mirv_skip nudge genuinely advances the demo clock (it's
+    # not a re-seek), so the recorded tick for each moment must track where we
+    # actually are, not the original probe tick -- otherwise VERIFY re-seeks to a
+    # tick that no longer matches the diag data that was stored (e.g. the player
+    # has since drawn a knife), and its retry logic burns through retries forever.
+    $curTick = $tick
+
     foreach ($t in $tickTargets) {
         if ($found.Count -ge $MaxGunHoldersPerTick) { break }
         $steam = "$($t.steamId)"
@@ -180,19 +242,21 @@ function Find-GunHoldersAtTick([int]$tick, [object[]]$targets) {
             Add-Content -LiteralPath $enumFile -Value "  steam=$steam offline-dead"
             continue
         }
-        $spec = Invoke-CosmeticsSpectate -SteamId $steam -Netcon ${function:NC}
-        if ($spec.dead) {
+        # One netcon round trip instead of two (spectate + diag in the same call) --
+        # a knife/grenade/dead candidate is a skip either way, so don't pay for a
+        # separate powershell.exe + TCP connect just to find that out.
+        $snap = Invoke-CosmeticsSpectateAndDiag -SteamId $steam -Netcon ${function:NC} -ReadSeconds $Script:DiagReadSec
+        if ($snap.dead) {
             Write-Host " .dead" -NoNewline -ForegroundColor DarkYellow
             Add-Content -LiteralPath $enumFile -Value "  steam=$steam live-dead"
             continue
         }
-        if (-not $spec.ok) {
+        if (-not $snap.ok) {
             Write-Host " no-spec" -NoNewline -ForegroundColor DarkYellow
             Add-Content -LiteralPath $enumFile -Value "  steam=$steam spectate failed"
             continue
         }
-        Start-Sleep -Milliseconds $Script:SpecSleepMs
-        $d = Read-Diag
+        $d = $snap.diag
         if (Test-PlayerDeadFromDiag $d) {
             Write-Host " .dead" -NoNewline -ForegroundColor DarkYellow
             Add-Content -LiteralPath $enumFile -Value "  steam=$steam diag-dead"
@@ -205,9 +269,26 @@ function Find-GunHoldersAtTick([int]$tick, [object[]]$targets) {
             Add-Content -LiteralPath $enumFile -Value "  steam=$steam skip=$skip def=$def"
             continue
         }
-        $found.Add((New-RawMoment $d $tick 'idle' "targeted player steam $steam at tick $tick"))
-        Write-Host " def$def" -NoNewline -ForegroundColor Green
-        Add-Content -LiteralPath $enumFile -Value "  steam=$steam def=$def ok"
+        $hint = if ($t.PSObject.Properties.Match('ownershipHint').Count -gt 0) { "$($t.ownershipHint)" } else { 'unknown' }
+        $preNudgeTick = $curTick
+        $check = Test-MomentSettled $d
+        $curTick = $preNudgeTick + 8   # mirv_skip physically advanced the demo this far
+        $anim = if ($check.reloadEdge) { 'reload' } else { 'idle' }
+        $srcDiag = if ($check.settled) { $check.diag } else { $d }
+        $momentTick = if ($check.settled) { $curTick } else { $preNudgeTick }
+
+        $ownerXuid = if ($srcDiag.ownerXuid) { "$($srcDiag.ownerXuid)" } else { '' }
+        $ownerEnt = ''
+        if ($ownerXuid -and $ownerXuid -ne '0' -and $ownerXuid -ne $steam) {
+            $ownerEnt = Resolve-OwnerEntityId $ownerXuid $steam
+        }
+
+        $pName = if ($t.PSObject.Properties.Match('playerName').Count -gt 0) { "$($t.playerName)" } else { '' }
+        $pTeam = if ($t.PSObject.Properties.Match('team').Count -gt 0) { $t.team } else { $null }
+        $found.Add((New-RawMoment $srcDiag $momentTick $anim "targeted player steam $steam at tick $momentTick (probe $tick)" $hint $pName $pTeam $check.settled $ownerEnt))
+        $settleTag = if ($check.settled) { '' } else { '~unsettled' }
+        Write-Host " def$def$settleTag" -NoNewline -ForegroundColor Green
+        Add-Content -LiteralPath $enumFile -Value "  steam=$steam def=$def anim=$anim settled=$($check.settled) tick=$momentTick ok"
     }
     Write-Host ""
     return @($found)
@@ -243,6 +324,13 @@ try {
     Start-Sleep -Seconds $(if ($Fast) { 1 } else { 2 })
     NC @('demo_pause', 'mirv_filmmaker follow stop', 'mirv_filmmaker follow clear', 'mirv_filmmaker cosmetics ticknudge off') 1.0 'setup' | Out-Null
 
+    # Cold-start warm-up: the FIRST demo_gototick after playdemo is unreliable --
+    # confirmed live in the verify script, it can land 100+ ticks past the
+    # requested target and get stuck there. The SECOND seek in a session lands
+    # exactly on target. Absorb the cold-start penalty with one cheap,
+    # disposable seek before the real probe-tick loop starts.
+    Seek-Tick 500
+
     $scanTargets = @($plan.scanTargets)
     if ($scanTargets.Count -eq 0) {
         Write-Host "WARN: plan has no scanTargets - offline plan may be stale; re-run without -SkipOfflinePlan" -ForegroundColor Yellow
@@ -272,6 +360,8 @@ try {
 
         if ($doTransitions -and $allMoments.Count -gt 0) {
             $steam = $allMoments[-1].playerSteamId
+            $tName = $allMoments[-1].playerName
+            $tTeam = $allMoments[-1].team
             $prevDef = [int]$allMoments[-1].weaponDefIndex
             for ($d = $TransitionStep; $d -le $TransitionWindowTicks; $d += $TransitionStep) {
                 NC @("mirv_skip tick $TransitionStep") $(if ($Fast) { 1.0 } else { 2.0 }) "skip" | Out-Null
@@ -281,7 +371,10 @@ try {
                 $def = if ($diag.defIndex) { [int]$diag.defIndex } else { 0 }
                 if ((Get-SkipReason $def)) { continue }
                 if ($def -ne $prevDef -and $def -gt 0) {
-                    $allMoments.Add((New-RawMoment $diag ($tick + $d) 'weapon_switch' "switched to def $def"))
+                    # Just switched -- model may not have fully appeared yet; keep the
+                    # moment (it's useful for weapon-type coverage / discovery) but mark
+                    # settled=false so selection deprioritizes it vs a stable idle read.
+                    $allMoments.Add((New-RawMoment $diag ($tick + $d) 'weapon_switch' "switched to def $def" 'unknown' $tName $tTeam $false))
                     $uniqueDefs["$def"] = $true
                     $prevDef = $def
                 }
@@ -306,7 +399,10 @@ try {
     [System.IO.File]::WriteAllText($scanRawFile, ($scanRaw | ConvertTo-Json -Depth 6), $utf8NoBom)
 
     & python (Join-Path $automationRoot 'tools\enrich_scan_moments.py') $scanRawFile
-    & python (Join-Path $automationRoot 'tools\build_weapon_moment_run.py') $scanRawFile --out-dir $outAbs
+    $buildArgs = @($scanRawFile, '--out-dir', $outAbs)
+    if ($Thorough) { $buildArgs += @('--max-total', '48') }
+    else { $buildArgs += @('--max-total', '24') }
+    & python (Join-Path $automationRoot 'tools\build_weapon_moment_run.py') @buildArgs
 
     $mj = Get-Content (Join-Path $outAbs 'moments.json') -Raw | ConvertFrom-Json
     Write-Host "`nDone: $($mj.selectedMomentCount) moments -> verify step" -ForegroundColor Green

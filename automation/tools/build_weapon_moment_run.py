@@ -14,6 +14,7 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent.parent
 sys.path.insert(0, str(HERE))
 from weapon_skin_database import get_database, slot_for_def  # noqa: E402
+from select_mesh_verification_cases import select_mesh_verification_cases, ownership_type  # noqa: E402
 
 TRANSITION_ANIMS = {
     "weapon_switch", "player_switch", "demo_seek", "loadout_change",
@@ -137,34 +138,11 @@ def apply_paired_comparisons(moments: List[Dict[str, Any]], db) -> None:
         }
 
 
-def select_moments(all_moments: List[Dict[str, Any]], max_per_weapon: int = 2, max_total: int = 12) -> List[Dict[str, Any]]:
-    seen: Set[Tuple] = set()
-    unique: List[Dict[str, Any]] = []
-    for m in sorted(all_moments, key=score_moment, reverse=True):
-        k = moment_key(m)
-        if k in seen:
-            continue
-        seen.add(k)
-        unique.append(m)
-
-    by_def: Dict[int, List[Dict[str, Any]]] = defaultdict(list)
-    for m in unique:
-        if m.get("activeWeapon"):
-            by_def[int(m.get("weaponDefIndex", 0))].append(m)
-
-    picked: List[Dict[str, Any]] = []
-    # Paired weapons first.
-    paired_defs = sorted(
-        d for d, rows in by_def.items()
-        if any(r.get("pairedComparison", {}).get("isPairedCase") for r in rows)
+def select_moments(all_moments: List[Dict[str, Any]], max_per_weapon: int = 2, max_total: int = 40) -> List[Dict[str, Any]]:
+    db = get_database()
+    return select_mesh_verification_cases(
+        all_moments, db, max_per_weapon=max_per_weapon, max_total=max_total,
     )
-    other_defs = sorted(d for d in by_def if d not in paired_defs)
-    for d in paired_defs + other_defs:
-        rows = by_def[d][:max_per_weapon]
-        picked.extend(rows)
-        if len(picked) >= max_total:
-            break
-    return picked[:max_total]
 
 
 def coverage_summary(moments: List[Dict[str, Any]], db) -> Dict[str, Any]:
@@ -223,6 +201,10 @@ def human_report(moments: List[Dict[str, Any]]) -> str:
         for m in sorted(rows, key=lambda r: r.get("tick", 0)):
             lines.extend([
                 f"Player: {m.get('playerName') or m.get('playerSteamId')}",
+                f"Holder steam: {m.get('playerSteamId')}",
+                f"Owner steam: {m.get('weaponOwnerSteamId') or m.get('ownerSteamId') or '(same)'}",
+                f"Ownership: {m.get('ownershipType', ownership_type(m))}",
+                f"Weapon entity: {m.get('weaponEntityId')}",
                 f"Tick: {m.get('tick')}",
                 f"Skin: {m.get('skinName')}",
                 f"Paint index: {m.get('paintIndex')}",
@@ -260,7 +242,9 @@ def build_verification_run(moments: List[Dict[str, Any]], scan_path: Path, db) -
             steps.append({"action": "apply_paint", "defIndex": def_idx, "paint": mod, "momentId": mid, "expectModel": "cs2"})
             steps.append({"action": "screenshot_fp", "tag": f"{mid}_modern_apply", "momentId": mid})
             steps.append({"action": "verify_paint_readback", "want": mod, "momentId": mid})
-            steps.append({"action": "mesh_toggle_test", "defIndex": def_idx, "paint": paints["meshTogglePaint"], "momentId": mid})
+            steps.append({"action": "mesh_switch_test", "defIndex": def_idx,
+                          "legacyPaint": leg, "modernPaint": mod, "momentId": mid,
+                          "ownershipType": m.get("ownershipType", "owned")})
         steps.append({"action": "flicker_smoke", "tick": m.get("tick"), "momentId": mid})
         if m.get("playerSwitchUsable"):
             steps.append({"action": "spec_next", "momentId": mid})
@@ -279,6 +263,8 @@ def build_verification_run(moments: List[Dict[str, Any]], scan_path: Path, db) -
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("scan_json", type=Path, help="Scan output JSON with raw moments")
+    ap.add_argument("--max-per-weapon", type=int, default=2)
+    ap.add_argument("--max-total", type=int, default=40)
     ap.add_argument("--out-dir", type=Path, default=None)
     args = ap.parse_args()
 
@@ -287,7 +273,12 @@ def main() -> int:
     raw = list(doc.get("moments", []))
     raw.extend(detect_transitions(raw))
     apply_paired_comparisons(raw, db)
-    selected = select_moments(raw)
+    selected = select_moments(raw, max_per_weapon=args.max_per_weapon, max_total=args.max_total)
+    # Selection groups by weapon def index, which would make VERIFY's demo seeks
+    # bounce across the whole timeline between almost every case (tens of
+    # thousands of ticks each time -- seeking is the slow part of this pipeline).
+    # Sort by tick so consecutive cases are nearby and seeks stay short.
+    selected.sort(key=lambda m: int(m.get("tick", 0) or 0))
     for i, m in enumerate(selected):
         m["id"] = f"m{i:04d}"
 

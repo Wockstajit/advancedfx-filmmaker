@@ -17,6 +17,17 @@ def enrich(moment: dict, db, demo_name: str) -> dict:
     model, leg, cs2, default = classify_paint(paint, db)
     out = dict(moment)
     out.setdefault("demoName", demo_name)
+    holder = str(out.get("playerSteamId") or "")
+    owner = str(out.get("weaponOwnerSteamId") or out.get("ownerSteamId") or out.get("ownerXuid") or "")
+    if owner and holder and owner not in ("0", "") and holder not in ("0", "") and owner != holder:
+        out["ownershipType"] = "pickup"
+    elif out.get("ownershipHint") in ("pickup", "owned"):
+        out["ownershipType"] = out["ownershipHint"]
+    else:
+        out["ownershipType"] = out.get("ownershipType", "owned")
+    out["holderSteamId"] = holder
+    if owner:
+        out["weaponOwnerSteamId"] = owner
     out["weaponName"] = db.weapon_name_for_def(def_i)
     out["weaponCategory"] = slot_for_def(def_i)
     out["skinName"] = db.skin_label(def_i, paint)

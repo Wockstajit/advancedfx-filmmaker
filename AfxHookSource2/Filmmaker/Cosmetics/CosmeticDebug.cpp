@@ -903,6 +903,22 @@ void Cosmetics_PrintVisualDiag(const char* cmd) {
 		rf.initialized ? 1 : 0, rf.attrInit ? 1 : 0, rf.imageCache ? 1 : 0, rf.attrParity ? 1 : 0);
 
 	advancedfx::Message("  worldModel: %s\n", model.ok ? model.name : "(unresolved)");
+
+	int effectivePaint = hP ? (int)nPaint : d.fbPaint;
+	int paintLegacy = (effectivePaint > 0) ? PaintKitLegacyModel(effectivePaint) : -2;
+	const uint64_t worldMesh = ReadEntityMeshGroupMask(weapon);
+	int vmIdx = -1;
+	int vmPaint = -1;
+	uint64_t vmMesh = 0;
+	const bool vmFound = ReadActiveViewmodelWeaponState((unsigned char*)pawn, cls, &vmIdx, &vmPaint, &vmMesh);
+	const char* meshModeLabel = "auto";
+	if (sys.MeshLegacyMode() == 1) meshModeLabel = "legacy";
+	else if (sys.MeshLegacyMode() == -1) meshModeLabel = "modern";
+	advancedfx::Message("  mesh: worldMask=%llu vmMask=%llu vmIdx=%d vmFound=%d paintLegacy=%d "
+		"meshMode=%s maskModern=%llu maskLegacy=%llu\n",
+		(unsigned long long)worldMesh, (unsigned long long)vmMesh, vmIdx, vmFound ? 1 : 0,
+		paintLegacy, meshModeLabel, (unsigned long long)sys.MaskModern(), (unsigned long long)sys.MaskLegacy());
+
 	advancedfx::Message("  note: viewmodel is a separate C_BaseViewModel entity sharing this econ item; "
 		"a skin change alters the composited material, not the model path above.\n");
 }

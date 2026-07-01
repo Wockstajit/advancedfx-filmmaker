@@ -6,12 +6,23 @@ param(
     [int]$Port = 29010,
     [string[]]$Commands = @('mirv_filmmaker ui_status'),
     [double]$ReadSeconds = 1.5,   # how long to read output after each command
-    [string]$LogPath
+    [string]$LogPath,
+    [int]$ConnectTimeoutMs = 3000
 )
 $ErrorActionPreference = 'Stop'
 
+# A fresh TcpClient is opened per invocation (this script is called once per
+# command batch). The synchronous Connect() overload has no timeout and can
+# hang indefinitely under connection churn instead of failing -- use
+# BeginConnect/WaitOne so a stuck connect throws a clear, catchable error
+# instead of silently wedging the whole calling pipeline with zero output.
 $client = New-Object System.Net.Sockets.TcpClient
-$client.Connect('127.0.0.1', $Port)
+$connectResult = $client.BeginConnect('127.0.0.1', $Port, $null, $null)
+if (-not $connectResult.AsyncWaitHandle.WaitOne($ConnectTimeoutMs)) {
+    $client.Close()
+    throw "cs2-netcon: connect to 127.0.0.1:$Port timed out after ${ConnectTimeoutMs}ms"
+}
+$client.EndConnect($connectResult)
 $client.NoDelay = $true
 $stream = $client.GetStream()
 $enc = [System.Text.Encoding]::ASCII

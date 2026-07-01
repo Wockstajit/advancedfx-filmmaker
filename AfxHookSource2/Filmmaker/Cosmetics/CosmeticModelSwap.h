@@ -102,7 +102,10 @@ bool PrecacheModels();
 
 // Set a weapon/world entity's mesh-group mask directly (legacy-vs-CS2 correction for a weapon skin
 // override that did NOT change the weapon type). Reads m_pGameSceneNode internally. No-op if mask==0.
-void ApplyWeaponMeshMask(unsigned char* weaponEntity, uint64_t meshMask, unsigned char* pawnForViewmodel);
+// Resets the entity's animgraph after the mesh-group write (same fix ApplyKnifeModelSwap uses for the
+// worker-thread null-deref crash -- a mesh-group toggle leaves the same kind of stale per-mesh anim
+// state behind as a full model swap does). entityIndex is diagnostics-only (breadcrumb tag); -1 if unknown.
+void ApplyWeaponMeshMask(unsigned char* weaponEntity, uint64_t meshMask, unsigned char* pawnForViewmodel, int entityIndex = -1);
 
 // Refresh every weapon renderable parented below the pawn's HUD-arms entity. This synchronizes the
 // first-person viewmodel after the world weapon's material/model was rebuilt.

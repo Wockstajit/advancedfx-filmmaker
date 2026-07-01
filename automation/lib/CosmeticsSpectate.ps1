@@ -3,6 +3,53 @@
 
 $Script:CosmeticsDbgDir = Join-Path $env:APPDATA 'HLAE\debuglogs'
 
+function Get-ActualDemoTick {
+    <#
+    Reads the engine's own idea of the current demo tick via "mirv_skip tick"
+    with no delta argument, which just echoes "Current demo tick: N" without
+    moving anything (see shared/MirvSkip.cpp).
+    #>
+    param(
+        [Parameter(Mandatory = $true)][scriptblock]$Netcon,
+        [double]$ReadSeconds = 0.6
+    )
+    $t = & $Netcon @('mirv_skip tick') $ReadSeconds 'ticktap'
+    if ($t -match 'Current demo tick:\s*(-?\d+)') { return [int]$Matches[1] }
+    return $null
+}
+
+function Wait-DemoTickLanded {
+    <#
+    demo_gototick issues a seek that the engine finishes asynchronously (it
+    replays packets to get there -- see [memory: demo-seek-cost-model]). A fixed
+    sleep after sending the command is not proof the seek has landed: on a cold
+    seek (first one after a fresh demo load, or a long jump) the engine can
+    still be mid-replay when a fixed window like 3s expires, so the very next
+    command we send gets queued behind an in-flight seek and the state we read
+    afterward reflects a tick well past the one we asked for. Poll the engine's
+    own tick counter until it actually matches (within tolerance) instead of
+    trusting a guessed wait time.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][int]$TargetTick,
+        [Parameter(Mandatory = $true)][scriptblock]$Netcon,
+        [int]$Tolerance = 4,
+        [int]$MaxWaitMs = 6000,
+        [int]$PollMs = 300
+    )
+    $deadline = (Get-Date).AddMilliseconds($MaxWaitMs)
+    $last = $null
+    while ((Get-Date) -lt $deadline) {
+        $actual = Get-ActualDemoTick -Netcon $Netcon
+        if ($null -ne $actual) {
+            $last = $actual
+            if ([Math]::Abs($actual - $TargetTick) -le $Tolerance) { return @{ landed = $true; actual = $actual } }
+        }
+        Start-Sleep -Milliseconds $PollMs
+    }
+    return @{ landed = $false; actual = $last }
+}
+
 function Test-Cs2Netcon {
     param(
         [int]$Port = 29010,
@@ -129,6 +176,61 @@ function Get-VisualDiagPaint {
     return $null
 }
 
+function Parse-VisualDiagFields {
+    param([string]$Text)
+    $health = if ($Text -match 'spectateHealth=(\d+)') { $Matches[1] } else { $null }
+    $isDead = ($Text -match 'is dead \(health=') -or ($health -and [int]$health -le 0) -or ($Text -match 'no spectated pawn')
+    return @{
+        defIndex = if ($Text -match 'defIndex=(\d+)') { $Matches[1] } else { $null }
+        steam = if ($Text -match 'spectateSteam=(\d+)') { $Matches[1] } else { $null }
+        ownerXuid = if ($Text -match 'ownerXuid=(\d+)') { $Matches[1] } else { $null }
+        weaponEntityId = if ($Text -match 'weapon: index=(\d+)') { $Matches[1] } else { $null }
+        weaponClass = if ($Text -match "class='([^']+)'") { $Matches[1] } else { $null }
+        pawn = if ($Text -match 'spectatePawn=(\d+)') { $Matches[1] } else { $null }
+        paint = (Get-VisualDiagPaint $Text)
+        hasNetworkedPaint = (Test-VisualDiagHasNetworkedPaint $Text)
+        worldMeshMask = if ($Text -match 'worldMask=(\d+)') { $Matches[1] } else { $null }
+        vmMeshMask = if ($Text -match 'vmMask=(\d+)') { $Matches[1] } else { $null }
+        vmEntityId = if ($Text -match 'vmIdx=(\d+)') { $Matches[1] } else { $null }
+        paintLegacy = if ($Text -match 'paintLegacy=(-?\d+)') { $Matches[1] } else { $null }
+        meshMode = if ($Text -match 'meshMode=(\w+)') { $Matches[1] } else { $null }
+        worldModel = if ($Text -match 'worldModel: (.+)') { ($Matches[1] -replace '\s+$','') } else { $null }
+        reloadEvent = if ($Text -match 'm_nCustomEconReloadEventId\s*=\s*(-?\d+)') { $Matches[1] } else { $null }
+        health = $health
+        raw = $Text
+        text = $Text
+        isDead = [bool]$isDead
+    }
+}
+
+function Get-ExpectedMeshMaskForPaint {
+    # $Wp is untyped on purpose: it comes from ConvertFrom-Json (PSCustomObject with
+    # nested PSCustomObject values), and PowerShell's implicit PSCustomObject-to-
+    # Hashtable conversion is not reliable for nested shapes -- a [hashtable] type
+    # constraint here throws and aborts the whole verify run on the first weapon
+    # whose paint-pair object doesn't happen to convert cleanly.
+    param([int]$PaintId, $Wp)
+    if (-not $Wp) { return $null }
+    if ($PaintId -eq [int]$Wp.legacyPaint.id) { return 2 }
+    if ($PaintId -eq [int]$Wp.modernPaint.id) { return 1 }
+    return $null
+}
+
+function Test-MeshMaskOk {
+    param([hashtable]$Diag, [int]$ExpectedMask)
+    if ($ExpectedMask -le 0) { return $true }
+    # worldMask/vmMask are printed as %llu (unsigned 64-bit). An unresolved mask
+    # comes back as the sentinel 18446744073709551615 (UInt64.MaxValue), which
+    # overflows [int] and throws -- [uint64] holds the full range without
+    # overflowing, and still compares correctly against the small (1/2) expected
+    # mask values.
+    $world = if ($Diag.worldMeshMask) { [uint64]$Diag.worldMeshMask } else { [uint64]0 }
+    $vm = if ($Diag.vmMeshMask) { [uint64]$Diag.vmMeshMask } else { [uint64]0 }
+    if ($world -eq $ExpectedMask) { return $true }
+    if ($vm -eq $ExpectedMask) { return $true }
+    return $false
+}
+
 function Test-VisualDiagHasNetworkedPaint {
     param([string]$Text)
     return ($Text -match 'paint\(def6\)=(\d+)')
@@ -167,8 +269,16 @@ function Read-WeaponDiag {
         }
         $d = & $DiagReader
         if ($d.isDead) { return $d }
-        if ($ExpectedDef -le 0) { return $d }
-        if ($d.defIndex -and [int]$d.defIndex -eq $ExpectedDef) { return $d }
+        # A spectate switch can echo the PREVIOUS player's data for one read --
+        # reproduced directly right after a fresh demo load, where the very first
+        # spectate call silently no-ops for a beat. Confirm we're actually looking
+        # at the intended player before trusting either the def check or an
+        # unknown-def "don't care" pass-through.
+        $steamOk = (-not $SpectateSteam) -or ("$($d.steam)" -eq "$SpectateSteam")
+        if ($steamOk) {
+            if ($ExpectedDef -le 0) { return $d }
+            if ($d.defIndex -and [int]$d.defIndex -eq $ExpectedDef) { return $d }
+        }
         Start-Sleep -Milliseconds $SleepMs
     }
     return (& $DiagReader)
@@ -184,6 +294,29 @@ function Invoke-CosmeticsSpectate {
     $dead = ($text -match 'spectate: steam=\d+ dead')
     $ok = ($text -match 'spectate: steam=\d+ specIndex=\d+ health=\d+ ok')
     return @{ ok = $ok; dead = $dead; raw = $text }
+}
+
+function Invoke-CosmeticsSpectateAndDiag {
+    <#
+    Combined spectate+visualdiag in ONE netcon call instead of two. Each NC() call
+    spawns its own powershell.exe + TCP connect (see cs2-netcon.ps1) -- for a candidate
+    that turns out to be holding a knife/grenade (a skip, not a keep), that overhead is
+    pure waste, and there can be many such candidates per probe tick. Halves it.
+    Commands are still processed in order within one script invocation (the same
+    trusted pattern already used for e.g. "demo_gototick" + "demo_pause"), so the
+    diag read still reflects the just-applied spectate switch.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$SteamId,
+        [Parameter(Mandatory = $true)][scriptblock]$Netcon,
+        [double]$ReadSeconds = 0.75
+    )
+    $text = & $Netcon @("mirv_filmmaker cosmetics spectate $SteamId", 'mirv_filmmaker cosmetics visualdiag') $ReadSeconds "specdiag_$SteamId"
+    $dead = ($text -match 'spectate: steam=\d+ dead')
+    $ok = ($text -match 'spectate: steam=\d+ specIndex=\d+ health=\d+ ok')
+    $diag = Parse-VisualDiagFields $text
+    return @{ ok = $ok; dead = $dead; diag = $diag; raw = $text }
 }
 
 function Lock-PlayerBySteam {

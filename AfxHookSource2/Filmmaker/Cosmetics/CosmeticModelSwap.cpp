@@ -1459,14 +1459,20 @@ bool ApplyKnifeModelSwap(unsigned char* weapon, unsigned char* itemView,
 	return any;
 }
 
-void ApplyWeaponMeshMask(unsigned char* weaponEntity, uint64_t meshMask, unsigned char* pawnForViewmodel) {
+void ApplyWeaponMeshMask(unsigned char* weaponEntity, uint64_t meshMask, unsigned char* pawnForViewmodel, int entityIndex) {
 	ResolveModelSwapFns();
 	if (meshMask == 0)
 		return;
 	SafeSetMeshMask(weaponEntity, meshMask);
-	SafePostDataUpdate(weaponEntity);
+	// Same fix as ApplyKnifeModelSwap's "approach #1": reset the animgraph after the mesh-group write so
+	// the engine rebuilds it for the new mesh rather than posing it with stale per-mesh-group data. A
+	// legacy<->CS2 mesh-group toggle (this function) hits the same worker-thread null-deref the knife
+	// investigation chased -- it was only ever fixed on the knife SetModel path, not here. Order matches
+	// the knife path: mesh write, anim reset, viewmodel mirror, then PostDataUpdate last.
+	ResetAnimGraph(weaponEntity, entityIndex, "world");
 	if (pawnForViewmodel)
 		RefreshViewmodelWeapons(pawnForViewmodel, nullptr, meshMask, weaponEntity);
+	SafePostDataUpdate(weaponEntity);
 }
 
 void RefreshWeaponViewmodel(unsigned char* pawn) {

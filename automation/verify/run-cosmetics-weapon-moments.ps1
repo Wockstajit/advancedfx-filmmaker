@@ -15,7 +15,7 @@ param(
     [string]$OutDir = "",
     [string]$RunFile = "",
     [int]$MaxProbeTicks = 0,
-    [int]$MaxWeaponsToTest = 6,
+    [int]$MaxWeaponsToTest = 40,
     [switch]$Fast,
     [switch]$Thorough,
     [switch]$ScanOnly,

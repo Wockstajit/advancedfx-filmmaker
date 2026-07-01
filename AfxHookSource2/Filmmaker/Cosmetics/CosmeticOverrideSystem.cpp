@@ -1464,7 +1464,7 @@ int CosmeticOverrideSystem::ApplyMatchedWeapons(bool forceStale, bool fireRebuil
 					// Re-apply when live mask differs, paint just changed, or an explicit rebuild was requested.
 					bool needMesh = (liveMask != mask) || forceStale || result.needComposite;
 					if (needMesh) {
-						ApplyWeaponMeshMask(w, mask, ownerPawn);
+						ApplyWeaponMeshMask(w, mask, ownerPawn, i);
 						++m_lastStats.weaponMeshFixed;
 						dbgMeshApplied = 1;
 					}
