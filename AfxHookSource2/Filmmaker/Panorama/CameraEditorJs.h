@@ -408,8 +408,20 @@ R"EDJS(
       for (var i = 0; i < arr.length && i < 12; i++) sample.push({ label: arr[i][0], value: arr[i][1], meta: arr[i][2] || {} });
       return JSON.stringify({ slot: slot, count: arr.length, sample: sample });
     };
+    // Apply/Cancel/Reset/Clear test hooks for the staged Finish/Wear/Agent/Gloves picks (see
+    // markTouched/commitTouchedSlots in CameraEditorCustomizeJs.h) -- lets netcon automation drive the
+    // same commit/discard paths the action-bar buttons use, without simulating clicks.
+    api.customizeApply = function () { var applied = commitTouchedSlots(); return applied ? 'applied' : 'nothing-to-apply'; };
+    api.customizeCancelPending = function () { custTouched = { agent: false, primary: false, secondary: false, knife: false, gloves: false }; custDirty = false; updateActionBar(); return 'cancelled'; };
+    api.customizeResetToDefault = function () { resetToDefault(); return 'reset'; };
     api.customizeState = function () {
-      return JSON.stringify({ visible: !!custOverlay.visible, target: custTargetIndex, key: custTargetKey, name: custTargetName, team: normalizeTeamName(custTargetTeam), activeWeaponDef: custActiveWeaponDef, activeWeaponSlot: custActiveWeaponSlot, loadout: custLoadout, sel: custSel, wear: custWear, itemWear: custItemWear, preview: previewState() });
+      return JSON.stringify({
+        visible: !!custOverlay.visible, target: custTargetIndex, key: custTargetKey, name: custTargetName,
+        team: normalizeTeamName(custTargetTeam), activeWeaponDef: custActiveWeaponDef, activeWeaponSlot: custActiveWeaponSlot,
+        loadout: custLoadout, sel: custSel, wear: custWear, itemWear: custItemWear, preview: previewState(),
+        touched: custTouched, dirty: custDirty, applyTarget: applyLabelTarget(),
+        pickup: { active: custActiveWeaponPickup, ownerSteamId: custActiveWeaponOwnerSteam, ownerName: custActiveWeaponOwnerName }
+      });
     };
     api.previewInfo = function () { return previewState(); };
     // Live A/B of the preview SCENE preset (0=match_mvp, 1=vanity, 2=loadout-grid) without a
@@ -424,6 +436,8 @@ R"EDJS(
       applyPreview();
       return 'scene=' + previewSceneIdx + ' map=' + currentScene().map + ' ' + previewState();
     };
+)EDJS"
+R"EDJS(
     // Destroy + recreate the preview with override attrs (JSON), e.g. to try a different map/camera:
     //   mirv_filmmaker editor eval $.Msg($.CamEditor.previewRebuild('{"map":"ui/match_mvp","camera":"camera"}')+String.fromCharCode(10));
     api.previewRebuild = function (json) {
@@ -473,6 +487,8 @@ R"EDJS(
       // mouse flies the free cam and Panorama receives no clicks anyway.
       var cur = !!st.cursor;
       if (!cur) { closeAllDrops(); closeSettings(); closeCustomize(); } // can't click popups in GAME-mouse mode; don't leave them hanging
+      repositionOpenDrop(); // keep an open popup glued to its field while a scroll container moves it
+      publishCustomizeOpenState(); // safety net: covers visibility flips that skip open/closeCustomize
       catcher.hittest = cur;
       inspector.hittest = cur;
       backdrop.hittest = cur;
@@ -540,8 +556,12 @@ R"EDJS(
       updatePickupBanner();
       var nextLoadoutSig = customizeLoadoutSignature();
       if (custOverlay.visible && (custTargetKey !== prevTargetKey || custDisplayedLoadoutSig !== nextLoadoutSig)) {
-        restorePlayerSelections();
-        custTitle.text = 'CUSTOMIZE PLAYER · ' + (custTargetName || 'PLAYER').toUpperCase();
+        // Target/loadout changed under the open modal (player switch, or the demo's own state moved
+        // on) -- discard any unstaged picks and reseed from the live loadout, same as opening fresh.
+        custTouched = { agent: false, primary: false, secondary: false, knife: false, gloves: false };
+        custDirty = false;
+        resetSelectionsFromLoadout();
+        custTitleName.text = (custTargetName || 'PLAYER').toUpperCase();
         populateCustomize();
         updatePreview();
         pokePreviewSoon();

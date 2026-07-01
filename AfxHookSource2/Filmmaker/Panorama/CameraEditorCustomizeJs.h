@@ -112,11 +112,28 @@ R"EDJS(
     };
     var custItemWear = {};
     var custWearUpdating = false;
-    var custPersist = {};
     var custTargetIndex = -1, custTargetName = 'Player', custTargetTeam = '';
     var custTargetKey = 'pawn:-1', custActiveWeaponDef = 0, custActiveWeaponSlot = '', custDisplayedLoadoutSig = '';
     var custActiveWeaponPickup = false, custActiveWeaponOwnerSteam = '', custActiveWeaponOwnerName = '';
     var custLoadout = { primary: null, secondary: null, knife: null, gloves: null };
+    // Which weapon slot the 3D preview currently poses the character HOLDING -- clicking into a
+    // Primary/Secondary/Melee block's weapon/finish/wear controls switches this (see setActiveCategory
+    // / the `category` itemDrop option below), mirroring the native loadout's selected-group behavior
+    // (loadout_grid.js UpdateCharModel: whichever slot you're browsing is what the model holds).
+    // Gloves are not a "held" item -- they render on the hands regardless of this value.
+    var custActiveCategory = 'primary';
+    function setActiveCategory(slot) {
+      if (slot === custActiveCategory) return;
+      custActiveCategory = slot;
+      updatePreview();
+    }
+    // Which slot the preview should default to holding when a player is freshly loaded into the modal:
+    // prefer whatever they're actually carrying, so the model isn't shown holding an empty slot.
+    function initialActiveCategory() {
+      if (custLoadout.primary && custLoadout.primary.defIndex > 0) return 'primary';
+      if (custLoadout.secondary && custLoadout.secondary.defIndex > 0) return 'secondary';
+      return 'knife';
+    }
     // Which weapon def the primary/secondary blocks are CURRENTLY editing. 0 = follow the player's
     // held weapon; > 0 = an explicit weapon the user picked from the weapon selector (so a skin can be
     // assigned to ANY weapon, not just the one the player is holding). Each weapon def stores its own
@@ -132,30 +149,69 @@ R"EDJS(
     // Rich item dropdown: thumbnail/rarity swatch + rarity-colored name, in both the collapsed
     // field bar and the popup rows. Reuses the shared open/close/positioning machinery
     // (customDrops / openDrop / showDropPopup), so only one popup is open at a time.
-    function itemDrop(parent, id, onPick) {
+    var ROW_LABEL_W = '96px';
+    function rowLabelCell(parent, text) {
+      var l = lbl(parent, text, S.dim, 12); l.hittest = false; l.style.width = ROW_LABEL_W;
+      l.style.verticalAlign = 'center'; l.style.fontWeight = 'bold'; l.style.letterSpacing = '1px';
+      return l;
+    }
+    // Rich item/finish/wear row: an optional left label cell ("Weapon"/"Finish"/"Wear"/"Gloves", per
+    // the reference mock's labeled-card layout) plus either a swatch+name ('item' kind -- Agent,
+    // Weapon, Finish, Gloves rows) or a value+meter bar ('wear' kind). Both open the SAME floating
+    // popup (customDrops / openDrop / showDropPopup), so only one popup is open at a time. opts:
+    //   rowLabel: string label cell text (omitted = no label cell, e.g. the top Agent row)
+    //   kind: 'wear' for the value+meter row; anything else = swatch+name
+    //   showWearTag: 'item' rows only -- split a baked-in " · Factory New" suffix (see
+    //     withWearLabel()) into a separate dim trailing label instead of one run-on string
+    //   searchable: false suppresses the popup search box (the 6-entry wear-preset list doesn't need it)
+    //   height: field height override (the Agent row reads slightly taller in the reference)
+    function itemDrop(parent, id, onPick, opts) {
+      opts = opts || {};
+      var kind = opts.kind || 'item';
       var field = mk('Panel', parent); field.id = id; field.hittest = true;
-      field.style.width = '100%'; field.style.height = '44px'; field.style.flowChildren = 'right';
-      field.style.verticalAlign = 'center'; field.style.borderRadius = '4px';
+      field.style.width = '100%'; field.style.height = (opts.height || '48px'); field.style.flowChildren = 'right';
+      field.style.verticalAlign = 'center'; field.style.borderRadius = '4px'; field.style.marginBottom = '8px';
       field.style.backgroundColor = '#1b2230'; field.style.border = '1px solid #ffffff2e';
-      field.style.paddingLeft = '6px'; field.style.paddingRight = '8px';
-      var swatch = mk('Panel', field); swatch.hittest = false; swatch.style.width = '54px'; swatch.style.height = '34px';
-      swatch.style.verticalAlign = 'center'; swatch.style.marginRight = '9px'; swatch.style.borderRadius = '3px';
-      swatch.style.backgroundColor = '#0c0f14'; swatch.style.border = '1px solid #ffffff14';
-      var img = mk('Image', swatch); img.hittest = false; img.style.width = '100%'; img.style.height = '100%';
-      try { img.SetScaling('stretch-to-fit-preserve-aspect'); } catch (e) {}
-      var disp = lbl(field, '', '#e6eaef', 14); disp.hittest = false; disp.style.verticalAlign = 'center';
-      disp.style.width = 'fill-parent-flow(1.0)'; disp.style.fontWeight = 'bold';
-      disp.style.whiteSpace = 'nowrap'; disp.style.textOverflow = 'ellipsis';
+      field.style.paddingLeft = '10px'; field.style.paddingRight = '10px';
+      if (opts.rowLabel) rowLabelCell(field, opts.rowLabel);
+      var swatch = null, img = null, disp = null, wearTag = null, meterTrack = null, meterFill = null, valueTxt = null;
+      if (kind === 'wear') {
+        valueTxt = lbl(field, '', S.value, 14); valueTxt.hittest = false; valueTxt.style.fontWeight = 'bold';
+        valueTxt.style.width = 'fill-parent-flow(1.0)'; valueTxt.style.verticalAlign = 'center';
+        meterTrack = mk('Panel', field); meterTrack.hittest = false; meterTrack.style.width = '120px'; meterTrack.style.height = '6px';
+        meterTrack.style.verticalAlign = 'center'; meterTrack.style.marginRight = '12px'; meterTrack.style.borderRadius = '3px';
+        meterTrack.style.backgroundColor = '#0c0f14'; meterTrack.style.border = '1px solid #ffffff1a'; meterTrack.style.overflow = 'clip';
+        meterFill = mk('Panel', meterTrack); meterFill.hittest = false; meterFill.style.height = '100%';
+        meterFill.style.width = '0%'; meterFill.style.backgroundColor = S.accent;
+      } else {
+        swatch = mk('Panel', field); swatch.hittest = false; swatch.style.width = '54px'; swatch.style.height = '38px';
+        swatch.style.verticalAlign = 'center'; swatch.style.marginRight = '10px'; swatch.style.borderRadius = '3px';
+        swatch.style.backgroundColor = '#0c0f14'; swatch.style.border = '1px solid #ffffff14';
+        img = mk('Image', swatch); img.hittest = false; img.style.width = '100%'; img.style.height = '100%';
+        try { img.SetScaling('stretch-to-fit-preserve-aspect'); } catch (e) {}
+        disp = lbl(field, '', '#e6eaef', 14); disp.hittest = false; disp.style.verticalAlign = 'center';
+        disp.style.width = 'fill-parent-flow(1.0)'; disp.style.fontWeight = 'bold';
+        disp.style.whiteSpace = 'nowrap'; disp.style.textOverflow = 'ellipsis';
+        if (opts.showWearTag) {
+          wearTag = lbl(field, '', S.dim, 12); wearTag.hittest = false; wearTag.style.verticalAlign = 'center';
+          wearTag.style.marginLeft = '8px'; wearTag.style.whiteSpace = 'nowrap';
+        }
+      }
       var caret = lbl(field, '▾', '#e6eaef', 12); caret.hittest = false;
-      caret.style.verticalAlign = 'center'; caret.style.marginLeft = '6px';
+      caret.style.verticalAlign = 'center'; caret.style.marginLeft = '8px';
       var pop = mk('Panel', root); pop.visible = false; pop.hittest = true;
       pop.style.position = '0px 0px 0px'; pop.style.zIndex = '420'; pop.style.flowChildren = 'down';
       pop.style.backgroundColor = '#0e1620fa'; pop.style.border = '1px solid ' + S.accent;
       pop.style.borderRadius = '4px'; pop.style.overflow = 'squish scroll'; pop.style.maxHeight = '360px';
       pop.style.boxShadow = '#000000d0 0px 4px 14px 2px';
-      var rec = { field: field, disp: disp, caret: caret, pop: pop, onPick: onPick, opts: [], sig: '', img: img, swatch: swatch, query: '' };
-      field.SetPanelEvent('onactivate', function () { toggleDrop(rec); });
+      var rec = {
+        field: field, disp: disp, caret: caret, pop: pop, onPick: onPick, opts: [], sig: '', img: img, swatch: swatch,
+        query: '', kind: kind, searchable: opts.searchable !== false
+      };
+      field.SetPanelEvent('onactivate', function () { if (opts.category) setActiveCategory(opts.category); toggleDrop(rec); });
       customDrops.push(rec);
+)EDJS"
+R"EDJS(
       function panoramaImageSrc(img) {
         if (!img) return '';
         var rel = String(img).replace(/\\/g, '/');
@@ -210,16 +266,18 @@ R"EDJS(
       }
       function rebuild() {
         rec.pop.RemoveAndDeleteChildren();
-        var search = $.CreatePanel('TextEntry', rec.pop, id + 'Search', { placeholder: 'Search' });
-        search.style.width = '100%'; search.style.height = '34px'; search.style.marginBottom = '4px';
-        search.style.backgroundColor = '#101823'; search.style.border = '1px solid #ffffff24';
-        search.style.color = S.value; search.style.fontSize = '14px'; search.style.paddingLeft = '8px';
-        try { search.text = rec.query || ''; } catch (e) {}
-        search.SetPanelEvent('ontextentrychange', function () {
-          try { rec.query = (search.text || '').toLowerCase(); } catch (e) { rec.query = ''; }
-          rebuild();
-          try { search.SetFocus(); } catch (e2) {}
-        });
+        if (rec.searchable) {
+          var search = $.CreatePanel('TextEntry', rec.pop, id + 'Search', { placeholder: 'Search' });
+          search.style.width = '100%'; search.style.height = '34px'; search.style.marginBottom = '4px';
+          search.style.backgroundColor = '#101823'; search.style.border = '1px solid #ffffff24';
+          search.style.color = S.value; search.style.fontSize = '14px'; search.style.paddingLeft = '8px';
+          try { search.text = rec.query || ''; } catch (e) {}
+          search.SetPanelEvent('ontextentrychange', function () {
+            try { rec.query = (search.text || '').toLowerCase(); } catch (e) { rec.query = ''; }
+            rebuild();
+            try { search.SetFocus(); } catch (e2) {}
+          });
+        }
         for (var i = 0; i < rec.opts.length; i++) (function (o) {
           if (rec.query && (o[0] || '').toLowerCase().indexOf(rec.query) < 0) return;
           var meta = o[2] || {};
@@ -227,9 +285,11 @@ R"EDJS(
           prow.style.paddingTop = '5px'; prow.style.paddingBottom = '5px'; prow.style.paddingLeft = '6px'; prow.style.paddingRight = '10px';
           prow.style.verticalAlign = 'middle'; prow.style.borderLeft = '3px solid ' + (meta.color || '#00000000');
           if (meta.selected) prow.style.backgroundColor = S.btnOn;
-          var sw = mk('Panel', prow); sw.hittest = false; sw.style.width = '46px'; sw.style.height = '30px'; sw.style.marginRight = '9px';
-          sw.style.verticalAlign = 'center'; sw.style.borderRadius = '3px'; sw.style.border = '1px solid #ffffff14';
-          applySwatch(sw, meta);
+          if (rec.kind !== 'wear') {
+            var sw = mk('Panel', prow); sw.hittest = false; sw.style.width = '46px'; sw.style.height = '30px'; sw.style.marginRight = '9px';
+            sw.style.verticalAlign = 'center'; sw.style.borderRadius = '3px'; sw.style.border = '1px solid #ffffff14';
+            applySwatch(sw, meta);
+          }
           var t = lbl(prow, o[0], meta.color || '#e6eaef', 14); t.hittest = false; t.style.verticalAlign = 'center';
           t.style.width = 'fill-parent-flow(1.0)'; t.style.whiteSpace = 'nowrap'; t.style.textOverflow = 'ellipsis'; t.style.fontWeight = 'bold';
           prow.SetPanelEvent('onactivate', function () { closeAllDrops(); rec.onPick(o[1]); });
@@ -239,8 +299,8 @@ R"EDJS(
         dd: field,
         setSearch: function (q) { rec.query = (q || '').toLowerCase(); rebuild(); },
         open: function () { if (openDrop !== rec) closeAllDrops(); showDropPopup(rec); },
-        update: function (opts, selValue) {
-          rec.opts = opts || [];
+        update: function (optsArr, selValue) {
+          rec.opts = optsArr || [];
           var sel = null;
           for (var d = 0; d < rec.opts.length; d++) {
             var m = rec.opts[d][2] || (rec.opts[d][2] = {});
@@ -249,11 +309,31 @@ R"EDJS(
           }
           if (!sel && rec.opts.length) sel = rec.opts[0];
           var meta = sel ? (sel[2] || {}) : {};
-          rec.disp.text = sel ? sel[0] : '—'; rec.disp.style.color = meta.color || '#e6eaef';
-          rec.field.style.border = '1px solid ' + (meta.color || '#ffffff2e');
-          applySwatch(rec.swatch, meta);
+          if (kind !== 'wear') {
+            // Split a baked-in " · Factory New" suffix (withWearLabel()) off the option label so the
+            // Finish row shows the skin name and the wear tag as two visually separate zones (per the
+            // reference mock) instead of one run-on string.
+            var fullLabel = sel ? sel[0] : '—', mainLabel = fullLabel, tagLabel = '';
+            if (opts.showWearTag && fullLabel) {
+              var sepIdx = fullLabel.lastIndexOf(' · ');
+              if (sepIdx > 0) { mainLabel = fullLabel.substring(0, sepIdx); tagLabel = fullLabel.substring(sepIdx + 3); }
+            }
+            rec.disp.text = mainLabel; rec.disp.style.color = meta.color || '#e6eaef';
+            if (wearTag) wearTag.text = tagLabel;
+            rec.field.style.border = '1px solid ' + (meta.color || '#ffffff2e');
+            applySwatch(rec.swatch, meta);
+          }
           var sig = ''; for (var k = 0; k < rec.opts.length; k++) sig += rec.opts[k][0] + '|'; sig += '#' + selValue + '#' + rec.query;
           if (sig !== rec.sig) { rec.sig = sig; rebuild(); }
+        },
+        // 'wear' kind only: sets the value text + meter fill directly (update() above only feeds the
+        // popup's preset list for this kind, since there's no swatch/name to show in the field).
+        updateWear: function (valueLabel, fraction, color) {
+          if (kind !== 'wear') return;
+          valueTxt.text = valueLabel;
+          meterFill.style.width = Math.round(clamp01(fraction) * 100) + '%';
+          meterFill.style.backgroundColor = color || S.accent;
+          field.style.border = '1px solid ' + (color || '#ffffff2e');
         }
       };
     }
@@ -274,21 +354,36 @@ R"EDJS(
     custWin.SetPanelEvent('onactivate', function () { /* swallow clicks inside the window */ });
 
     var custHead = mk('Panel', custWin); custHead.style.flowChildren = 'right'; custHead.style.width = '100%';
-    custHead.style.paddingTop = '14px'; custHead.style.paddingBottom = '14px'; custHead.style.paddingLeft = '22px'; custHead.style.paddingRight = '14px';
+    custHead.style.paddingTop = '18px'; custHead.style.paddingBottom = '18px'; custHead.style.paddingLeft = '26px'; custHead.style.paddingRight = '18px';
     custHead.style.backgroundColor = '#00000040'; custHead.style.borderBottom = '1px solid #ffffff14';
-    var custTitle = lbl(custHead, 'CUSTOMIZE LOADOUT', S.value, 20); custTitle.style.fontWeight = 'bold';
-    custTitle.style.letterSpacing = '2px'; custTitle.style.width = 'fill-parent-flow(1.0)'; custTitle.style.verticalAlign = 'center';
+    // Title is two labels (not one string) so the player name can read in the orange accent color
+    // while "CUSTOMIZE PLAYER" stays neutral -- matches the reference mock's two-tone header.
+    var custTitleWrap = mk('Panel', custHead); custTitleWrap.style.flowChildren = 'right';
+    custTitleWrap.style.width = 'fill-parent-flow(1.0)'; custTitleWrap.style.verticalAlign = 'center';
+    var custTitlePrefix = lbl(custTitleWrap, 'CUSTOMIZE PLAYER', S.value, 22); custTitlePrefix.style.fontWeight = 'bold';
+    custTitlePrefix.style.letterSpacing = '2px'; custTitlePrefix.style.verticalAlign = 'center';
+    lbl(custTitleWrap, '  ·  ', S.dim, 22).style.verticalAlign = 'center';
+    var custTitleName = lbl(custTitleWrap, 'PLAYER', S.accent, 22); custTitleName.style.fontWeight = 'bold';
+    custTitleName.style.letterSpacing = '2px'; custTitleName.style.verticalAlign = 'center';
+    custTitleName.style.whiteSpace = 'nowrap'; custTitleName.style.textOverflow = 'ellipsis';
     var custClose = btn(custHead, '✕', function () { closeCustomize(); }, S.value);
-    custClose.style.marginRight = '0px'; custClose.style.width = '42px';
-    custClose.__lbl.style.fontSize = '18px'; custClose.__lbl.style.horizontalAlign = 'center';
+    custClose.style.marginRight = '0px'; custClose.style.width = '46px'; custClose.style.height = '46px';
+    custClose.style.backgroundColor = '#ffffff10'; custClose.style.border = '1px solid #ffffff2a'; custClose.style.borderRadius = '5px';
+    custClose.__lbl.style.fontSize = '19px'; custClose.__lbl.style.width = '100%'; custClose.__lbl.style.textAlign = 'center';
 
     var custPickupBanner = mk('Panel', custWin); custPickupBanner.visible = false; custPickupBanner.hittest = false;
-    custPickupBanner.style.width = '100%'; custPickupBanner.style.flowChildren = 'down';
-    custPickupBanner.style.paddingLeft = '22px'; custPickupBanner.style.paddingRight = '22px';
-    custPickupBanner.style.paddingTop = '10px'; custPickupBanner.style.paddingBottom = '10px';
+    custPickupBanner.style.width = '100%'; custPickupBanner.style.flowChildren = 'right'; custPickupBanner.style.verticalAlign = 'center';
+    custPickupBanner.style.paddingLeft = '26px'; custPickupBanner.style.paddingRight = '26px';
+    custPickupBanner.style.paddingTop = '12px'; custPickupBanner.style.paddingBottom = '12px';
     custPickupBanner.style.backgroundColor = '#3a2a10cc'; custPickupBanner.style.borderBottom = '1px solid #ffb34755';
-    var custPickupLbl = lbl(custPickupBanner, '', '#ffdba6', 13);
-    custPickupLbl.style.fontWeight = 'bold'; custPickupLbl.style.whiteSpace = 'normal';
+    var custPickupIcon = mk('Panel', custPickupBanner); custPickupIcon.hittest = false;
+    custPickupIcon.style.width = '22px'; custPickupIcon.style.height = '22px'; custPickupIcon.style.verticalAlign = 'center';
+    custPickupIcon.style.marginRight = '12px'; custPickupIcon.style.borderRadius = '11px'; custPickupIcon.style.backgroundColor = S.accent;
+    var custPickupIconLbl = lbl(custPickupIcon, '!', '#241a06ff', 15); custPickupIconLbl.hittest = false;
+    custPickupIconLbl.style.fontWeight = 'bold'; custPickupIconLbl.style.width = '100%'; custPickupIconLbl.style.textAlign = 'center';
+    custPickupIconLbl.style.verticalAlign = 'center';
+    var custPickupLbl = lbl(custPickupBanner, '', '#ffdba6', 13); custPickupLbl.style.width = 'fill-parent-flow(1.0)';
+    custPickupLbl.style.fontWeight = 'bold'; custPickupLbl.style.whiteSpace = 'normal'; custPickupLbl.style.verticalAlign = 'center';
 
     var custBody = mk('Panel', custWin); custBody.style.flowChildren = 'right'; custBody.style.width = '100%';
     custBody.style.height = 'fill-parent-flow(1.0)';
@@ -304,6 +399,24 @@ R"EDJS(
     prevWrap.style.backgroundColor = '#080a0e'; prevWrap.style.borderRadius = '6px'; prevWrap.style.border = '1px solid #ffffff14';
     prevWrap.style.flowChildren = 'down';
     prevWrap.style.overflow = 'clip';
+    // Stage holds the 3D/2D preview and fills all space above the Rotate/Zoom/Pan helper row (a
+    // fixed-height sibling); fill-parent-flow(1.0) here is the same remaining-space pattern custBody
+    // uses against custHead/custPickupBanner above. The near-black backdrop + inner border stand in
+    // for a vignette -- Panorama has no CSS gradient support to verify here (see sigscan.py note).
+    var prevStage = mk('Panel', prevWrap); prevStage.style.width = '100%'; prevStage.style.height = 'fill-parent-flow(1.0)';
+    prevStage.style.flowChildren = 'down'; prevStage.style.overflow = 'clip';
+    var prevHelperRow = mk('Panel', prevWrap); prevHelperRow.hittest = false;
+    prevHelperRow.style.width = '100%'; prevHelperRow.style.height = '38px'; prevHelperRow.style.flowChildren = 'right';
+    prevHelperRow.style.horizontalAlign = 'center'; prevHelperRow.style.verticalAlign = 'center';
+    prevHelperRow.style.backgroundColor = '#00000055'; prevHelperRow.style.borderTop = '1px solid #ffffff14';
+    function prevHelperItem(icon, text) {
+      var it = mk('Panel', prevHelperRow); it.style.flowChildren = 'right'; it.style.verticalAlign = 'center';
+      it.style.marginLeft = '16px'; it.style.marginRight = '16px';
+      var ic = lbl(it, icon, S.dim, 13); ic.style.marginRight = '6px'; ic.style.verticalAlign = 'center';
+      var tx = lbl(it, text, S.dim, 12); tx.style.verticalAlign = 'center'; tx.style.letterSpacing = '1px';
+      return it;
+    }
+    prevHelperItem('◈', 'Rotate'); prevHelperItem('▣', 'Zoom'); prevHelperItem('✥', 'Pan');
     var preview3d = null, previewItem3d = null, preview3dTried = false, previewSerial = 0, previewModelKey = '';
     // Native 3D MapPlayerPreviewPanel (vanity loadout scene). The make-or-break detail is TIMING:
     // the panel must be CREATED after the modal overlay is visible AND has a laid-out size, or it
@@ -314,7 +427,7 @@ R"EDJS(
 
     // 2D loadout card (fallback): player header + one rarity-colored row per slot, so the spectated
     // player's actual weapons/knife/gloves (and any picked skins) stay readable if 3D is unavailable.
-    var preview2d = mk('Panel', prevWrap); preview2d.style.width = '100%'; preview2d.style.height = '100%';
+    var preview2d = mk('Panel', prevStage); preview2d.style.width = '100%'; preview2d.style.height = '100%';
     preview2d.style.flowChildren = 'down'; preview2d.style.paddingTop = '30px';
     preview2d.style.paddingLeft = '30px'; preview2d.style.paddingRight = '30px'; preview2d.visible = true;
     var prev2dPlayer = lbl(preview2d, '', S.value, 23); prev2dPlayer.style.fontWeight = 'bold'; prev2dPlayer.style.letterSpacing = '1px';
@@ -366,6 +479,8 @@ R"EDJS(
       try { return LoadoutAPI.GetItemID(loadoutTeam(), slot) || ''; }
       catch (e) { return ''; }
     }
+)EDJS"
+R"EDJS(
     function previewState() {
       var playerState = preview3d ? ('player=' + (preview3d.IsValid ? preview3d.IsValid() : '?'))
                                   : (preview3dTried ? 'player-fallback' : 'player-uninit');
@@ -375,41 +490,58 @@ R"EDJS(
     // Scene presets for the MapPlayerPreviewPanel. CRUCIAL: the vanity/loadout scenes
     // (ui/buy_menu + cam_vanityloadout / cam_loadoutmenu_*) only render in the MAIN-MENU Panorama
     // root; in the in-game HUD (CSGOHud, where this editor lives) they instantiate but composite
-    // nothing -> a black box. CS2's end-of-match WIN PANEL (hudwinpanel_background_map.js) is the
-    // one MapPlayerPreviewPanel that DOES render inside the HUD, using ui/match_mvp + camera +
-    // mvp-banner. So we default to that scene; the others are kept for live A/B over `previewTry`.
+    // nothing -> a black box. That conclusion turned out to be an attribute problem, not a scene
+    // restriction: a `composition-layer-texture-name` attribute (paired with `require-composition-layer`)
+    // is what actually lets Panorama's compositor bind and display the panel's render target, and we
+    // were never setting it. A CS2 cheat-menu thread (github/UC "Preview Models in Menu") confirms the
+    // vanity/buy_menu scene DOES composite outside the main-menu root once that attribute -- plus
+    // `player`, `sync_spawn_addons`, and `csm_split_plane0_distance_override` -- are set:
+    //   $.CreatePanel('MapPlayerPreviewPanel', ctx, 'preview_texture_name', {
+    //     map: 'ui/buy_menu', camera: 'cam_loadoutmenu_ct', 'require-composition-layer': true,
+    //     'composition-layer-texture-name': 'preview_texture_name', playermodel: '...',
+    //     animgraphcharactermode: 'buy-menu', player: true, mouse_rotate: true,
+    //     sync_spawn_addons: true, 'transparent-background': true, 'pin-fov': 'vertical',
+    //     csm_split_plane0_distance_override: '250.0' });
+    // So the vanity scene (proper lit loadout backdrop, not the flat grey mvp-banner fallback) is the
+    // default again; match_mvp/loadoutmenu_ct stay for live A/B over `previewTry`.
     var PREVIEW_SCENES = [
       { map: 'ui/buy_menu', camera: 'cam_vanityloadout', mode: 'buy-menu', pname: 'vanity_character', bg: 'true' },
-      // bg 'false' (opaque) mirrors the native win panel (hudwinpanel MakeMvpMapPanel) EXACTLY -- a
-      // transparent composition layer has nothing behind it in the HUD and renders pure black, which
-      // is what made the preview look "black / disappearing". Opaque = the scene composites visibly.
       { map: 'ui/match_mvp', camera: 'camera', mode: 'mvp-banner', pname: 'mvp_char', bg: 'false' },
       { map: 'ui/buy_menu', camera: 'cam_loadoutmenu_ct', mode: 'buy-menu', pname: 'vanity_character', bg: 'true' }
     ];
-    // 1 = ui/match_mvp (end-of-match win-panel scene). This is the ONE MapPlayerPreviewPanel scene
-    // that actually composites inside the in-game HUD (CSGOHud) -- the vanity/buy_menu scenes (idx 0)
-    // instantiate but render a black box outside the main-menu root, which is why the preview used to
-    // "appear for a moment then disappear". See PREVIEW_SCENES note above.
-    var previewSceneIdx = 1;
+    var previewSceneIdx = 0;
     function currentScene() { return PREVIEW_SCENES[previewSceneIdx] || PREVIEW_SCENES[0]; }
     // Create the native MapPlayerPreviewPanel with the current scene's attrs (optionally overridden,
     // for live tuning over netcon). Returns the panel or null.
     function createPreview3d(overrides) {
       var sc = currentScene();
-      // EXACT native win-panel (hudwinpanel MakeMvpMapPanel) attribute set -- the extra attrs we used
-      // to pass (player/initial_entity/sync_spawn_addons/hide_while_waiting/csm_override) are NOT set
-      // by the native panel and appear to stop the composition layer from rendering in our injected
-      // HUD subtree. The model is applied afterwards via SetPlayerModel (as the native does), not as
-      // a creation attr.
+      var texName = 'CustPreviewTex' + (++previewSerial);
       var attrs = {
-        'require-composition-layer': 'true', 'pin-fov': 'vertical', 'transparent-background': sc.bg,
+        'require-composition-layer': 'true', 'composition-layer-texture-name': texName,
+        'pin-fov': 'vertical', 'transparent-background': sc.bg,
         'class': 'mvp_map', map: sc.map, camera: sc.camera, animgraphcharactermode: sc.mode,
-        playername: sc.pname, mouse_rotate: 'false'
+        playername: sc.pname, player: 'true', mouse_rotate: 'true', sync_spawn_addons: 'true',
+        csm_split_plane0_distance_override: '250.0',
+        // CRITICAL for the paused demo: without this the panel HIDES ITSELF while its composite
+        // materials are still building, and on a paused demo (no game frames advancing) that build
+        // may never signal complete -> the character never appears ("no visible person"). The
+        // native vanity-loadout.xml AND loadout_grid.xml both set this false for exactly this
+        // reason (show the model immediately, don't wait/cull). This is the panel property the
+        // UnknownCheats thread warns about ("prevent panorama from culling them").
+        hide_while_waiting_for_composite_materials: 'false',
+        // `hittest` was missing -- without it the panel never receives the mouse-drag that
+        // mouse_rotate needs (the ONE native MapPlayerPreviewPanel usage that sets mouse_rotate
+        // true, vanity-loadout.xml's id-loadout-agent, also sets hittest true; every other native
+        // instance sets rotate false AND omits hittest). panzoom_enabled/auto_recenter aren't part
+        // of that native recipe (only the item/knife-inspect MapItemPreviewPanel documents them) --
+        // trying them here anyway since both panel types share a base class; harmless no-op if the
+        // engine ignores them on this panel type.
+        hittest: 'true', panzoom_enabled: 'true', auto_recenter: 'true'
       };
-      if (overrides && overrides.playermodel) attrs.playermodel = overrides.playermodel;
+      attrs.playermodel = (overrides && overrides.playermodel) ? overrides.playermodel : teamDefaultModel();
       var p = null;
       try {
-        p = $.CreatePanel('MapPlayerPreviewPanel', prevWrap, 'CustPreview3D' + (++previewSerial), attrs);
+        p = $.CreatePanel('MapPlayerPreviewPanel', prevStage, texName, attrs);
         if (!(p && p.IsValid && p.IsValid())) p = null;
       } catch (e) { p = null; }
       if (p) {
@@ -439,7 +571,7 @@ R"EDJS(
       if (previewItem3d && previewItem3d.IsValid && previewItem3d.IsValid()) return previewItem3d;
       previewItem3d = null;
       try {
-        previewItem3d = $.CreatePanel('MapItemPreviewPanel', prevWrap, 'CustViewmodel3D' + (++previewSerial), {
+        previewItem3d = $.CreatePanel('MapItemPreviewPanel', prevStage, 'CustViewmodel3D' + (++previewSerial), {
           map: 'ui/xpshop_item', camera: 'camera_weapon_0', 'require-composition-layer': 'true',
           player: 'false', initial_entity: 'item', mouse_rotate: 'true', sync_spawn_addons: 'true',
           'transparent-background': 'true', 'pin-fov': 'vertical', hittest: 'true',
@@ -470,19 +602,38 @@ R"EDJS(
       if (safeCall(panel, 'EquipPlayerWithItem', itemId) == null) safeCall(panel, 'EquipPlayerWithItem', itemId.toString());
     }
     // Push the chosen agent (or the spectated player's team default) onto whichever preview exists.
+    // The item the preview should show HELD right now: whichever slot is "active" (see
+    // setActiveCategory -- switches when the user clicks into Primary/Secondary/Melee). If that
+    // slot's current selection is the generic "no paint" row (meta.def<=0, shared across every
+    // weapon of that def), fall back to the weapon actually targeted for the slot (effectiveSlotDef)
+    // so the model still holds a plain, unskinned copy of the right gun instead of nothing.
+    function activeHeldItemMeta() {
+      var cat = (custActiveCategory === 'secondary' || custActiveCategory === 'knife') ? custActiveCategory : 'primary';
+      var opt = selOpt(cat, custSel[cat]);
+      var meta = opt ? (opt[2] || {}) : {};
+      if (parseInt(meta.def || 0, 10) > 0) return meta;
+      var slotDef = (cat === 'primary' || cat === 'secondary') ? effectiveSlotDef(cat) : 0;
+      return (slotDef > 0) ? { def: slotDef, paint: 0, color: meta.color } : meta;
+    }
+    // Mirrors the native vanity-loadout recipe (panorama ref scripts/common/characteranims.js
+    // PlayAnimsOnPanel): SetPlayerCharacterItemID + SetPlayerModel together give the composited
+    // agent its real material (skin tone, team paint job); SetPlayerModel alone -- what this used to
+    // do -- leaves the model on the flat, uncomposited fallback material (the washed-out grey/white
+    // look the modal used to show). Then EquipPlayerWithItem for the held weapon/knife (ONE at a
+    // time, matching whichever slot is active) and the gloves (always, independent of the held item).
     function applyPreview() {
-      var skinSlot = (custSel.primary !== '0') ? 'primary' : 'secondary';
-      var skin = selOpt(skinSlot, custSel[skinSlot]), agent = selOpt('agent', custSel.agent);
-      var knife = selOpt('knife', custSel.knife), gloves = selOpt('gloves', custSel.gloves);
+      var agent = selOpt('agent', custSel.agent), gloves = selOpt('gloves', custSel.gloves);
+      var held = activeHeldItemMeta();
       var model = (agent && agent[2] && agent[2].model) ? agent[2].model : teamDefaultModel();
       ensurePreview3d(model);
       if (preview3d) {
         var sc = currentScene();
         if (sc.startCamera) safeCall(preview3d, 'TransitionToCamera', sc.startCamera, 0);
         safeCall(preview3d, 'SetActiveCharacter', 0); // char 0 = the single previewed agent
+        var agentItemId = econItemId(agent ? agent[2] : null);
+        if (agentItemId) safeCall(preview3d, 'SetPlayerCharacterItemID', agentItemId);
         safeCall(preview3d, 'SetPlayerModel', model);
-        equipPlayerPreviewMeta(preview3d, skin ? skin[2] : null);
-        equipPlayerPreviewMeta(preview3d, knife ? knife[2] : null);
+        equipPlayerPreviewMeta(preview3d, held);
         equipPlayerPreviewMeta(preview3d, gloves ? gloves[2] : null);
         safeCall(preview3d, 'SetReadyForDisplay', true);
       } else {
@@ -837,6 +988,7 @@ R"EDJS(
     }
     function resetSelectionsFromLoadout() {
       custWeaponDef = { primary: 0, secondary: 0 }; // follow held weapons for a freshly-opened player
+      custActiveCategory = initialActiveCategory();
       custSel = {
         agent: agentDefaultSelection(),
         primary: loadoutDefaultSelection('primary'),
@@ -862,93 +1014,51 @@ R"EDJS(
       saveActiveItemWear('knife');
       saveActiveItemWear('gloves');
     }
-    function currentPlayerKey() {
-      return custTargetKey || ('pawn:' + custTargetIndex);
-    }
-    function restorePlayerSelections() {
-      var key = currentPlayerKey();
-      if (custPersist[key] && custPersist[key].baseSig === customizeLoadoutSignature()) {
-        custSel = {
-          agent: custPersist[key].sel.agent || 'default',
-          primary: custPersist[key].sel.primary || '0',
-          secondary: custPersist[key].sel.secondary || '0',
-          knife: custPersist[key].sel.knife || '0',
-          gloves: custPersist[key].sel.gloves || '0'
-        };
-        custWear = custPersist[key].wear || custWear;
-        custItemWear = custPersist[key].itemWear || {};
-        custWeaponDef = custPersist[key].weaponDef || { primary: 0, secondary: 0 };
-        loadActiveItemWear('primary');
-        loadActiveItemWear('secondary');
-        loadActiveItemWear('knife');
-        loadActiveItemWear('gloves');
-      } else {
-        resetSelectionsFromLoadout();
-      }
-    }
-    function persistPlayerSelections() {
-      if (custTargetIndex < 0) return;
-      saveActiveItemWear('primary');
-      saveActiveItemWear('secondary');
-      saveActiveItemWear('knife');
-      saveActiveItemWear('gloves');
-      var copyWear = {};
-      for (var s in custWear) copyWear[s] = { preset: custWear[s].preset, custom: custWear[s].custom };
-      var copyItemWear = {};
-      for (var k in custItemWear) copyItemWear[k] = { preset: custItemWear[k].preset, custom: custItemWear[k].custom };
-      custPersist[currentPlayerKey()] = { baseSig: customizeLoadoutSignature(), sel: { agent: custSel.agent, primary: custSel.primary, secondary: custSel.secondary, knife: custSel.knife, gloves: custSel.gloves }, wear: copyWear, itemWear: copyItemWear, weaponDef: { primary: custWeaponDef.primary, secondary: custWeaponDef.secondary } };
-    }
 
     // RIGHT: final loadout-style controls. No arms/viewmodel override and no CT/T glove split.
 )EDJS"
 R"EDJS(
     var ctrlCol = mk('Panel', custBody); ctrlCol.style.width = 'fill-parent-flow(1.0)'; ctrlCol.style.height = '100%';
     ctrlCol.style.flowChildren = 'down'; ctrlCol.style.overflow = 'squish scroll';
-    function slotBlock(title) {
-      var b = mk('Panel', ctrlCol); b.style.flowChildren = 'down'; b.style.width = '100%'; b.style.marginBottom = '14px';
-      var t = lbl(b, title, S.dim, 11); t.style.fontWeight = 'bold'; t.style.letterSpacing = '2px'; t.style.marginBottom = '5px';
-      return b;
-    }
-    function miniLabel(parent, text) {
-      var l = lbl(parent, text, S.dim, 10); l.style.marginTop = '4px'; l.style.marginBottom = '2px';
-      l.style.letterSpacing = '1px'; return l;
-    }
-    function wearBlock(parent, slot) {
-      var wrap = mk('Panel', parent); wrap.style.width = '100%'; wrap.style.flowChildren = 'down'; wrap.style.marginTop = '6px';
-      var top = mk('Panel', wrap); top.style.width = '100%'; top.style.flowChildren = 'right';
-      var label = lbl(top, '', S.dim, 12); label.style.width = 'fill-parent-flow(1.0)'; label.style.verticalAlign = 'center';
-      var preset = itemDrop(wrap, 'CustWear' + slot, function (v) { setWear(slot, v, null); });
+    // Wear picker: a labeled 'wear' kind itemDrop (value text + meter bar, click opens the preset
+    // popup) plus the custom-float TextEntry (shown only for the 'custom' preset). No mouse-move drag
+    // here -- the meter is a read-only indicator; changing wear stays dropdown/text-entry driven, per
+    // the in-game-HUD "no mouse-move event" constraint (see CameraEditorWidgetsJs.h customDrop notes).
+    function wearBlock(parent, slot, category) {
+      var wrap = mk('Panel', parent); wrap.style.width = '100%'; wrap.style.flowChildren = 'down';
+      var preset = itemDrop(wrap, 'CustWear' + slot, function (v) { setWear(slot, v, null); },
+        { rowLabel: 'Wear', kind: 'wear', searchable: false, category: category });
       var custom = $.CreatePanel('TextEntry', wrap, 'CustWearFloat' + slot, { placeholder: '0.00 - 1.00' });
-      custom.style.width = '100%'; custom.style.height = '32px'; custom.style.marginTop = '5px';
+      custom.style.width = '100%'; custom.style.height = '32px'; custom.style.marginBottom = '8px';
       custom.style.backgroundColor = '#101823'; custom.style.border = '1px solid #ffffff24';
       custom.style.color = S.value; custom.style.fontSize = '14px'; custom.style.paddingLeft = '8px';
       custom.SetPanelEvent('ontextentrychange', function () {
         if (custWearUpdating) return;
+        if (category) setActiveCategory(category);
         var v = parseFloat(custom.text || '0');
         if (!isFinite(v)) v = 0;
         setWear(slot, 'custom', v);
       });
-      return { label: label, preset: preset, custom: custom };
+      return { preset: preset, custom: custom };
     }
-    var agentBlock = slotBlock('AGENT');
-    var agentDrop  = itemDrop(agentBlock, 'CustAgent', function (v) { pickCosmetic('agent', v); });
-    var primaryBlock = slotBlock('PRIMARY');
-    miniLabel(primaryBlock, 'Weapon');
-    var primaryWeaponDrop = itemDrop(primaryBlock, 'CustPrimaryWeapon', function (v) { pickWeapon('primary', v); });
-    miniLabel(primaryBlock, 'Finish');
-    var primaryDrop = itemDrop(primaryBlock, 'CustPrimary', function (v) { pickCosmetic('primary', v); });
-    var primaryWear = wearBlock(primaryBlock, 'primary');
-    var secondaryBlock = slotBlock('SECONDARY');
-    miniLabel(secondaryBlock, 'Weapon');
-    var secondaryWeaponDrop = itemDrop(secondaryBlock, 'CustSecondaryWeapon', function (v) { pickWeapon('secondary', v); });
-    miniLabel(secondaryBlock, 'Finish');
-    var secondaryDrop = itemDrop(secondaryBlock, 'CustSecondary', function (v) { pickCosmetic('secondary', v); });
-    var secondaryWear = wearBlock(secondaryBlock, 'secondary');
-    var knifeBlock = slotBlock('MELEE / KNIFE');
-    var knifeDrop  = itemDrop(knifeBlock, 'CustKnife', function (v) { pickCosmetic('knife', v); });
-    var knifeWear = wearBlock(knifeBlock, 'knife');
-    var glovesBlock = slotBlock('GLOVES');
-    var glovesDrop = itemDrop(glovesBlock, 'CustGloves', function (v) { pickCosmetic('gloves', v); });
+    // Agent: a single prominent row, no label cell and no wear (agents aren't skinned) -- matches the
+    // reference mock's top agent card. Everything else groups into a titled card via the shared
+    // section() helper (CameraEditorWidgetsJs.h), reusing the same chrome the rest of the editor uses.
+    var agentDrop = itemDrop(ctrlCol, 'CustAgent', function (v) { pickCosmetic('agent', v); }, { height: '58px' });
+    agentDrop.dd.style.marginBottom = '18px';
+    var primaryBlock = section(ctrlCol, 'PRIMARY');
+    var primaryWeaponDrop = itemDrop(primaryBlock, 'CustPrimaryWeapon', function (v) { pickWeapon('primary', v); }, { rowLabel: 'Weapon', category: 'primary' });
+    var primaryDrop = itemDrop(primaryBlock, 'CustPrimary', function (v) { pickCosmetic('primary', v); }, { rowLabel: 'Finish', showWearTag: true, category: 'primary' });
+    var primaryWear = wearBlock(primaryBlock, 'primary', 'primary');
+    var secondaryBlock = section(ctrlCol, 'SECONDARY');
+    var secondaryWeaponDrop = itemDrop(secondaryBlock, 'CustSecondaryWeapon', function (v) { pickWeapon('secondary', v); }, { rowLabel: 'Weapon', category: 'secondary' });
+    var secondaryDrop = itemDrop(secondaryBlock, 'CustSecondary', function (v) { pickCosmetic('secondary', v); }, { rowLabel: 'Finish', showWearTag: true, category: 'secondary' });
+    var secondaryWear = wearBlock(secondaryBlock, 'secondary', 'secondary');
+    var knifeBlock = section(ctrlCol, 'MELEE / KNIFE');
+    var knifeDrop = itemDrop(knifeBlock, 'CustKnife', function (v) { pickCosmetic('knife', v); }, { rowLabel: 'Weapon', showWearTag: true, category: 'knife' });
+    var knifeWear = wearBlock(knifeBlock, 'knife', 'knife');
+    var glovesBlock = section(ctrlCol, 'GLOVES');
+    var glovesDrop = itemDrop(glovesBlock, 'CustGloves', function (v) { pickCosmetic('gloves', v); }, { rowLabel: 'Gloves' });
     var glovesWear = wearBlock(glovesBlock, 'gloves');
     var wearControls = { primary: primaryWear, secondary: secondaryWear, knife: knifeWear, gloves: glovesWear };
     var wearDrops = { primary: primaryWear.preset, secondary: secondaryWear.preset, knife: knifeWear.preset, gloves: glovesWear.preset };
@@ -981,18 +1091,25 @@ R"EDJS(
       custWearUpdating = true;
       wc.custom.text = wearValue(slot).toFixed(2);
       custWearUpdating = false;
-      wc.label.text = 'Wear: ' + wearPresetLabel(slot) + ' (' + wearValue(slot).toFixed(2) + ')';
+      var val = wearValue(slot), opt = selOpt(slot, custSel[slot]), meta = opt ? (opt[2] || {}) : {};
+      var lo = (typeof meta.wearMin === 'number') ? meta.wearMin : 0.0;
+      var hi = (typeof meta.wearMax === 'number') ? meta.wearMax : 1.0;
+      var frac = (hi > lo) ? ((val - lo) / (hi - lo)) : val;
+      wc.preset.updateWear(wearPresetLabel(slot) + ' (' + val.toFixed(2) + ')', frac, meta.paint ? meta.color : S.accent);
     }
     function setWear(slot, preset, customValue) {
       if (!custWear[slot]) custWear[slot] = { preset: 'fn', custom: 0.01 };
       if (preset) custWear[slot].preset = preset;
       if (customValue !== null && customValue !== undefined) custWear[slot].custom = clamp01(customValue);
       saveActiveItemWear(slot);
-      persistPlayerSelections();
+      markTouched(slot);
       populateCustomize();
       updatePreview();
-      applyCosmeticCommand(slot);
     }
+    // Sends the actual "mirv_filmmaker cosmetics player ..." command for one slot's CURRENT selection.
+    // Called from commitTouchedSlots() (Apply / Reset-to-Default / Clear-All) -- NOT from every
+    // pick/wear change anymore; the modal now stages edits and only writes to the demo on Apply (or
+    // the immediate Reset/Clear actions), matching the reference mock's Apply/Cancel action bar.
     function applyCosmeticCommand(slot) {
       // The agent slot has no wear entry (agents are not skinned), so it must NOT be gated on
       // custWear[slot] -- doing so silently dropped every agent pick (no command was ever sent).
@@ -1037,29 +1154,30 @@ R"EDJS(
         cmd(command);
       }
     }
-    // Apply a selection. Updates UI + preview immediately, persists per current player, and sends
-    // the matching offline-demo cosmetic command where the native path exists.
+    // Apply a selection. Updates the UI + local preview immediately (stages the pending change); the
+    // actual demo-facing command only fires when the user commits via Apply / Reset to Default /
+    // Clear All (commitTouchedSlots()) -- see markTouched().
     function pickCosmetic(slot, value) {
+      if (slot === 'primary' || slot === 'secondary' || slot === 'knife') custActiveCategory = slot;
       saveActiveItemWear(slot);
       custSel[slot] = value;
       loadActiveItemWear(slot);
-      persistPlayerSelections();
+      markTouched(slot);
       populateCustomize();
       updatePreview();
-      applyCosmeticCommand(slot);
     }
     // Re-target which weapon a primary/secondary block edits (the weapon selector). Resets the finish
-    // dropdown to that weapon's vanilla default and repopulates; does NOT emit a cosmetic command on its
-    // own -- only picking a FINISH applies (so merely browsing weapons changes nothing in the demo).
+    // dropdown to that weapon's vanilla default and repopulates; does NOT stage a pending change on its
+    // own -- only picking a FINISH (or Wear) does (so merely browsing weapons changes nothing in the demo).
     function pickWeapon(slot, value) {
       if (slot !== 'primary' && slot !== 'secondary') return;
       var def = parseInt(value, 10) || 0;
       if (def <= 0) return;
+      custActiveCategory = slot;
       saveActiveItemWear(slot);
       custWeaponDef[slot] = def;
       custSel[slot] = optionExists(slot, def + ':0') ? (def + ':0') : '0';
       loadActiveItemWear(slot);
-      persistPlayerSelections();
       populateCustomize();
       updatePreview();
     }
@@ -1086,11 +1204,23 @@ R"EDJS(
       updateWearControl('knife');
       updateWearControl('gloves');
       updatePickupBanner();
+      updateActionBar();
+    }
+    // Tells the C++ side (CameraEditorHud::UpdateCustomizeModalState, "customizeopen" attribute)
+    // whether the modal is open, so MovieMode/GetSuspendMirvInput can treat it as an exclusive
+    // input surface (swallow Space/clicks/wheel, suspend free-cam mouse-look) -- see Filmmaker.h
+    // CameraEditor_CustomizeModalOpen(). Published on every open/close AND every render() frame
+    // as a safety net, since custOverlay.visible also flips from other paths (editor disabled,
+    // target no longer a player, etc.) that don't go through openCustomize/closeCustomize.
+    function publishCustomizeOpenState() {
+      try { root.SetAttributeString('customizeopen', custOverlay.visible ? '1' : '0'); } catch (e) {}
     }
     function openCustomize() {
       closeAllDrops(); closeSettings();
-      restorePlayerSelections();
-      custTitle.text = 'CUSTOMIZE PLAYER · ' + (custTargetName || 'PLAYER').toUpperCase();
+      custTouched = { agent: false, primary: false, secondary: false, knife: false, gloves: false };
+      custDirty = false;
+      resetSelectionsFromLoadout();
+      custTitleName.text = (custTargetName || 'PLAYER').toUpperCase();
       populateCustomize();
       custDisplayedLoadoutSig = customizeLoadoutSignature();
       custOverlay.visible = true; // visible BEFORE building the 3D preview so its scene composites
@@ -1098,9 +1228,116 @@ R"EDJS(
       pokePreviewSoon();          // re-assert the scene over the next frames once layout settles
       // CREATE the 3D panel only AFTER the overlay is visible AND laid out (next layout passes).
       try { $.Schedule(0.08, recreatePreview); $.Schedule(0.30, recreatePreview); } catch (e) { recreatePreview(); }
+      publishCustomizeOpenState();
     }
-    function closeCustomize() { closeAllDrops(); custOverlay.visible = false; }
+    function closeCustomize() {
+      closeAllDrops();
+      custOverlay.visible = false;
+      custResetConfirm.visible = false;
+      // Closing (X / click-outside / Cancel) always discards whatever hasn't been committed via
+      // Apply/Reset/Clear -- the modal never writes to the demo except through those three paths.
+      custTouched = { agent: false, primary: false, secondary: false, knife: false, gloves: false };
+      custDirty = false;
+      publishCustomizeOpenState();
+    }
     var customizeDrops = { agent: agentDrop, primary: primaryDrop, secondary: secondaryDrop, knife: knifeDrop, gloves: glovesDrop };
+)EDJS"
+R"EDJS(
+    // ===================== BOTTOM ACTION BAR =====================
+    // Reset/Clear are immediate (they mirror picking every slot's vanilla default, resp. wiping the
+    // whole stored profile, and commit right away like a native "reset" action). Finish/Wear/Agent/
+    // Gloves picks above are STAGED (pickCosmetic/pickWeapon/setWear only update custSel/custWear +
+    // the local preview) and only reach the demo via Apply -- Cancel/X/click-outside discard them
+    // (closeCustomize() above clears custTouched/custDirty without ever calling applyCosmeticCommand).
+    var custTouched = { agent: false, primary: false, secondary: false, knife: false, gloves: false };
+    var custDirty = false;
+    function markTouched(slot) { custTouched[slot] = true; custDirty = true; updateActionBar(); }
+    function commitTouchedSlots() {
+      var any = false;
+      for (var slot in custTouched) if (custTouched[slot]) { applyCosmeticCommand(slot); any = true; }
+      custTouched = { agent: false, primary: false, secondary: false, knife: false, gloves: false };
+      custDirty = false;
+      updateActionBar();
+      return any;
+    }
+    // "Reset to Default" reverts the target to their ACTUAL recorded loadout (whatever skin/agent/
+    // knife/gloves the demo captured), not to a blank "no skin" state -- it wipes every stored
+    // override for this player (same backend action the old "Clear All" used) and reseeds the modal
+    // from the live loadout, same as opening it fresh. There is no separate "Clear All": Cancel
+    // already discards unstaged picks, so a second destructive button was redundant with this one.
+    function resetToDefault() {
+      closeAllDrops();
+      var target = (custTargetKey && custTargetKey.indexOf('steam:') === 0) ? custTargetKey.substring(6) : 'current';
+      cmd('mirv_filmmaker cosmetics enabled 1');
+      cmd('mirv_filmmaker cosmetics clearPlayer ' + target);
+      custWeaponDef = { primary: 0, secondary: 0 };
+      custTouched = { agent: false, primary: false, secondary: false, knife: false, gloves: false };
+      custDirty = false;
+      resetSelectionsFromLoadout();
+      populateCustomize();
+      updatePreview();
+      updateActionBar();
+    }
+    // Who Apply would actually write to -- mirrors the pickup-banner logic (updatePickupBanner) so the
+    // button label and the warning banner never disagree about the target.
+    function applyLabelTarget() {
+      if (custActiveWeaponPickup && custActiveWeaponOwnerSteam) return custActiveWeaponOwnerName || ('Player ' + custActiveWeaponOwnerSteam);
+      return custTargetName || 'Player';
+    }
+    function updateActionBar() {
+      custApplyBtn.__lbl.text = 'APPLY TO ' + applyLabelTarget().toUpperCase();
+      custApplyBtn.style.backgroundColor = custDirty ? S.accent : S.btnBg;
+      custApplyBtn.__lbl.style.color = custDirty ? '#10141aff' : S.dim;
+      custApplyBtn.hittest = custDirty;
+    }
+    function actionBtn(parent, text, color, textColor) {
+      var b = mk('Panel', parent); b.hittest = true; b.style.verticalAlign = 'center';
+      b.style.backgroundColor = color; b.style.borderRadius = '4px'; b.style.marginRight = '12px';
+      b.style.paddingTop = '13px'; b.style.paddingBottom = '13px'; b.style.paddingLeft = '20px'; b.style.paddingRight = '20px';
+      var l = lbl(b, text, textColor || S.value, 14); l.style.fontWeight = 'bold'; l.style.letterSpacing = '1px';
+      b.__lbl = l;
+      return b;
+    }
+    var custActionBar = mk('Panel', custWin); custActionBar.style.width = '100%'; custActionBar.style.height = '76px';
+    custActionBar.style.flowChildren = 'right'; custActionBar.style.verticalAlign = 'center';
+    custActionBar.style.paddingLeft = '26px'; custActionBar.style.paddingRight = '26px';
+    custActionBar.style.backgroundColor = '#00000040'; custActionBar.style.borderTop = '1px solid #ffffff14';
+    var custResetBtn = actionBtn(custActionBar, 'RESET TO DEFAULT', S.btnBg, '#ff8a8aff');
+    var custActionSpacer = mk('Panel', custActionBar); custActionSpacer.style.width = 'fill-parent-flow(1.0)';
+    var custApplyBtn = actionBtn(custActionBar, 'APPLY', S.accent, '#10141aff');
+    var custCancelBtn = actionBtn(custActionBar, 'CANCEL', S.btnBg, S.value);
+    custCancelBtn.style.marginRight = '0px';
+    custCancelBtn.SetPanelEvent('onactivate', function () { closeCustomize(); });
+    custApplyBtn.SetPanelEvent('onactivate', function () { if (custDirty) { commitTouchedSlots(); closeCustomize(); } });
+
+    // Confirm dialog for "Reset to Default" -- it immediately wipes the target's WHOLE stored
+    // cosmetic profile (not just the currently staged edits; Cancel already covers those), so it
+    // gets one guard click. Mirrors the CLEAR ALL CAMERA PATHS confirm pattern in CameraEditorJs.h,
+    // kept as its own instance here since that one is wired specifically to the path inspector.
+    var custResetConfirm = mk('Panel', root); custResetConfirm.visible = false; custResetConfirm.hittest = true;
+    custResetConfirm.style.width = '100%'; custResetConfirm.style.height = '100%'; custResetConfirm.style.zIndex = '260';
+    custResetConfirm.style.backgroundColor = 'rgba(0,0,0,0.72)';
+    custResetConfirm.SetPanelEvent('onactivate', function () { custResetConfirm.visible = false; });
+    var custResetBox = mk('Panel', custResetConfirm); custResetBox.hittest = true;
+    custResetBox.style.width = '480px'; custResetBox.style.horizontalAlign = 'center'; custResetBox.style.verticalAlign = 'center';
+    custResetBox.style.backgroundColor = 'rgba(16,20,26,0.99)'; custResetBox.style.border = '1px solid ' + S.accent;
+    custResetBox.style.borderRadius = '6px'; custResetBox.style.boxShadow = '#000000ee 0px 0px 28px 6px';
+    custResetBox.style.flowChildren = 'down'; custResetBox.style.paddingTop = '24px'; custResetBox.style.paddingBottom = '22px';
+    custResetBox.style.paddingLeft = '26px'; custResetBox.style.paddingRight = '26px';
+    custResetBox.SetPanelEvent('onactivate', function () { /* swallow clicks inside the box */ });
+    var custResetTitle = lbl(custResetBox, 'RESET TO DEFAULT?', S.value, 19); custResetTitle.style.fontWeight = 'bold';
+    custResetTitle.style.letterSpacing = '1px'; custResetTitle.style.marginBottom = '10px';
+    var custResetBody = lbl(custResetBox, '', S.label, 13); custResetBody.style.whiteSpace = 'normal'; custResetBody.style.marginBottom = '18px';
+    var custResetActions = mk('Panel', custResetBox); custResetActions.style.flowChildren = 'right'; custResetActions.style.horizontalAlign = 'right';
+    var custResetNo = btn(custResetActions, 'No', function () { custResetConfirm.visible = false; }, S.value);
+    custResetNo.style.width = '110px'; custResetNo.__lbl.style.textAlign = 'center'; custResetNo.__lbl.style.width = '100%';
+    var custResetYes = btn(custResetActions, 'Yes, reset', function () { custResetConfirm.visible = false; resetToDefault(); }, S.danger);
+    custResetYes.style.width = '160px'; custResetYes.style.marginRight = '0px';
+    custResetYes.__lbl.style.textAlign = 'center'; custResetYes.__lbl.style.width = '100%';
+    custResetBtn.SetPanelEvent('onactivate', function () {
+      custResetBody.text = 'This removes every skin, agent, knife, and glove override for ' + (custTargetName || 'this player') + ' and reverts to their original loadout.';
+      custResetConfirm.visible = true;
+    });
 )EDJS"
 R"EDJS(
     // Persistent "Customize" button pinned to the editor's BOTTOM-RIGHT corner. It is a child of

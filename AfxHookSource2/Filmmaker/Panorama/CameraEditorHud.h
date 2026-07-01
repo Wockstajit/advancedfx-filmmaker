@@ -98,6 +98,12 @@ public:
 
 	void RequestEval(const std::string& js) { m_evalQueue.push_back(js); }
 
+	// True while the Customize Player modal (custOverlay) is open, per the JS-published
+	// "customizeopen" attribute (read every frame in RunFrame, same pattern as previewrect).
+	// The input layer (MovieMode + GetSuspendMirvInput) uses this to make the modal an
+	// exclusive surface: no click/key/scroll should leak to the game while it's up.
+	bool CustomizeModalOpen() const { return m_customizeOpen; }
+
 private:
 	void* FindRoot();
 	bool BuildIfNeeded();
@@ -106,6 +112,7 @@ private:
 	void OnEnter(); // one-shot: host the timeline, hide MovieHud (no free-cam / no jump on open)
 	void OnExit();  // one-shot: un-host the timeline, restore MovieHud, stop scrub
 	void UpdateScaleRequest(); // publish the preview rect to the render-layer viewport scaler
+	void UpdateCustomizeModalState(); // reads the "customizeopen" attribute JS published this frame
 
 	PanoramaBridge m_bridge;
 	void* m_hudPanel = nullptr; // HUD context we built against (rebuild if it changes)
@@ -113,6 +120,8 @@ private:
 	short m_symState = -1;
 	short m_symPreviewRect = -1; // "previewrect" -- JS publishes the preview rect fractions
 	short m_symDebugPanels = -1; // "debugpanels" -- JS publishes measured HUD/editor rects
+	short m_symCustomizeOpen = -1; // "customizeopen" -- JS publishes custOverlay.visible ("0"/"1")
+	bool m_customizeOpen = false;
 	bool m_built = false;
 	bool m_enabled = false;     // Camera Editor Mode on/off
 	bool m_scaleEnabled = false; // true scaled-preview viewport (render-layer blit)

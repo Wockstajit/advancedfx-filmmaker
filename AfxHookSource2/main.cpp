@@ -320,11 +320,13 @@ public:
 private:
 	virtual bool GetSuspendMirvInput() override {
 		// Suspend free-cam mouse-look when the console, marker menu, camera timeline,
-		// the experimental graph editor, or regular filmmaker cursor mode owns the mouse.
+		// the experimental graph editor, the Customize Player modal, or regular filmmaker
+		// cursor mode owns the mouse.
 		return (g_pGameUIService && g_pGameUIService->Con_IsVisible())
 			|| Filmmaker::MarkerMenu_WantsCursor()
 			|| Filmmaker::CameraTimeline_WantsCursor()
-			|| Filmmaker::GraphEditorExperiment_WantsCursor();
+			|| Filmmaker::GraphEditorExperiment_WantsCursor()
+			|| Filmmaker::CameraEditor_CustomizeModalOpen();
 	}
 
 	virtual void GetLastCameraData(double & x, double & y, double & z, double & rX, double & rY, double & rZ, double & fov) override {

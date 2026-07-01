@@ -73,6 +73,15 @@ bool MovieMode::OnMouseWheel(int delta, bool shiftDown, bool ctrlDown) {
 	if (delta == 0)
 		return false;
 
+	// Customize modal open: CONSUME the wheel (return true) so it never reaches the game. Returning
+	// false let main.cpp's WndProc fall through to CallWindowProcW, where CS2's native demo
+	// spectator handler treats the wheel as "switch spectated player / cycle first-third person" --
+	// that is the "scrolling switches players & perspective behind the modal" bug. Consuming stops
+	// that dead. Scroll the modal's column by DRAGGING its scrollbar (a click-drag, which still
+	// reaches Panorama); the wheel is intentionally inert over the modal so it can't move the demo.
+	if (CameraEditor_CustomizeModalOpen())
+		return true;
+
 	// In the director FREE CAM the wheel drives the camera when a modifier is held:
 	//   Ctrl+scroll  = FOV zoom -- up = zoom in (lower FOV), down = zoom out (higher FOV),
 	//   Shift+scroll = move SPEED (documented control).
@@ -137,13 +146,16 @@ bool MovieMode::OnMouseButton(int button, bool down) {
 	// from many places (camera editor, camera paths, ...) that don't run through the scroll
 	// mode-cycle, so GetMode() can still read First/Third while the cam is really flying --
 	// and an unswallowed click there silently switches the spectated player.
-	// EXCEPTIONS: when the marker edit menu is open, OR the camera timeline's UI-mouse mode is
-	// on (G), we must let the click reach Panorama -- those panels draw a full-screen hit-test
-	// catcher that absorbs stray clicks (so they still can't switch players) while keeping
-	// their own buttons/sliders clickable. This is what makes the timeline / curve editor usable.
+	// EXCEPTIONS: when the marker edit menu is open, the camera timeline's UI-mouse mode is
+	// on (G), OR the Customize modal is open, we must let the click reach Panorama -- those
+	// surfaces draw a full-screen hit-test panel that absorbs stray clicks (so they still can't
+	// switch players) while keeping their own buttons/sliders clickable. This is what makes the
+	// timeline / curve editor / Customize modal usable. NOTE: consuming here (return true) makes
+	// main.cpp's WndProc `return 0` BEFORE CallWindowProcW, so Panorama never sees the click --
+	// that is exactly why the modal must be excepted, or every click in it is swallowed.
 	if (IsDemoActive() && (CameraBridge_GetFreeCamEnabled() || GetMode() == Mode::FreeCam)
 		&& !CameraPathRef().MenuOpen() && !CameraTimeline_WantsCursor()
-		&& !GraphEditorExperiment_WantsCursor())
+		&& !GraphEditorExperiment_WantsCursor() && !CameraEditor_CustomizeModalOpen())
 		return true;
 	// Otherwise never consume clicks: first/third-person spectator switches players on
 	// LMB/RMB and the native demo UI (demoui) needs clicks to reach Panorama.
@@ -161,6 +173,15 @@ bool MovieMode::OnKey(int vkey, bool down) {
 		m_shiftDown = down;
 	if (!IsDemoActive())
 		return false; // director keys only act while a demo plays
+
+	// Customize modal open: swallow ONLY the demo-TRANSPORT keys (Space pause/resume, Left/Right
+	// seek) so they can't move the demo behind the modal. Everything else falls through -- letters
+	// and digits must reach Panorama so the dropdown search boxes and the custom-float wear text
+	// entry keep working (a key consumed here `return 0`s in the WndProc before Panorama sees it,
+	// which would break typing). Consumed with NO action, so Space simply does nothing here.
+	if (CameraEditor_CustomizeModalOpen()
+		&& (vkey == kVK_SPACE || vkey == kVK_LEFT || vkey == kVK_RIGHT))
+		return true;
 
 	// Swallow OS keyboard AUTO-REPEAT for Space: held Space streams WM_KEYDOWN (down=true)
 	// with no intervening up, and every camera-path transport branch below toggles on down,

@@ -56,12 +56,18 @@ R"EDJS(
       field.style.backgroundColor = empty ? '#11151b' : '#1b2230';
       field.style.border = '1px solid ' + (empty ? '#ffffff12' : '#ffffff2e');
     }
-    // Place the popup directly under its field and show it. dbgAbs() walks actual offsets up to ctx
-    // in physical px; divide by uiscale for style px. The popup is a child of root (full-screen at
-    // 0,0), so ctx-relative coords == root-relative.
+    // Place the popup directly under its field and show it. dbgAbs() (a hand-rolled walk of
+    // actualxoffset/actualyoffset up to ctx) does NOT account for an ancestor's SCROLL position --
+    // it gave the field's pre-scroll offset, so a popup opened after scrolling the Customize modal's
+    // right-hand column rendered detached from the field. GetPositionWithinWindow() is CS2's own
+    // native API for exactly this (native scripts use it to follow a scrolled/moving element, e.g.
+    // panorama ref scripts/common/add_major_tokens_anim.js, scripts/operation/operation_main.js) --
+    // it resolves screen position correctly regardless of ancestor scrolling. Same physical-px /
+    // uiscale convention as dbgAbs. The popup is a child of root (full-screen at 0,0), so
+    // window-relative coords == root-relative.
     function showDropPopup(rec) {
       var sx = root.actualuiscale_x || ctx.actualuiscale_x || 1, sy = root.actualuiscale_y || ctx.actualuiscale_y || 1;
-      var a = dbgAbs(rec.field);
+      var a = rec.field.GetPositionWithinWindow ? rec.field.GetPositionWithinWindow() : dbgAbs(rec.field);
       var x = a.x / sx, y = a.y / sy;
       var w = (rec.field.actuallayoutwidth || 0) / sx, h = (rec.field.actuallayoutheight || 0) / sy;
       rec.pop.style.position = Math.round(x) + 'px ' + Math.round(y + h + 2) + 'px 0px';
@@ -72,6 +78,15 @@ R"EDJS(
       var wasOpen = (openDrop === rec);
       closeAllDrops();
       if (!wasOpen && rec.opts.length) showDropPopup(rec);
+    }
+    // Popups are positioned ONCE, at open time, from the field's current on-screen offset -- but a
+    // field inside a scrolling container (e.g. the Customize modal's right-hand column) keeps moving
+    // after that: dragging the scrollbar with a popup open (or opening one right after a scroll
+    // settles) left the popup anchored to the field's PRE-scroll position, visibly detached from the
+    // bar it belongs to. Re-run the same placement math every frame the popup is open (called from
+    // render(), which already runs every frame) so it tracks the field precisely, including mid-drag.
+    function repositionOpenDrop() {
+      if (openDrop && openDrop.pop && openDrop.pop.visible) showDropPopup(openDrop);
     }
     function rebuildPopup(rec) {
       rec.pop.RemoveAndDeleteChildren();

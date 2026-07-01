@@ -7,8 +7,9 @@ Produces the acceptance screenshots:
   automation/output/customize_player/14_weapon_custom_float.png
   automation/output/customize_player/15_demo_view_after_wear_change.png
 
-It drives the existing CS2 netcon + game-window capture helpers and records console output
-to verify that the UI command passes the selected wear value.
+It drives the existing CS2 netcon + game-window capture helpers and records console output to
+verify that Apply (customizeApply(), the same commit path the action-bar button calls) sends the
+selected wear value -- the modal now stages Finish/Wear picks and only writes to the demo on Apply.
 #>
 [CmdletBinding()]
 param(
@@ -108,10 +109,17 @@ if ($pickedValue -notmatch ('(^|:)' + [regex]::Escape($paint) + '$')) {
 Invoke-Netcon -Commands @((EditorEvalCommand ('$.Msg($.CamEditor.customizeOpenWear(String.fromCharCode(' + $slotChars + '))+String.fromCharCode(10))'))) -ReadSeconds 1.0 | Write-Host
 Capture '13_weapon_wear_dropdown.png' | Write-Host
 
-$wearText = Invoke-Netcon -Commands @((EditorEvalCommand ('$.Msg($.CamEditor.customizeWear(String.fromCharCode(' + $slotChars + '),String.fromCharCode(99,117,115,116,111,109),0.42)+String.fromCharCode(10))'))) -ReadSeconds 2.5
-$wearText | Write-Host
-if ($wearText -notmatch ('paintkit=' + [regex]::Escape($paint)) -or $wearText -notmatch 'wear=0\.4200') {
-    throw "Wear command did not apply selected paint kit $paint with wear 0.4200."
+Invoke-Netcon -Commands @((EditorEvalCommand ('$.Msg($.CamEditor.customizeWear(String.fromCharCode(' + $slotChars + '),String.fromCharCode(99,117,115,116,111,109),0.42)+String.fromCharCode(10))'))) -ReadSeconds 1.5 | Write-Host
+Start-Sleep -Milliseconds 300
+
+# The redesigned modal stages Finish/Wear/Agent/Gloves picks until committed (matches the reference
+# mock's Apply/Cancel action bar) -- customizeWear() above only updates local state + the preview.
+# customizeApply() is the same commit path the "APPLY TO <target>" button calls; only after this does
+# the backend "mirv_filmmaker cosmetics player ..." command (and its console echo) actually fire.
+$applyText = Invoke-Netcon -Commands @((EditorEvalCommand '$.Msg($.CamEditor.customizeApply()+String.fromCharCode(10))')) -ReadSeconds 2.5
+$applyText | Write-Host
+if ($applyText -notmatch ('paint=' + [regex]::Escape($paint)) -or $applyText -notmatch 'wear=0\.4200') {
+    throw "Apply did not send paint kit $paint with wear 0.4200 to the backend."
 }
 Start-Sleep -Milliseconds 500
 Capture '14_weapon_custom_float.png' | Write-Host

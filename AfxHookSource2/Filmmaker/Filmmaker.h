@@ -124,6 +124,13 @@ const char* CameraEditor_HudViewName();
 // scaled viewport is live. The timeline HUD scales the native game HUD into this same rect.
 bool CameraEditor_ScaledHud(float& x0, float& y0, float& x1, float& y1);
 
+// True while the Camera Editor's "Customize Player" modal is open (custOverlay.visible, published
+// JS -> C++ via the "customizeopen" panel attribute, same pattern as "previewrect"). The modal is
+// meant to be a full-screen EXCLUSIVE surface: MovieMode's key/mouse/wheel handlers swallow input
+// unconditionally while this is true, and main.cpp's GetSuspendMirvInput() ORs it in so free-cam
+// mouse-look can't compete with dragging/scrolling inside the modal.
+bool CameraEditor_CustomizeModalOpen();
+
 // --- Experimental After-Effects-style graph editor (isolated, opt-in overlay) ---
 // Default OFF; toggled by the "Experiment" button or "mirv_filmmaker grapheditor on|off|
 // toggle". OwnsView()/WantsCursor() are OR'd into the stable view-ownership + cursor-routing

@@ -325,6 +325,7 @@ bool CameraEditor_ScaledHud(float& x0, float& y0, float& x1, float& y1) {
 	e.PreviewRect(x0, y0, x1, y1);
 	return e.ScaledHudActive();
 }
+bool CameraEditor_CustomizeModalOpen() { return CameraEditorHudRef().CustomizeModalOpen(); }
 
 // --- Camera-path preview: HUD masked (Tab) -> MovieHud hides itself this frame ---
 bool CameraPath_PreviewHudHidden() { return CameraPathRef().PreviewHudHidden(); }

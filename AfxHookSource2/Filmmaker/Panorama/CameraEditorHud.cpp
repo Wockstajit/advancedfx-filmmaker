@@ -95,6 +95,7 @@ bool CameraEditorHud::BuildIfNeeded() {
 	m_symState = m_bridge.MakeSymbol("state");
 	m_symPreviewRect = m_bridge.MakeSymbol("previewrect");
 	m_symDebugPanels = m_bridge.MakeSymbol("debugpanels");
+	m_symCustomizeOpen = m_bridge.MakeSymbol("customizeopen");
 	m_root = FindRoot();
 	m_built = (m_root != nullptr);
 	m_lastState.clear();
@@ -110,6 +111,7 @@ void CameraEditorHud::Teardown() {
 	m_root = nullptr;
 	m_hudPanel = nullptr;
 	m_lastState.clear();
+	m_customizeOpen = false; // don't leave input permanently swallowed if the editor tears down mid-modal
 }
 
 // Declared in Filmmaker.cpp.
@@ -355,6 +357,7 @@ void CameraEditorHud::RunFrame() {
 	// TRUE scaled preview: forward the rect render() just published to the viewport scaler.
 	// The blit only actually runs engine-side when not recording (full-screen capture wins).
 	UpdateScaleRequest();
+	UpdateCustomizeModalState();
 }
 
 // Reads the "previewrect" fractions the editor JS published this frame and forwards them to
@@ -393,6 +396,14 @@ void CameraEditorHud::UpdateScaleRequest() {
 	}
 
 	AfxViewportScaler::SetRequest(active, x0, y0, x1, y1);
+}
+
+// Reads the "customizeopen" flag the Customize modal's openCustomize()/closeCustomize()/render()
+// publish (see CameraEditorCustomizeJs.h) so the input layer (MovieMode, GetSuspendMirvInput) can
+// treat the modal as an exclusive surface. m_root is only non-null while the workspace is built,
+// so this naturally reads false (no attribute to read) whenever the editor itself is closed.
+void CameraEditorHud::UpdateCustomizeModalState() {
+	m_customizeOpen = m_root && (m_bridge.GetAttributeString(m_root, m_symCustomizeOpen, "0") == "1");
 }
 
 } // namespace Filmmaker
