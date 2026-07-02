@@ -13,6 +13,9 @@
 #include "Movie/MovieMode.h"
 #include "Movie/CameraPath.h"
 #include "Movie/FollowCamera.h"
+#include "Movie/BodyCam.h"
+#include "Movie/ViewFxVm.h"
+#include "Movie/ParticleFx.h"
 #include "Cosmetics/CosmeticOverrideSystem.h"
 #include "Platform/FolderPicker.h"
 #include "Platform/TextEncoding.h"
@@ -52,6 +55,7 @@ std::wstring g_currentDemoPath; // last demo launched via Watch (for the marker 
 void DoInit() {
 	g_library.Init();
 	CosmeticsRef().Init(); // load persisted offline-demo cosmetic profiles (%APPDATA%\HLAE\)
+	ParticleFxRef().LoadSettings(); // effect toggles (%APPDATA%\HLAE\filmmaker_fx.json); hook arms lazily
 	g_rescanRequested.store(true); // initial scan happens on the next RunFrame
 }
 
@@ -192,6 +196,9 @@ std::wstring PlayingDemoPath() {
 void RunFrame() {
 	EnsureInitialized();
 
+	// ViewFxVm write-site 3 (render-thread pump; viewmodel-rotation experiment).
+	ViewFxVm_RenderPump();
+
 	// Apply any folders chosen by the picker thread.
 	std::vector<std::wstring> pending;
 	{
@@ -231,7 +238,17 @@ void RunMainThreadFrame() {
 	// Camera-marker / dolly path: hover picking, playback driver, auto-save, then
 	// the BO2-style marker-edit menu. Both run on this (main/UI) thread.
 	CameraPathRef().RunFrame();
-	FollowCameraRef().RunFrame(CameraEditorHudRef().Enabled());
+	// Camera Editor being open is the normal reason FollowCamera should solve/apply its pose
+	// each frame; Body Cam is the other -- it drives the SAME FollowCamera state (Attach mode,
+	// "chest" attachment) but is meant to work from the lightweight Config panel too, where the
+	// editor is closed. Without this OR, RunFrame's own editor-closed guard would immediately
+	// StopPreview() whatever Body Cam just started.
+	FollowCameraRef().RunFrame(CameraEditorHudRef().Enabled() || BodyCam_Active());
+	// After RunFrame, so a Body Cam preview that FollowCamera just stopped on its own (target
+	// death / demo end) is restored this same frame instead of leaving free-cam latched.
+	BodyCam_RunFrame();
+	// ViewFxVm write-site 2 (main-thread pump; viewmodel-rotation experiment).
+	ViewFxVm_MainPump();
 	MarkerHudRef().RunFrame();
 
 	// Offline demo skin-changer: re-assert any per-player weapon-skin overrides on this frame's
@@ -258,6 +275,10 @@ void RunMainThreadFrame() {
 	// everything else so, while enabled, its full-screen overlay sits on top; when disabled it
 	// is a cheap no-op and the regular editor is untouched.
 	GraphEditorExperimentHudRef().RunFrame();
+
+	// Particle-effect modifiers: lazy hook-arm retry only (rate-limited; no-op once installed
+	// or while every category is On). The detour itself needs no per-frame driving.
+	ParticleFxRef().PumpMainThread();
 }
 
 void Shutdown() {

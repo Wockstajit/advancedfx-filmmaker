@@ -82,6 +82,28 @@ inline const char* kConfigHudJs = R"CFJS(
       var r = mk('Panel', parent); r.style.flowChildren = 'right'; r.style.width = '100%';
       r.style.marginTop = '4px'; r.style.verticalAlign = 'middle'; return r;
     }
+    function clamp01(v) { return v < 0 ? 0 : (v > 1 ? 1 : v); }
+    // Layered slider: rounded track + a colored fill bar drawn UNDER a real native Slider
+    // (same recipe as CameraEditorWidgetsJs.h's makeSlider, kept local so this script stays
+    // standalone). The native Slider is the only drag mechanism available -- this HUD context
+    // has no mouse-move event for a hand-rolled draggable control.
+    function makeSlider(parent, height, fillColor) {
+      var wrap = mk('Panel', parent);
+      wrap.style.width = 'fill-parent-flow(1.0)'; wrap.style.height = (height || 16) + 'px';
+      wrap.style.verticalAlign = 'center';
+      var track = mk('Panel', wrap); track.hittest = false;
+      track.style.width = '100%'; track.style.height = '4px'; track.style.borderRadius = '2px';
+      track.style.verticalAlign = 'center'; track.style.backgroundColor = S.btnBg;
+      var fill = mk('Panel', wrap); fill.hittest = false;
+      fill.style.width = '0%'; fill.style.height = '4px'; fill.style.borderRadius = '2px';
+      fill.style.verticalAlign = 'center'; fill.style.horizontalAlign = 'left';
+      fill.style.backgroundColor = fillColor || S.accent;
+      var sl = $.CreatePanel('Slider', wrap, '', { direction: 'horizontal' }); sl.AddClass('HorizontalSlider');
+      sl.style.width = '100%'; sl.style.height = '100%'; sl.style.verticalAlign = 'center';
+      return { wrap: wrap, sl: sl, setFill: function (frac) {
+        fill.style.width = (clamp01(frac) * 100).toFixed(1) + '%';
+      } };
+    }
     function section(parent, title) {
       var s = mk('Panel', parent); s.style.flowChildren = 'down'; s.style.width = '100%';
       s.style.marginTop = '12px'; s.style.paddingTop = '9px'; s.style.paddingBottom = '11px';
@@ -297,6 +319,151 @@ R"CFJS(
     hudCycle.style.width = '100%'; hudCycle.style.marginRight = '0px';
     hudCycle.__lbl.style.horizontalAlign = 'center';
 
+    // ===================== MODIFIERS ====================================
+    // Camera "feel" tuning (ViewFx.h / BodyCam.h -- neither is Camera Editor / Follow-camera
+    // UI; these are display/feel modifiers, so they live here). Roll/Sway are each a plain
+    // 0-150% intensity slider (0 = off) instead of a fixed set of steps, so they can be
+    // dialed up or down like the Follow inspector's offset/rotation sliders -- built locally
+    // with the same makeSlider recipe so ConfigHudJs stays standalone (no
+    // CameraEditorWidgetsJs import).
+    var modSec = section(inspector, 'MODIFIERS');
+    var MAX_FX_PCT = 150;
+    function intensityRow(parent, label, cmdPrefix, hint) {
+      var head = row(parent); head.style.marginTop = '2px';
+      var nl = lbl(head, label, S.value, 13); nl.style.fontWeight = 'bold';
+      nl.style.width = 'fill-parent-flow(1.0)'; nl.style.verticalAlign = 'center';
+      var vl = lbl(head, 'Off', S.accent, 12); vl.style.width = '46px'; vl.style.textAlign = 'right';
+      vl.style.verticalAlign = 'center'; vl.style.fontWeight = 'bold';
+      var sliderRow = row(parent); sliderRow.style.marginTop = '4px';
+      var ms = makeSlider(sliderRow, 16, S.accent);
+      if (hint) {
+        var h = lbl(parent, hint, S.dim, 10);
+        h.style.whiteSpace = 'normal'; h.style.marginTop = '5px'; h.style.marginBottom = '10px';
+      }
+      // Feedback-loop guards. Panorama can deliver SliderValueChanged for PROGRAMMATIC value
+      // writes too (and after the writing scope has already returned), so a plain re-entrancy
+      // flag around `sl.value = ...` is not enough: render() synced the value each frame ->
+      // deferred event -> console command -> print -> state re-render -> sync -> ... = one
+      // "mirv_filmmaker: ..." console line EVERY FRAME (the console-spam lag). Two value-based
+      // guards break the cycle no matter how the events are scheduled:
+      //   * the handler only issues a command when the PCT actually changed vs the last one
+      //     sent/synced (lastPct), and
+      //   * sync() only writes sl.value when it differs beyond one slider quantum.
+      var lastPct = -1;
+      $.RegisterEventHandler('SliderValueChanged', ms.sl, function (panel, v) {
+        var frac = clamp01(v);
+        var pct = Math.round(frac * MAX_FX_PCT);
+        if (pct === lastPct) return;
+        lastPct = pct;
+        ms.setFill(frac);
+        vl.text = pct > 0 ? (pct + '%') : 'Off';
+        cmd(cmdPrefix + ' ' + pct + ' quiet');
+      });
+      return {
+        sync: function (pct) {
+          pct = Math.round(pct || 0);
+          var frac = clamp01(pct / MAX_FX_PCT);
+          if (pct !== lastPct) {
+            lastPct = pct;
+            if (Math.abs((ms.sl.value || 0) - frac) > 0.5 / MAX_FX_PCT) ms.sl.value = frac;
+          }
+          ms.setFill(frac);
+          vl.text = pct > 0 ? (pct + '%') : 'Off';
+        }
+      };
+    }
+    var rollCtl = intensityRow(modSec, 'Strafe Roll', 'mirv_filmmaker viewfx roll',
+      'Quake/Doom-style camera tilt on strafe. Only applies in plain spectate -- off during free cam, camera path, or Body Cam.');
+    var bobCtl = intensityRow(modSec, 'View Bob', 'mirv_filmmaker viewfx bob',
+      'GoldSrc-style vertical camera bob on the walk cycle. Only applies in plain spectate -- off during free cam, camera path, or Body Cam.');
+    var swayCtl = intensityRow(modSec, 'Weapon Sway', 'mirv_filmmaker viewfx sway',
+      'Movement-scaled weapon sway + walk bob on the viewmodel. Still players hold perfectly steady.');
+    var deadzoneCtl = intensityRow(modSec, 'Deadzone Aim', 'mirv_filmmaker viewfx deadzone',
+      'Decoupled viewmodel: the weapon leads inside an aim deadzone while the camera catches up with smoothing.');
+    var bodyCamBtn = btn(modSec, 'Body Cam: Off', function () { cmd('mirv_filmmaker bodycam toggle'); }, S.value);
+    bodyCamBtn.style.width = '100%'; bodyCamBtn.style.marginRight = '0px'; bodyCamBtn.style.marginTop = '0px';
+    bodyCamBtn.__lbl.style.horizontalAlign = 'center';
+    var bodyCamHint = lbl(modSec, 'Chest-mounted camera on the spectated player (Attach + Follow system). Needs a player POV to engage.', S.dim, 10);
+    bodyCamHint.style.whiteSpace = 'normal'; bodyCamHint.style.marginTop = '4px';
+)CFJS"
+R"CFJS(
+    // ===================== EFFECTS ======================================
+    // Particle-effect toggles (ParticleFx.h): each category is a segmented mode control
+    // (On / More / Less / Off subset per category) driving 'mirv_filmmaker fx set <cat>
+    // <mode>'; state mirrors back through the fx_* fields each render (console changes show
+    // up here too). On = classic Better Particles, More = classic updated, Less = combined
+    // less-impacts/less-smoke, Off = default CS2 pass-through. Smoke GRENADES are never
+    // affected (CS2 volumetric smoke is not a particle swap).
+    var fxSec = section(inspector, 'EFFECTS');
+    var fxMaster;
+    (function () {
+      var r = row(fxSec); r.style.marginTop = '2px';
+      var t = lbl(r, 'Effects Control', S.value, 13); t.style.fontWeight = 'bold';
+      t.style.width = 'fill-parent-flow(1.0)'; t.style.verticalAlign = 'center';
+      var pill = mk('Panel', r); pill.hittest = true; pill.style.width = '46px'; pill.style.height = '24px';
+      pill.style.borderRadius = '12px'; pill.style.backgroundColor = '#00000088'; pill.style.verticalAlign = 'center';
+      pill.style.border = '1px solid #ffffff14';
+      var knob = mk('Panel', pill); knob.hittest = false; knob.style.width = '18px'; knob.style.height = '18px';
+      knob.style.borderRadius = '9px'; knob.style.backgroundColor = '#cfd6deff'; knob.style.verticalAlign = 'center';
+      knob.style.marginLeft = '3px'; knob.style.marginRight = '3px';
+      pill.SetPanelEvent('onactivate', function () {
+        cmd('mirv_filmmaker fx ' + (st && st.fxOn ? 'off' : 'on') + ' quiet');
+      });
+      fxMaster = { pill: pill, knob: knob };
+    })();
+    function fxSeg(label, catKey, modes) {
+      var head = row(fxSec); head.style.marginTop = '6px';
+      var nl = lbl(head, label, S.value, 13);
+      nl.style.width = 'fill-parent-flow(1.0)'; nl.style.verticalAlign = 'center';
+      var group = mk('Panel', head); group.style.flowChildren = 'right'; group.style.verticalAlign = 'center';
+      var caps = { on: 'On', more: 'More', less: 'Less', off: 'Off' };
+      var btns = {};
+      for (var i = 0; i < modes.length; i++) (function (mode, isLast) {
+        var b = btn(group, caps[mode], function () {
+          cmd('mirv_filmmaker fx set ' + catKey + ' ' + mode + ' quiet');
+        }, S.label);
+        b.style.paddingTop = '3px'; b.style.paddingBottom = '3px';
+        b.style.paddingLeft = '9px'; b.style.paddingRight = '9px';
+        b.style.marginRight = isLast ? '0px' : '4px';
+        b.__lbl.style.fontSize = '12px';
+        btns[mode] = b;
+      })(modes[i], i + 1 === modes.length);
+      return { sync: function (mode) {
+        for (var m in btns) {
+          var on = (m === mode);
+          btns[m].style.backgroundColor = on ? S.btnOn : S.btnBg;
+          btns[m].style.border = '1px solid ' + (on ? S.accent : S.cardBorder);
+          btns[m].__lbl.style.color = on ? S.accent : S.label;
+        }
+      } };
+    }
+    var fxCtls = [
+      ['fx_impacts',    fxSeg('Bullet Impacts', 'impacts', ['on', 'more', 'less', 'off'])],
+      ['fx_tracers',    fxSeg('Bullet Tracers', 'tracers', ['on', 'more', 'less', 'off'])],
+      ['fx_weaponfx',   fxSeg('Muzzle Flash & Shells', 'weaponfx', ['on', 'more', 'less', 'off'])],
+      ['fx_blood',      fxSeg('Blood', 'blood', ['on', 'more', 'less', 'off'])],
+      ['fx_explosions', fxSeg('Explosions (HE / C4)', 'explosions', ['on', 'more', 'less', 'off'])],
+      ['fx_molotov',    fxSeg('Molotov Fire', 'molotov', ['on', 'more', 'less', 'off'])],
+      ['fx_mapfx',      fxSeg('Map Ambience', 'mapfx', ['on', 'off'])]
+    ];
+    // Money-on-headshot: event-gated toggle (independent of the Blood mode).
+    var moneyBtn;
+    (function () {
+      var r = row(fxSec); r.style.marginTop = '6px';
+      var t = lbl(r, 'Money on Headshot', S.value, 13);
+      t.style.width = 'fill-parent-flow(1.0)'; t.style.verticalAlign = 'center';
+      moneyBtn = btn(r, 'Off', function () {
+        cmd('mirv_filmmaker fx moneyshot ' + (st && st.fxMoneyshot ? 'off' : 'on'));
+      }, S.label);
+      moneyBtn.style.paddingTop = '3px'; moneyBtn.style.paddingBottom = '3px';
+      moneyBtn.style.paddingLeft = '9px'; moneyBtn.style.paddingRight = '9px';
+      moneyBtn.__lbl.style.fontSize = '12px';
+    })();
+    var fxNote = lbl(fxSec, "On uses the converted Classic Better Particles pack. More uses Classic Updated. Less combines Less Impacts for impact systems with Less Smoke for smoke/muzzle/blood/fire/explosion systems. Off uses default CS2. Missing converted assets fail open to the original CS2 effect. Money on Headshot only arms from confirmed hit/headshot game events. Smoke grenades are never affected.", S.dim, 10);
+    fxNote.style.whiteSpace = 'normal'; fxNote.style.marginTop = '7px';
+    var fxStatus = lbl(fxSec, 'Hook not armed yet - effects play unmodified until it arms (auto-retries).', '#e8b339ff', 10);
+    fxStatus.style.whiteSpace = 'normal'; fxStatus.style.marginTop = '3px'; fxStatus.visible = false;
+
     // ===================== PREVIEW / BOTTOM-BAND LAYOUT =================
     // Same geometry math as the editor's "Regular Timeline" bottom mode: the tab bar docks
     // directly above CS2's native demo bar (measured live), the backdrop fills the gap strip
@@ -409,6 +576,34 @@ R"CFJS(
       var hv = st.hudView || 'full', hudName = 'Show All';
       for (var hb = 0; hb < HUD_CYCLE.length; hb++) if (HUD_CYCLE[hb][0] === hv) hudName = HUD_CYCLE[hb][1];
       hudCycle.__lbl.text = 'Game UI: ' + hudName;
+
+      // MODIFIERS: reflect ViewFx / BodyCam state each frame (both can also change from the
+      // console, so this isn't purely a click-echo).
+      rollCtl.sync(st.rollPct);
+      bobCtl.sync(st.bobPct);
+      swayCtl.sync(st.swayPct);
+      deadzoneCtl.sync(st.deadzonePct);
+      var bcOn = !!st.bodyCam;
+      bodyCamBtn.__lbl.text = 'Body Cam: ' + (bcOn ? 'On' : 'Off');
+      bodyCamBtn.style.backgroundColor = bcOn ? S.btnOn : S.btnBg;
+      bodyCamBtn.__lbl.style.color = bcOn ? S.accent : S.value;
+
+      // EFFECTS: mirror ParticleFx state (master pill + per-category segments). On is an
+      // active classic-mod swap mode, so the hook-ready hint depends on the master switch.
+      var fxOn = !!st.fxOn;
+      fxMaster.pill.style.backgroundColor = fxOn ? '#2bb24cff' : '#00000088';
+      fxMaster.pill.style.border = '1px solid ' + (fxOn ? '#1c8a3aff' : '#ffffff14');
+      fxMaster.knob.style.horizontalAlign = fxOn ? 'right' : 'left';
+      for (var fi = 0; fi < fxCtls.length; fi++) {
+        var fxMode = st[fxCtls[fi][0]] || 'on';
+        fxCtls[fi][1].sync(fxMode);
+      }
+      var msOn = !!st.fxMoneyshot;
+      moneyBtn.__lbl.text = msOn ? 'On' : 'Off';
+      moneyBtn.style.backgroundColor = msOn ? S.btnOn : S.btnBg;
+      moneyBtn.style.border = '1px solid ' + (msOn ? S.accent : S.cardBorder);
+      moneyBtn.__lbl.style.color = msOn ? S.accent : S.label;
+      fxStatus.visible = fxOn && !st.fxReady;
 
       layoutWorkspace();
     };

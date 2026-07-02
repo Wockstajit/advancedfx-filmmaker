@@ -18,6 +18,7 @@
 #include "Filmmaker/Cosmetics/CosmeticDebugLog.h"
 #include "Filmmaker/Movie/CameraBridge.h"
 #include "Filmmaker/Movie/FollowCamera.h"
+#include "Filmmaker/Movie/ViewFx.h"
 #include "ReplaceName.h"
 #include "SchemaSystem.h"
 #include "SceneSystem.h"
@@ -953,7 +954,29 @@ bool CS2_Client_CSetupView_Trampoline_IsPlayingDemo(void *ThisCViewSetup) {
 		camData.Fov = Fov;
 
 		g_S2CamIO.GetCamExport()->WriteFrame(width, height, camData);
-	}	
+	}
+
+	// ViewFx pose modifiers (strafe roll + deadzone camera lag): only while nothing else
+	// already wrote this frame's pose -- i.e. plain default POV/third-person spectate, not
+	// free cam, camera path, cam import, or Follow/Body Cam. Tx/Ty/Rx/Ry are still the
+	// engine's own unmodified pose at this point (this is the last checkpoint before the
+	// override write below), so the tracked velocity/aim reflect the spectated player's own
+	// movement. Gated the SAME way on the TRACK call too, not just the deltas -- otherwise a
+	// free-cam fly-by would poison the shared planar-speed estimate that weapon sway also
+	// reads (ViewModel.cpp). Skipping a track is safe: TrackAndPoseDeltas treats the next
+	// call after a gap as a fresh sample instead of computing a bogus spike from stale state.
+	if (!originOrAnglesOverriden) {
+		const Filmmaker::ViewFxPoseDeltas fx = Filmmaker::ViewFxRef().TrackAndPoseDeltas(curTime, Tx, Ty, Rx, Ry);
+		if (fx.Any()) {
+			Rx = (float)(Rx + fx.pitch);
+			Ry = (float)(Ry + fx.yaw);
+			Rz = (float)(Rz + fx.roll);
+			Tz = (float)(Tz + fx.zOffset);
+			originOrAnglesOverriden = true;
+		}
+	} else {
+		Filmmaker::ViewFxRef().NoteGatedByOverride(); // diagnostics: why isn't speed updating?
+	}
 
 	if(originOrAnglesOverriden) {
 		pViewOrigin[0] = Tx;

@@ -135,10 +135,8 @@ $html = @'
   button.stop{border-color:#5a2222;color:#ff9b9b}
   #cmd{flex:1;background:#0d1117;color:var(--val);border:1px solid var(--line);border-radius:5px;padding:7px 9px;font:12px Consolas,monospace}
   .row{display:flex;gap:6px}
-  label.chk{font-size:12px;color:var(--label);display:flex;align-items:center;gap:5px;margin-left:auto}
 </style></head><body>
 <header><h1>CS2 CAMERA-PATH &mdash; LIVE</h1><span id="conn">connecting...</span>
-  <label class="chk"><input type="checkbox" id="auto" checked> auto-refresh state (2s)</label>
 </header>
 <div class="wrap">
   <div>
@@ -242,7 +240,6 @@ $('send').onclick=function(){var v=$('cmd').value.trim();if(v){send(v);$('cmd').
 $('cmd').addEventListener('keydown',function(e){if(e.key==='Enter')$('send').click()});
 $('stopsrv').onclick=function(){if(confirm('Stop the dashboard server?'))fetch('/stop')};
 setInterval(poll,250);
-setInterval(function(){if($('auto').checked)send('mirv_filmmaker marker list')},2000);
 poll();
 </script></body></html>
 '@

@@ -40,6 +40,8 @@ struct ClientDllOffsets_t {
         ptrdiff_t m_vecAbsOrigin = 0; // VectorWS
         ptrdiff_t m_pChild = 0; // CGameSceneNode*    (viewmodel scene-node walk for knife model swap)
         ptrdiff_t m_pNextSibling = 0; // CGameSceneNode* (viewmodel scene-node walk for knife model swap)
+        ptrdiff_t m_angRotation = 0; // QAngle       (ViewFxVm: true viewmodel rotation; optional)
+        ptrdiff_t m_nodeToWorld = 0; // CTransformWS (ViewFxVm: cached world transform / quat; optional)
 	} CGameSceneNode;
 
 	struct C_BaseCSGrenadeProjectile {

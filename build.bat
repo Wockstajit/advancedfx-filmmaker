@@ -97,6 +97,21 @@ if errorlevel 1 (
 )
 
 echo.
+echo === Rebuilding converted Better Particles FX asset pack ===
+REM Recompiles the Source 1 "Better Particles" mod into fresh CS2 particle/material/
+REM model assets every build, so the mounted pack never goes stale. launch-cs2-netcon.ps1
+REM auto-mounts automation\output\effects\betterparticles-source1import via USRLOCALCSGO
+REM if it exists; non-fatal here so a machine missing the converter checkouts (misc\
+REM source1import, misc\Source2Converter) still gets a working DLL/game build.
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0automation\tools\convert-better-particles-source1.ps1" -Compile
+if errorlevel 1 (
+    echo.
+    echo WARNING: Better Particles FX asset conversion failed; CS2 will launch with
+    echo whatever pack ^(if any^) is already on disk, or fail open to vanilla particles.
+    echo See the messages above for the failing step.
+)
+
+echo.
 echo === BUILD OK ===
 echo Output: %~dp0build\staging-release\bin\HLAE.exe
 echo Starting live dashboard / CS2 in 1 second...

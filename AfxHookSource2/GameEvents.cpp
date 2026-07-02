@@ -10,6 +10,7 @@
 #include "../shared/binutils.h"
 
 #include "AfxHookSource2Rs.h"
+#include "Filmmaker/Movie/ParticleFx.h"
 
 #include <Windows.h>
 #include "../deps/release/Detours/src/detours.h"
@@ -73,6 +74,7 @@ bool New_CGameEventManager_FireEvent( void * This, SOURCESDK::CS2::CGameEvent *e
     g_pGameEventManager = This;
 
     //advancedfx::Message("Server Event: %s\n", event->GetName());
+    Filmmaker::ParticleFx_OnGameEvent(event);
 
     return g_Old_CGameEventManager_FireEvent(This, event, bDontBroadcast);
 }
@@ -81,6 +83,8 @@ extern bool g_b_on_game_event;
 
 bool New_CGameEventManager_FireEventClientSide( void * This, SOURCESDK::CS2::CGameEvent *event ) {
     g_pGameEventManager = This;
+
+    Filmmaker::ParticleFx_OnGameEvent(event);
 
     if(g_b_on_game_event) SendGameEvent(event);
 

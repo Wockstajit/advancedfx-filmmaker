@@ -3,6 +3,9 @@
 #include "ConfigHudJs.h"
 #include "CameraTimelineHud.h"
 #include "MovieHud.h" // hidden while Config is open (F8 director card must not sit in the preview)
+#include "../Movie/ViewFx.h" // MODIFIERS: strafe roll + weapon sway levels
+#include "../Movie/BodyCam.h" // MODIFIERS: chest-cam preset state
+#include "../Movie/ParticleFx.h" // EFFECTS: per-category particle toggles
 #include "../Filmmaker.h" // CameraEditor_Active/Set (mutual exclusion), CameraEditor_HudViewName
 
 #include "../../DeathMsg.h" // AfxHookSource2_GetPanoramaHudPanel + PanoramaUIPanel offsets
@@ -145,6 +148,24 @@ std::string ConfigHud::BuildStateJson() {
 	o << "\"enabled\":" << (m_enabled ? "true" : "false");
 	o << ",\"cursor\":" << (CameraTimelineHudRef().Cursor() ? "true" : "false");
 	o << ",\"hudView\":\"" << CameraEditor_HudViewName() << "\"";
+	// MODIFIERS section: camera "feel" toggles owned by ViewFx.h / BodyCam.h, not this file --
+	// this just reads their state each frame the same way the rest of the panel does.
+	o << ",\"rollPct\":" << ViewFxRef().RollIntensity();
+	o << ",\"bobPct\":" << ViewFxRef().BobIntensity();
+	o << ",\"swayPct\":" << ViewFxRef().SwayIntensity();
+	o << ",\"deadzonePct\":" << ViewFxRef().DeadzoneIntensity();
+	o << ",\"bodyCam\":" << (BodyCam_Active() ? "true" : "false");
+	// EFFECTS section: particle-effect toggles owned by ParticleFx.h -- read-only mirror here,
+	// same contract as the MODIFIERS block above (JS writes back via console commands).
+	{
+		ParticleFx& fx = ParticleFxRef();
+		o << ",\"fxOn\":" << (fx.Enabled() ? "true" : "false");
+		o << ",\"fxReady\":" << (fx.Installed() ? "true" : "false");
+		o << ",\"fxMoneyshot\":" << (fx.MoneyHeadshot() ? "true" : "false");
+		for (int c = 0; c < kFxCategoryCount; ++c)
+			o << ",\"fx_" << FxCategoryKey((FxCategory)c) << "\":\""
+			  << FxModeName(fx.Mode((FxCategory)c)) << "\"";
+	}
 	o << "}";
 	return o.str();
 }

@@ -11,6 +11,7 @@ param(
     [int]$ReadyTimeoutSeconds = 75,
     [int]$SettleSeconds = 10,
     [switch]$NoWait,
+    [string]$FxAssetsGameDir = '',
     [string]$OutDir
 )
 $ErrorActionPreference = 'Stop'
@@ -27,6 +28,10 @@ $bin     = Join-Path $root 'build\staging-release\bin'
 $hlae    = Join-Path $bin 'HLAE.exe'
 $dll     = Join-Path $bin 'x64\AfxHookSource2.dll'
 $cs2exe  = Join-Path $Cs2Dir 'game\bin\win64\cs2.exe'
+if ([string]::IsNullOrWhiteSpace($FxAssetsGameDir)) {
+    $FxAssetsGameDir = Join-Path $root 'automation\output\effects\betterparticles-source1import\source2\game\source_mvm_fx'
+}
+$fxAssetsAvailable = Test-Path -LiteralPath $FxAssetsGameDir
 
 foreach ($f in @($hlae,$dll,$cs2exe)) { if (-not (Test-Path $f)) { Write-Error "Missing: $f"; exit 1 } }
 
@@ -45,6 +50,7 @@ Save-AutomationRunMetadata -RunDirectory $OutDir -AutomationName 'launch-cs2' -A
     height = $Height
     windowed = $true
     commandLine = $cmdLine
+    fxAssetsGameDir = if ($fxAssetsAvailable) { (Resolve-Path -LiteralPath $FxAssetsGameDir).Path } else { '' }
 } | Out-Null
 
 $argList = @(
@@ -59,6 +65,12 @@ $argList = @(
     '-addEnv', 'SteamOverlayGameId=730',
     '-addEnv', "MVM_AGENT_DEBUG_LOG=$agentDebugLog"
 )
+if ($fxAssetsAvailable) {
+    $argList += @('-addEnv', ('USRLOCALCSGO=' + (Resolve-Path -LiteralPath $FxAssetsGameDir).Path))
+    Write-Host "Mounting converted FX assets via USRLOCALCSGO: $FxAssetsGameDir" -ForegroundColor Green
+} else {
+    Write-Host "Converted FX asset dir not found; Better Particles swaps will fail open: $FxAssetsGameDir" -ForegroundColor Yellow
+}
 
 Write-Host "Launching CS2 (hook + netconport $Port, ${Width}x${Height} windowed)..."
 # Use ProcessStartInfo.ArgumentList so the multi-word -cmdLine stays a single argument.

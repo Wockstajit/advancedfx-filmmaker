@@ -15,6 +15,9 @@
 #include "Platform/TextEncoding.h"
 #include "Movie/CameraPath.h"
 #include "Movie/FollowCamera.h"
+#include "Movie/BodyCam.h"
+#include "Movie/ViewFx.h"
+#include "Movie/ParticleFx.h"
 #include "Movie/MovieMode.h"
 #include "Cosmetics/CosmeticOverrideSystem.h"
 
@@ -101,6 +104,8 @@ public:
 				marker ? marker->pitch : 0.0, marker ? marker->yaw : 0.0, marker ? marker->roll : 0.0,
 				marker ? marker->fov : 0.0, marker ? marker->speedMul : 0.0f,
 				marker ? (int)marker->ease : -1, path.Notice());
+		} else if (0 == _stricmp(m_sub.c_str(), "fx")) {
+			Filmmaker::MvmDebugLog_Linef("state.fx", "%s", Filmmaker::ParticleFxRef().DebugStateJson().c_str());
 		} else if (0 == _stricmp(m_sub.c_str(), "grapheditor")) {
 			const Filmmaker::GraphEditorExperimentHud& graph = Filmmaker::GraphEditorExperimentHudRef();
 			Filmmaker::MvmDebugLog_Linef("state.graph", "enabled=%d drive=%d ownsView=%d",
@@ -171,8 +176,11 @@ void PrintHelp(const char* cmd) {
 		"%s editor hud [hidden|game|full|cycle] - game UI behind the editor: hide all, in-game (radar+HP/ammo, no spectator panel), or full.\n"
 		"%s editor debug [on|off|toggle] - viewport/HUD debug overlay (window/render-target/viewport numbers; compare vs normal game viewport).\n"
 		"%s config [on|off|toggle] - lightweight CONFIG panel (general UI / display settings, no camera tools).\n"
+		"%s viewfx roll|bob|sway|deadzone [<0-150>|off] - camera-feel modifiers (strafe roll, camera walk-bob, weapon sway, decoupled-viewmodel aim deadzone), as an intensity percent.\n"
+		"%s fx [...] - particle-effect toggles: impacts/tracers/muzzle/blood/explosions/molotov per-category On|Less|Off (run for sub-help; also in the Config panel).\n"
+		"%s bodycam [on|off|toggle] - one-click chest-cam preset on the spectated player (uses the Follow system).\n"
 		"%s follow [...] - place and control a Follow / Lock-On camera.\n"
-		, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd
+		, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd
 	);
 }
 
@@ -337,6 +345,16 @@ CON_COMMAND(mirv_filmmaker, "Browse and play CS2 demos (filmmaker tool).") {
 	} else if (0 == _stricmp(sub, "config")) {
 		// Lightweight CONFIG panel: general UI / game-display settings only (no camera tools).
 		Filmmaker::ConfigHud_RunCommand(argc, args, cmd);
+	} else if (0 == _stricmp(sub, "viewfx")) {
+		// Camera "feel" modifiers: Quake/Doom-style strafe roll + weapon sway/bob.
+		Filmmaker::ViewFx_RunCommand(argc, args, cmd);
+	} else if (0 == _stricmp(sub, "fx")) {
+		// Particle-effect modifiers: per-category On/Less/Off over impacts, tracers, muzzle
+		// fx, blood, explosions, molotov, map ambience (runtime particle-create hook).
+		Filmmaker::ParticleFx_RunCommand(argc, args, cmd);
+	} else if (0 == _stricmp(sub, "bodycam")) {
+		// One-click chest-cam preset over the existing Follow/Attach system.
+		Filmmaker::BodyCam_RunCommand(argc, args, cmd);
 	} else {
 		PrintHelp(cmd);
 	}

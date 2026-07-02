@@ -1,8 +1,30 @@
 #include "ViewModel.h"
 #include "Globals.h"
+#include "Filmmaker/Movie/ViewFx.h"
+#include "Filmmaker/Movie/ViewFxVm.h"
 
 #include <cstddef>
+#include <windows.h>
 #include "../deps/release/Detours/src/detours.h"
+
+namespace {
+// Self-contained wall-clock seconds for the sway phase clock -- deliberately NOT tied to
+// g_MirvTime (demo time), so idle sway keeps animating the same way whether the demo is
+// playing or paused, matching the free-cam wall-clock trick main.cpp's view-setup trampoline
+// already uses for the same reason. Same QueryPerformanceCounter pattern, kept local since
+// this is the only place in this file that needs a clock.
+float WallClockSeconds() {
+	static LARGE_INTEGER s_freq = {};
+	static LARGE_INTEGER s_start = {};
+	if (s_freq.QuadPart == 0) {
+		QueryPerformanceFrequency(&s_freq);
+		QueryPerformanceCounter(&s_start);
+	}
+	LARGE_INTEGER now;
+	QueryPerformanceCounter(&now);
+	return (float)((double)(now.QuadPart - s_start.QuadPart) / (double)s_freq.QuadPart);
+}
+} // namespace
 
 struct MirvViewmodel 
 {
@@ -42,11 +64,31 @@ void __fastcall setViewmodel(void* param_1, float* pViewmodelOffsets, float* pFo
     g_OriginalViewmodelFunc(param_1, pViewmodelOffsets, pFov);
 
     if (pViewmodelOffsets != nullptr && g_MirvViewmodel.enabled) {
-        if (g_MirvViewmodel.enabledX) pViewmodelOffsets[0] = g_MirvViewmodel.offsetX; // x 
+        if (g_MirvViewmodel.enabledX) pViewmodelOffsets[0] = g_MirvViewmodel.offsetX; // x
         if (g_MirvViewmodel.enabledY) pViewmodelOffsets[1] = g_MirvViewmodel.offsetY; // y
         if (g_MirvViewmodel.enabledZ) pViewmodelOffsets[2] = g_MirvViewmodel.offsetZ; // z
 		if (g_MirvViewmodel.enabledFOV) pFov[0] = g_MirvViewmodel.fovValue;
     }
+
+    // ViewFx viewmodel modifiers: ADD on top of whichever offset is already in the buffer --
+    // the engine's own default, or the static override just above -- so they compose with
+    // mirv_viewmodel instead of fighting it. Both are no-ops (all-zero) while Off.
+    //   * sway: movement-scaled walk bob/drift.
+    //   * deadzone: shifts the weapon toward the TRUE aim while the camera lags it (the
+    //     "weapon moves first inside an aim deadzone" decoupled-viewmodel effect; the camera
+    //     half lives in main.cpp's view-setup trampoline).
+    if (pViewmodelOffsets != nullptr) {
+        float swayX = 0.0f, swayY = 0.0f, swayZ = 0.0f;
+        Filmmaker::ViewFxRef().SwayOffset(WallClockSeconds(), swayX, swayY, swayZ);
+        float dzX = 0.0f, dzY = 0.0f, dzZ = 0.0f;
+        Filmmaker::ViewFxRef().DeadzoneViewmodelShift(dzX, dzY, dzZ);
+        pViewmodelOffsets[0] += swayX + dzX;
+        pViewmodelOffsets[1] += swayY + dzY;
+        pViewmodelOffsets[2] += swayZ + dzZ;
+    }
+
+    // ViewFxVm write-site 1 (helper-post): we are INSIDE CS2's viewmodel calc right now.
+    Filmmaker::ViewFxVm_OnViewmodelCalc();
 };
 
 typedef bool(__fastcall *g_OriginalHandFunc_t)(int64_t param_1);
@@ -85,6 +127,11 @@ void HookViewmodel(HMODULE clientDll)
 
     g_OriginalViewmodelFunc = (g_OriginalViewmodelFunc_t)(viewmodelAddr);
 	g_OriginalHandFunc = (g_OriginalHandFunc_t)(handAddr);
+
+	// Share the (pre-detour) helper address so ViewFxVm's site 4 can locate + detour its CALLER
+	// (CS2's CalcViewModelView) -- Detours patches the function body, not call sites, so scanning
+	// for E8 calls to this address keeps working after the detour below.
+	Filmmaker::ViewFxVm_NoteViewmodelHelper(viewmodelAddr);
 
     DetourTransactionBegin();
     DetourUpdateThread(GetCurrentThread());

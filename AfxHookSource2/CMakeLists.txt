@@ -366,6 +366,14 @@ target_sources(${PROJECT_NAME} PRIVATE
     Filmmaker/Movie/FollowEventIndex.cpp
     Filmmaker/Movie/FollowEventIndex.h
     Filmmaker/Movie/FollowCameraStateJson.cpp
+    Filmmaker/Movie/BodyCam.cpp
+    Filmmaker/Movie/BodyCam.h
+    Filmmaker/Movie/ViewFx.cpp
+    Filmmaker/Movie/ViewFx.h
+    Filmmaker/Movie/ViewFxVm.cpp
+    Filmmaker/Movie/ViewFxVm.h
+    Filmmaker/Movie/ParticleFx.cpp
+    Filmmaker/Movie/ParticleFx.h
     Filmmaker/Movie/MovieMode.cpp
     Filmmaker/Movie/MovieMode.h
 

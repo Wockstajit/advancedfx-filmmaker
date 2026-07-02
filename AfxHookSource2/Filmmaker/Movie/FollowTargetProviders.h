@@ -147,7 +147,29 @@ public:
 	// Bone attach) and NOT a strict attachment lookup (world weapon models often lack
 	// muzzle/shell points, which made Live Preview bail with "target disappeared"). The
 	// exact point is resolved in GetWorldTransform, with an origin fallback.
-	bool IsValid() override { return EntityAt(m_index) != nullptr; }
+	//
+	// Player targets are the one exception: on death a CS2 pawn's render-eye/origin collapse
+	// to (0,0,0) (the class effectively becomes an inert observer proxy), so "still exists"
+	// is not enough -- without a health check every virtual attach point (chest/head/eyes/...)
+	// silently resolved to world origin, i.e. camera "on the ground" instead of on the player.
+	// Requiring health here routes dead targets through RunFrame's EXISTING death handling
+	// (autoDisableOnDeath / holdLastKnownPosition), the same as LockOn+Player already gets via
+	// PlayerTargetProvider::IsValid() below -- Attach was just never wired to it.
+	bool IsValid() override {
+		CEntityInstance* entity = EntityAt(m_index);
+		if (!entity) return false;
+		if (m_type == FollowTargetType::Player)
+			return entity->IsPlayerPawn() && entity->GetHealth() > 0;
+		return true;
+	}
+	FollowTargetStatus GetStatus() override {
+		if (m_type == FollowTargetType::Player) {
+			CEntityInstance* entity = EntityAt(m_index);
+			if (!entity || !entity->IsPlayerPawn()) return FollowTargetStatus::Missing;
+			return entity->GetHealth() > 0 ? FollowTargetStatus::Active : FollowTargetStatus::Dead;
+		}
+		return EntityTargetProvider::GetStatus();
+	}
 	FollowVec3 GetWorldPosition() override {
 		FollowVec3 pos; FollowAngles ang;
 		GetWorldTransform(pos, ang);

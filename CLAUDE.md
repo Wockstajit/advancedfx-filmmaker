@@ -19,7 +19,8 @@ The project is Windows-only and builds with CMake + Visual Studio 2022. A releas
 2. Puts Cargo, gettext, and Go on `PATH`, and clears `NoDefaultCurrentDirectoryInExePath` (a hardened-shell var that breaks the `ShaderBuilder.exe` step — see [memory: build-shader-9009-fix]).
 3. Runs `cmake -DAFX_MULTIBUILD_STAGING=ON -P cmake/MultiBuild.cmake` (builds both arches → `build/staging-release/bin/HLAE.exe`).
 4. Builds the Go demo-info helper (`go build` in `FilmmakerDemoInfoGo/` → `build/staging-release/bin/x64/FilmmakerDemoInfo/FilmmakerDemoInfo.exe`).
-5. Launches CS2 + the live dashboard via `automation/launch/live.bat`.
+5. Recompiles the converted "Better Particles" FX asset pack (`automation/tools/convert-better-particles-source1.ps1 -Compile` → `automation/output/effects/betterparticles-source1import/`) so every build ships a fresh pack instead of a stale one. Non-fatal — a machine missing the converter checkouts (`misc/source1import`, `misc/Source2Converter`) still gets a working DLL/game build, just with whatever pack (if any) was already on disk.
+6. Launches CS2 + the live dashboard via `automation/launch/live.bat`, which auto-mounts that pack over `USRLOCALCSGO` if present (see `automation/launch/launch-cs2-netcon.ps1`).
 
 `launch.bat` just runs the already-staged `build/staging-release/bin/HLAE.exe` without rebuilding.
 

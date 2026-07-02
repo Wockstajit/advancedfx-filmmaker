@@ -190,6 +190,9 @@ void initCosmeticsOffsets()
 	getOffset(&g_clientDllOffsets.C_EconItemView.m_iEntityQuality, "client.dll", "C_EconItemView", "m_iEntityQuality");
 	getOffset(&g_clientDllOffsets.CGameSceneNode.m_pChild, "client.dll", "CGameSceneNode", "m_pChild");
 	getOffset(&g_clientDllOffsets.CGameSceneNode.m_pNextSibling, "client.dll", "CGameSceneNode", "m_pNextSibling");
+	// ViewFxVm (true viewmodel rotation) -- optional/non-fatal, guarded by != 0 at the write site.
+	getOffset(&g_clientDllOffsets.CGameSceneNode.m_angRotation, "client.dll", "CGameSceneNode", "m_angRotation");
+	getOffset(&g_clientDllOffsets.CGameSceneNode.m_nodeToWorld, "client.dll", "CGameSceneNode", "m_nodeToWorld");
 	getOffset(&g_clientDllOffsets.C_CSPlayerPawn.m_bNeedToReApplyGloves, "client.dll", "C_CSPlayerPawn", "m_bNeedToReApplyGloves");
 	getOffset(&g_clientDllOffsets.C_CSPlayerPawn.m_hHudModelArms, "client.dll", "C_CSPlayerPawn", "m_hHudModelArms");
 	getOffset(&g_clientDllOffsets.C_CSPlayerPawn.m_nEconGlovesChanged, "client.dll", "C_CSPlayerPawn", "m_nEconGlovesChanged");

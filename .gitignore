@@ -47,6 +47,10 @@ pnpm-debug.log*
 # Vendored SDK dumps (do not commit)
 ultralight-free-sdk-*/
 
+# External conversion-tool checkouts (cloned via automation/tools/convert-better-particles-source1.ps1 setup)
+misc/source1import/
+misc/Source2Converter/
+
 # Local/generated CS2 offset reference dumps
 misc/cs2-offsets/source/
 misc/cs2-offsets/cs2-offsets-*.csv
