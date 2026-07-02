@@ -4,6 +4,7 @@
 #include "CameraPath.h"
 #include "FollowCamera.h"
 #include "../Filmmaker.h"            // CameraTimeline_Visible()
+#include "../Panorama/ConfigHud.h"   // ConfigHud_Enabled: Config panel gets editor-style G/wheel input priority
 #include "../Panorama/MovieHud.h"
 #include "../../MirvTime.h"
 
@@ -103,7 +104,7 @@ bool MovieMode::OnMouseWheel(int delta, bool shiftDown, bool ctrlDown, int x, in
 	//     First/Third/Free while controlling the game.
 	//   * Standalone camera timeline / experimental graph editor are always UI surfaces, so
 	//     the plain wheel is swallowed there (it used to step the selected camera / keyframes).
-	if (CameraEditor_Active()) {
+	if (CameraEditor_Active() || ConfigHud_Enabled()) {
 		if (CameraTimeline_WantsCursor())
 			return true; // UI mouse: keep the wheel a no-op while editing
 		// GAME mouse: fall through to the camera-mode cycle below.
@@ -228,8 +229,11 @@ bool MovieMode::OnKey(int vkey, bool down) {
 	// surface, so G is swallowed there and cannot turn the cursor off -- EXCEPT in
 	// Camera Editor Mode, where G must keep flipping UI<->GAME so the user can fly the
 	// free cam to frame a shot (the editor decouples the timeline's forced cursor).
+	// The Config panel gets the same priority: while it is open, G always flips UI<->GAME
+	// regardless of camera mode (in first person the regular-mode branch below would force
+	// the cursor OFF and the user could never get back into the panel).
 	if (vkey == kVK_G) {
-		if (CameraEditor_Active()) {
+		if (CameraEditor_Active() || ConfigHud_Enabled()) {
 			if (down) EnqueueCmd("mirv_filmmaker camtl cursor toggle");
 			return true;
 		}

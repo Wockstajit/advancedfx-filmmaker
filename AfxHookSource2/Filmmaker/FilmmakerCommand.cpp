@@ -10,6 +10,7 @@
 #include "Panorama/PanoramaBridge.h"
 #include "Panorama/CameraTimelineHud.h"
 #include "Panorama/CameraEditorHud.h"
+#include "Panorama/ConfigHud.h"
 #include "Panorama/GraphEditorExperimentHud.h"
 #include "Platform/TextEncoding.h"
 #include "Movie/CameraPath.h"
@@ -169,8 +170,9 @@ void PrintHelp(const char* cmd) {
 		"%s editor curveeditor [native|graph|timeline|camera|toggle] - bottom editor: native CS2 timeline, graph, or camera timeline.\n"
 		"%s editor hud [hidden|game|full|cycle] - game UI behind the editor: hide all, in-game (radar+HP/ammo, no spectator panel), or full.\n"
 		"%s editor debug [on|off|toggle] - viewport/HUD debug overlay (window/render-target/viewport numbers; compare vs normal game viewport).\n"
+		"%s config [on|off|toggle] - lightweight CONFIG panel (general UI / display settings, no camera tools).\n"
 		"%s follow [...] - place and control a Follow / Lock-On camera.\n"
-		, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd
+		, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd
 	);
 }
 
@@ -332,6 +334,9 @@ CON_COMMAND(mirv_filmmaker, "Browse and play CS2 demos (filmmaker tool).") {
 		// Dedicated camera-editor workspace. Bind it to a key, e.g.
 		//   bind "F9" "mirv_filmmaker editor toggle"
 		Filmmaker::CameraEditor_RunCommand(argc, args, cmd);
+	} else if (0 == _stricmp(sub, "config")) {
+		// Lightweight CONFIG panel: general UI / game-display settings only (no camera tools).
+		Filmmaker::ConfigHud_RunCommand(argc, args, cmd);
 	} else {
 		PrintHelp(cmd);
 	}

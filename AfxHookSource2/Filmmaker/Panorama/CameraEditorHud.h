@@ -140,7 +140,7 @@ private:
 	bool m_enabled = false;     // Camera Editor Mode on/off
 	bool m_scaleEnabled = false; // true scaled-preview viewport (render-layer blit)
 	BottomMode m_bottomMode = BottomMode::Native;
-	HudView m_hudView = HudView::HideAll; // game-HUD visibility while the editor is open
+	HudView m_hudView = HudView::ShowAll; // game-HUD visibility while the editor/Config is open (default: full game UI)
 	bool m_debugOverlay = false;         // viewport/HUD debug readout overlay
 	// Last preview rect parsed from the JS-published "previewrect" (normalised window fractions).
 	float m_previewX0 = 0, m_previewY0 = 0, m_previewX1 = 0, m_previewY1 = 0;

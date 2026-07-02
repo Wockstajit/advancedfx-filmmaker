@@ -16,14 +16,14 @@ R"EDJS(
     // Camera controls on ONE even row: Place | Reposition | Clear | Live. (Place/Clear are
     // lock-on only; Reposition also captures an attach-relative mount in Attach mode.)
     var followActions = row(followSec);
-    var followPlace = btn(followActions, 'Place', function () {
+    var followPlace = btnPrimary(followActions, 'Place', function () {
       cmd('mirv_filmmaker follow place');
       // Immediate confirmation the CLICK registered (independent of engine state): flash white.
       followPlace.style.backgroundColor = '#ffffffcc';
-      try { $.Schedule(0.18, function () { followPlace.style.backgroundColor = S.btnBg; }); } catch (e) {}
-    }, S.accent);
+      try { $.Schedule(0.18, function () { followPlace.style.backgroundColor = S.accent; }); } catch (e) {}
+    });
     var followReposition = btn(followActions, 'Reposition', function () { cmd('mirv_filmmaker follow reposition'); }, S.value);
-    var followClear = btn(followActions, 'Clear', function () { cmd('mirv_filmmaker follow clear'); }, S.danger);
+    var followClear = btnDanger(followActions, 'Clear', function () { cmd('mirv_filmmaker follow clear'); });
     var followPreview = btn(followActions, 'Live', function () {
       cmd((st && st.follow && st.follow.enabled) ? 'mirv_filmmaker follow stop' : 'mirv_filmmaker follow preview');
     }, S.accent);
@@ -235,42 +235,43 @@ R"EDJS(
       $.RegisterEventHandler('SliderValueChanged', rec.sl, function (panel, v) {
         if (rec.busy) return;
         rec.lastV = v;
+        if (rec.setFill) rec.setFill(v); // keep the colored track fill glued to the handle mid-drag
         var value = rec.lo + v * (rec.hi - rec.lo);
         rec.vl.text = value.toFixed(rec.decimals);
         cmd(cmdPrefix + ' ' + value.toFixed(3));
       });
     }
-    // One slider CELL (label | slider | value), sized to half the row so two fit per line.
-    function sliderCell(parent, sink, name, lo, hi, decimals, getVal, command) {
+    // One slider CELL (label | layered slider | value), sized to half the row so two fit per line.
+    // color = the track-fill tint (per-axis S.axis[..] to match the Graph channel swatches).
+    function sliderCell(parent, sink, name, lo, hi, decimals, getVal, command, color) {
       var cell = mk('Panel', parent); cell.style.flowChildren = 'right';
       cell.style.width = 'fill-parent-flow(1.0)'; cell.style.marginRight = '8px';
       var nl = lbl(cell, name, S.value, 12); nl.style.width = '54px'; nl.style.verticalAlign = 'center';
       nl.style.fontWeight = 'bold'; nl.style.whiteSpace = 'nowrap';
-      var sl = $.CreatePanel('Slider', cell, '', { direction: 'horizontal' }); sl.AddClass('HorizontalSlider');
-      sl.style.width = 'fill-parent-flow(1.0)'; sl.style.height = '12px'; sl.style.verticalAlign = 'center';
+      var ms = makeSlider(cell, 14, color);
       var vl = lbl(cell, '-', S.accent, 12); vl.style.width = '40px'; vl.style.textAlign = 'right'; vl.style.verticalAlign = 'center'; vl.style.marginLeft = '5px'; vl.style.fontWeight = 'bold';
-      var rec = { sl: sl, vl: vl, lo: lo, hi: hi, decimals: decimals, getVal: getVal, command: command, busy: false, lastV: 0, cell: cell };
+      var rec = { sl: ms.sl, vl: vl, setFill: ms.setFill, lo: lo, hi: hi, decimals: decimals, getVal: getVal, command: command, busy: false, lastV: 0, cell: cell };
       attachSliderDrag(rec, 'mirv_filmmaker follow ' + command);
       sink.push(rec); return rec;
     }
-    // Lay items [name,lo,hi,dec,getVal,cmd] out two-per-row; a lone final item is left in
+    // Lay items [name,lo,hi,dec,getVal,cmd,color] out two-per-row; a lone final item is left in
     // the first column at half width (reads as "centered-ish", balanced).
     function sliderGrid(parent, sink, items) {
       for (var i = 0; i < items.length; i += 2) {
         var r = row(parent); r.style.marginTop = '3px';
-        var a = items[i]; sliderCell(r, sink, a[0], a[1], a[2], a[3], a[4], a[5]);
-        if (items[i + 1]) { var b = items[i + 1]; sliderCell(r, sink, b[0], b[1], b[2], b[3], b[4], b[5]); }
+        var a = items[i]; sliderCell(r, sink, a[0], a[1], a[2], a[3], a[4], a[5], a[6]);
+        if (items[i + 1]) { var b = items[i + 1]; sliderCell(r, sink, b[0], b[1], b[2], b[3], b[4], b[5], b[6]); }
         else { var pad = mk('Panel', r); pad.style.width = 'fill-parent-flow(1.0)'; } // keep lone slider at half width
       }
     }
     sliderGrid(xformPanel, xformSliders, [
-      ['Off X', -256, 256, 1, function (f) { return f.offset ? f.offset[0] : 0; }, 'offsetx'],
-      ['Off Y', -256, 256, 1, function (f) { return f.offset ? f.offset[1] : 0; }, 'offsety'],
-      ['Off Z', -256, 256, 1, function (f) { return f.offset ? f.offset[2] : 0; }, 'offsetz'],
-      ['Pitch', -180, 180, 0, function (f) { return f.rotation ? f.rotation[0] : 0; }, 'rotpitch'],
-      ['Yaw',   -180, 180, 0, function (f) { return f.rotation ? f.rotation[1] : 0; }, 'rotyaw'],
-      ['Roll',  -180, 180, 0, function (f) { return f.rotation ? f.rotation[2] : 0; }, 'rotroll'],
-      ['FOV',      1, 170, 0, function (f) { return f.fov || 90; }, 'fov']
+      ['Off X', -256, 256, 1, function (f) { return f.offset ? f.offset[0] : 0; }, 'offsetx', S.axis[0]],
+      ['Off Y', -256, 256, 1, function (f) { return f.offset ? f.offset[1] : 0; }, 'offsety', S.axis[1]],
+      ['Off Z', -256, 256, 1, function (f) { return f.offset ? f.offset[2] : 0; }, 'offsetz', S.axis[2]],
+      ['Pitch', -180, 180, 0, function (f) { return f.rotation ? f.rotation[0] : 0; }, 'rotpitch', S.axis[3]],
+      ['Yaw',   -180, 180, 0, function (f) { return f.rotation ? f.rotation[1] : 0; }, 'rotyaw', S.axis[4]],
+      ['Roll',  -180, 180, 0, function (f) { return f.rotation ? f.rotation[2] : 0; }, 'rotroll', S.axis[5]],
+      ['FOV',      1, 170, 0, function (f) { return f.fov || 90; }, 'fov', S.axis[6]]
     ]);
 
 )EDJS"
@@ -310,16 +311,29 @@ R"EDJS(
       ['Turn/s',   0, 1440, 0, function (f) { return f.maxTurn; },    'maxturn']
     ]);
 
-    // Toggle options in a 2x2 grid (were full-width stacked rows).
+    // Toggle options in a 2x2 grid. Each is a pill button with a small leading checkbox
+    // indicator square (filled gold when on) -- replaces the old '[x]'/'[ ]' bracket text,
+    // which read as debug output rather than a shipped control.
     var optionBtns = {};
     function followToggle(parent, key, label, command) {
-      var b = btn(parent, label, function () {
-        var f = st && st.follow; cmd('mirv_filmmaker follow ' + command + ' ' + ((f && f[key]) ? 0 : 1));
-      }, S.value);
+      var b = mk('Panel', parent); b.hittest = true;
+      b.style.backgroundColor = S.btnBg; b.style.borderRadius = '3px';
+      b.style.border = '1px solid ' + S.cardBorder;
       b.style.width = 'fill-parent-flow(1.0)'; b.style.marginRight = '8px';
       b.style.paddingTop = '9px'; b.style.paddingBottom = '9px';
-      b.__lbl.style.fontSize = '11px'; b.__lbl.style.horizontalAlign = 'center'; b.__lbl.style.whiteSpace = 'nowrap';
-      b.__base = label; optionBtns[key] = b; return b;
+      b.style.paddingLeft = '6px'; b.style.paddingRight = '6px';
+      var inner = mk('Panel', b); inner.hittest = false;
+      inner.style.flowChildren = 'right'; inner.style.horizontalAlign = 'center';
+      var ind = mk('Panel', inner); ind.hittest = false;
+      ind.style.width = '10px'; ind.style.height = '10px'; ind.style.borderRadius = '2px';
+      ind.style.border = '1px solid #ffffff55'; ind.style.backgroundColor = S.clear;
+      ind.style.verticalAlign = 'center'; ind.style.marginRight = '6px';
+      var l = lbl(inner, label, S.value, 11); l.style.fontWeight = 'bold';
+      l.style.whiteSpace = 'nowrap'; l.style.verticalAlign = 'center';
+      b.SetPanelEvent('onactivate', function () {
+        var f = st && st.follow; cmd('mirv_filmmaker follow ' + command + ' ' + ((f && f[key]) ? 0 : 1));
+      });
+      b.__lbl = l; b.__ind = ind; b.__base = label; optionBtns[key] = b; return b;
     }
     var TOGGLES = [
       ['autoDead', 'Auto-disable on death', 'autodead'], ['switchWeapon', 'Retarget dropped weapon', 'switchweapon'],

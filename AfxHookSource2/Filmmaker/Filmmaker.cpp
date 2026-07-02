@@ -7,6 +7,7 @@
 #include "Panorama/MarkerHud.h"
 #include "Panorama/CameraTimelineHud.h"
 #include "Panorama/CameraEditorHud.h"
+#include "Panorama/ConfigHud.h"
 #include "Panorama/GraphEditorExperimentHud.h"
 #include "Panorama/DemoBarButtons.h"
 #include "Movie/MovieMode.h"
@@ -243,6 +244,11 @@ void RunMainThreadFrame() {
 
 	// Native demo-bar inline speed buttons (replaces the timescale dropdown).
 	DemoBarButtonsRef().RunFrame();
+
+	// Lightweight CONFIG panel (general UI/display settings; no camera tools). Runs before the
+	// Camera Editor so the editor's host orchestration still wins the frame if both got toggled
+	// in the same tick (they are mutually exclusive -- each closes the other on open).
+	ConfigHudRef().RunFrame();
 
 	// Camera Editor Mode workspace shell. Runs LAST so its host orchestration (timeline
 	// hosting + gameplay-HUD hide) is applied on top of every other panel this frame.

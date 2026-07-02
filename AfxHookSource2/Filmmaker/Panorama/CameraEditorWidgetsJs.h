@@ -16,6 +16,7 @@ R"EDJS(
     function btn(parent, text, onClick, color) {
       var b = mk('Panel', parent); b.hittest = true;
       b.style.backgroundColor = S.btnBg; b.style.borderRadius = '3px';
+      b.style.border = '1px solid ' + S.cardBorder;
       b.style.paddingTop = '6px'; b.style.paddingBottom = '6px';
       b.style.paddingLeft = '11px'; b.style.paddingRight = '11px';
       b.style.marginRight = '5px'; b.style.verticalAlign = 'center';
@@ -23,14 +24,68 @@ R"EDJS(
       b.SetPanelEvent('onactivate', onClick);
       b.__lbl = l; return b;
     }
+    // Button hierarchy on top of btn() (which stays the SECONDARY default):
+    //   btnPrimary  = gold fill + dark text -- at most ONE per row; "the thing to click".
+    //   btnDanger   = red-tinted fill + red border/text for destructive actions.
+    function btnPrimary(parent, text, onClick) {
+      var b = btn(parent, text, onClick, S.accentText);
+      b.style.backgroundColor = S.accent; b.style.border = '1px solid ' + S.accent;
+      return b;
+    }
+    function btnDanger(parent, text, onClick) {
+      var b = btn(parent, text, onClick, S.dangerText);
+      b.style.backgroundColor = S.dangerBg; b.style.border = '1px solid ' + S.dangerBorder;
+      return b;
+    }
+    // Tab treatment: active = raised fill + gold underline + gold text (NOT a full gold pill,
+    // so a solid gold fill stays reserved for the one primary action in a row). tabify() at
+    // build time, styleTab(b, on) each render.
+    function tabify(b) {
+      b.style.border = '1px solid ' + S.clear;
+      b.style.paddingTop = '8px'; b.style.paddingBottom = '7px';
+      b.__lbl.style.horizontalAlign = 'center';
+      return b;
+    }
+    function styleTab(b, on) {
+      b.style.backgroundColor = on ? S.bgRaised : S.clear;
+      b.style.borderBottom = '2px solid ' + (on ? S.accent : S.clear);
+      b.__lbl.style.color = on ? S.accent : S.label;
+    }
     function section(parent, title) {
       var s = mk('Panel', parent); s.style.flowChildren = 'down'; s.style.width = '100%';
-      s.style.marginTop = '12px'; s.style.paddingTop = '8px'; s.style.paddingBottom = '10px';
-      s.style.paddingLeft = '10px'; s.style.paddingRight = '10px';
-      s.style.backgroundColor = S.sectionBg; s.style.borderRadius = '4px';
-      var t = lbl(s, title, S.dim, 12); t.style.fontWeight = 'bold'; t.style.letterSpacing = '2px';
-      t.style.marginBottom = '6px';
+      s.style.marginTop = '12px'; s.style.paddingTop = '9px'; s.style.paddingBottom = '11px';
+      s.style.paddingLeft = '11px'; s.style.paddingRight = '11px';
+      s.style.backgroundColor = S.sectionBg; s.style.borderRadius = '6px';
+      s.style.border = '1px solid ' + S.cardBorder;
+      s.style.boxShadow = S.cardShadow;
+      var hr = mk('Panel', s); hr.style.flowChildren = 'right'; hr.style.marginBottom = '7px';
+      var chip = mk('Panel', hr); chip.hittest = false;
+      chip.style.width = '3px'; chip.style.height = '10px'; chip.style.borderRadius = '1px';
+      chip.style.backgroundColor = S.accent; chip.style.verticalAlign = 'center'; chip.style.marginRight = '7px';
+      var t = lbl(hr, title, S.label, 11); t.style.fontWeight = 'bold'; t.style.letterSpacing = '2px';
+      t.style.verticalAlign = 'center';
       return s;
+    }
+    // Layered slider: rounded track + a colored fill bar drawn UNDER a real native Slider.
+    // The native Slider stays the drag mechanism (this HUD context has no mouse-move event,
+    // so a hand-rolled draggable control is impossible); we only upgrade the visual layer.
+    // Returns { wrap, sl, setFill(frac 0..1) }.
+    function makeSlider(parent, height, fillColor) {
+      var wrap = mk('Panel', parent);
+      wrap.style.width = 'fill-parent-flow(1.0)'; wrap.style.height = (height || 16) + 'px';
+      wrap.style.verticalAlign = 'center';
+      var track = mk('Panel', wrap); track.hittest = false;
+      track.style.width = '100%'; track.style.height = '4px'; track.style.borderRadius = '2px';
+      track.style.verticalAlign = 'center'; track.style.backgroundColor = S.trackBg;
+      var fill = mk('Panel', wrap); fill.hittest = false;
+      fill.style.width = '0%'; fill.style.height = '4px'; fill.style.borderRadius = '2px';
+      fill.style.verticalAlign = 'center'; fill.style.horizontalAlign = 'left';
+      fill.style.backgroundColor = fillColor || S.accent;
+      var sl = $.CreatePanel('Slider', wrap, '', { direction: 'horizontal' }); sl.AddClass('HorizontalSlider');
+      sl.style.width = '100%'; sl.style.height = '100%'; sl.style.verticalAlign = 'center';
+      return { wrap: wrap, sl: sl, setFill: function (frac) {
+        fill.style.width = (clamp01(frac) * 100).toFixed(1) + '%';
+      } };
     }
     function row(parent) {
       var r = mk('Panel', parent); r.style.flowChildren = 'right'; r.style.width = '100%';
@@ -48,7 +103,13 @@ R"EDJS(
     var customDrops = [], openDrop = null;
     function closeAllDrops() {
       if (!openDrop) return;
-      openDrop.pop.visible = false; openDrop.caret.text = '▾'; openDrop = null;
+      // hittest=false explicitly: `pop` is created with hittest=true ONCE and this embedded HUD
+      // Panorama context has already shown it does not reliably exclude invisible panels from hit
+      // testing (see the "native DropDown never instantiates" note above) -- leaving hittest=true
+      // on a merely-invisible popup risks it silently eating clicks at its last on-screen rect for
+      // whatever real control happens to sit there next (reported: dropdowns stop opening entirely
+      // after closing a previous one).
+      openDrop.pop.visible = false; openDrop.pop.hittest = false; openDrop.caret.text = '▾'; openDrop = null;
     }
     // Bar styling: distinct fill + border so it reads as clickable. 'empty' = dim/disabled.
     function fieldStyle(field, empty) {
@@ -72,7 +133,7 @@ R"EDJS(
       var w = (rec.field.actuallayoutwidth || 0) / sx, h = (rec.field.actuallayoutheight || 0) / sy;
       rec.pop.style.position = Math.round(x) + 'px ' + Math.round(y + h + 2) + 'px 0px';
       rec.pop.style.width = Math.round(w) + 'px';
-      rec.pop.visible = true; rec.caret.text = '▴'; openDrop = rec;
+      rec.pop.visible = true; rec.pop.hittest = true; rec.caret.text = '▴'; openDrop = rec;
     }
     function toggleDrop(rec) {
       var wasOpen = (openDrop === rec);

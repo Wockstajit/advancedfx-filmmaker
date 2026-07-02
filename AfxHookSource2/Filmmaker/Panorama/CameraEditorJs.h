@@ -39,6 +39,18 @@ inline const char* kCameraEditorJs = R"EDJS(
       panelBorder: '#ffffff1f', sectionBg: '#1a1f26ff',
       label: '#9aa4b0ff', value: '#eef2f6ff', dim: '#6b7480ff',
       btnBg: '#ffffff14', btnOn: '#f0b32333',
+      // Redesign tokens (ADDITIVE -- the keys above are load-bearing across every #include'd
+      // fragment; never rename/remove them). Elevation tiers, button hierarchy, slider tracks.
+      bgRaised: '#232a35ff',                       // active/selected surfaces (3rd elevation tier)
+      cardBorder: '#ffffff10',
+      cardShadow: '#00000066 0px 3px 12px 0px',    // section cards sit ON the inspector bg
+      accentText: '#151004ff',                     // dark text on a gold PRIMARY fill
+      dangerBg: '#c92a2a26', dangerBorder: '#c92a2a66', dangerText: '#ff6b6bff',
+      trackBg: '#00000066',
+      clear: 'rgba(0,0,0,0)',                      // NEVER style.X = '' (aborts the script)
+      // Per-axis slider fill colors -- keep in sync with kChColors in GraphEditorExperimentHud.cpp
+      // so the Framing sliders visually tie to the Graph editor's channel swatches/curves.
+      axis: ['#ff6b6bcc', '#7be07bcc', '#6ba8ffcc', '#ffcf5acc', '#c08affcc', '#5ad0ffcc', '#ff9a5acc'],
       font: 'Stratum2, "Arial Unicode MS"'
     };
     var INSPECTOR_W = 430, BOTTOM_H = 176, BOTTOM_LIFT = 28;
@@ -93,10 +105,10 @@ R"EDJS(
     function showClearConfirm() { confirmOverlay.visible = true; }
     var confirmNo = btn(confirmActions, 'No', function () { hideClearConfirm(); }, S.value);
     confirmNo.style.width = '132px'; confirmNo.__lbl.style.textAlign = 'center'; confirmNo.__lbl.style.width = '100%';
-    var confirmYes = btn(confirmActions, 'Yes, clear all', function () {
+    var confirmYes = btnDanger(confirmActions, 'Yes, clear all', function () {
       hideClearConfirm();
       cmd('mirv_filmmaker camtl clear');
-    }, S.danger);
+    });
     confirmYes.style.width = '172px'; confirmYes.style.marginRight = '0px';
     confirmYes.__lbl.style.textAlign = 'center'; confirmYes.__lbl.style.width = '100%';
 
@@ -154,21 +166,18 @@ R"EDJS(
     tabBar.style.paddingTop = '4px'; tabBar.style.paddingBottom = '4px';
     tabBar.style.paddingLeft = '12px'; tabBar.style.paddingRight = '12px';
     // Order (left->right): Regular Timeline (native CS2 bar), Camera, Graph.
-    var regularViewBtn = btn(tabBar, 'Regular Timeline', function () {
+    var regularViewBtn = tabify(btn(tabBar, 'Regular Timeline', function () {
       cmd('mirv_filmmaker editor curveeditor native');
-    }, S.value);
+    }, S.value));
     regularViewBtn.style.verticalAlign = 'center'; regularViewBtn.style.width = '150px';
-    regularViewBtn.__lbl.style.horizontalAlign = 'center';
-    var timelineViewBtn = btn(tabBar, 'Camera', function () {
+    var timelineViewBtn = tabify(btn(tabBar, 'Camera', function () {
       cmd('mirv_filmmaker editor curveeditor timeline');
-    }, S.value);
+    }, S.value));
     timelineViewBtn.style.verticalAlign = 'center'; timelineViewBtn.style.width = '150px';
-    timelineViewBtn.__lbl.style.horizontalAlign = 'center';
-    var graphViewBtn = btn(tabBar, 'Graph', function () {
+    var graphViewBtn = tabify(btn(tabBar, 'Graph', function () {
       cmd('mirv_filmmaker editor curveeditor graph');
-    }, S.value);
+    }, S.value));
     graphViewBtn.style.verticalAlign = 'center'; graphViewBtn.style.width = '150px';
-    graphViewBtn.__lbl.style.horizontalAlign = 'center';
 )EDJS"
 R"EDJS(
     // Spacer pushes the gear to the far right of the bottom bar.
@@ -346,8 +355,8 @@ R"EDJS(
 
     var inspectorMode = 'path';
     var modeRow = row(inspector);
-    var pathTab = btn(modeRow, 'PATH CAMERA', function () { inspectorMode = 'path'; }, S.accent);
-    var followTab = btn(modeRow, 'FOLLOW CAMERA', function () { inspectorMode = 'follow'; }, S.value);
+    var pathTab = tabify(btn(modeRow, 'PATH CAMERA', function () { inspectorMode = 'path'; }, S.accent));
+    var followTab = tabify(btn(modeRow, 'FOLLOW CAMERA', function () { inspectorMode = 'follow'; }, S.value));
     pathTab.style.width = 'fill-parent-flow(1.0)';
     followTab.style.width = 'fill-parent-flow(1.0)'; followTab.style.marginRight = '0px';
 
@@ -358,8 +367,8 @@ R"EDJS(
     hudLabel.style.letterSpacing = '1px'; hudLabel.style.marginTop = '7px';
     // One button that cycles Hide All -> In-Game -> Show All (text updates each click).
     var HUD_CYCLE = [['hidden', 'Hide All'], ['game', 'In-Game'], ['full', 'Show All']];
-    var hudCycle = btn(inspector, 'Game UI: Hide All', function () {
-      var cur = (st && st.hudView) || 'hidden', idx = 0;
+    var hudCycle = btn(inspector, 'Game UI: Show All', function () {
+      var cur = (st && st.hudView) || 'full', idx = 0;
       for (var i = 0; i < HUD_CYCLE.length; i++) if (HUD_CYCLE[i][0] === cur) idx = i;
       cmd('mirv_filmmaker editor hud ' + HUD_CYCLE[(idx + 1) % HUD_CYCLE.length][0]);
     }, S.value);
@@ -450,6 +459,61 @@ R"EDJS(
       });
     };
     api.previewInfo = function () { return previewState(); };
+    // Debug hooks for the customDrop popups (dropdowns are keyed off field.id set in customDrop()):
+    //   mirv_filmmaker editor eval "$.Msg($.CamEditor.dbgDropState()+String.fromCharCode(10))"
+    //   mirv_filmmaker editor eval "$.Msg($.CamEditor.dbgToggle('FmTargetDrop')+String.fromCharCode(10))"
+    //   mirv_filmmaker editor eval "$.Msg($.CamEditor.dbgPick('FmAttachDrop',0)+String.fromCharCode(10))"
+    api.dbgDropState = function () {
+      var out = { open: openDrop ? openDrop.field.id : null, drops: [] };
+      for (var i = 0; i < customDrops.length; i++) {
+        var d = customDrops[i];
+        out.drops.push({ id: d.field.id, opts: d.opts.length, open: !!d.pop.visible, ht: !!d.field.hittest, vis: !!d.field.visible });
+      }
+      return JSON.stringify(out);
+    };
+    api.dbgToggle = function (id) {
+      for (var i = 0; i < customDrops.length; i++) if (customDrops[i].field.id === id) { toggleDrop(customDrops[i]); return 'toggled:' + id; }
+      return 'not-found:' + id;
+    };
+    api.dbgPick = function (id, idx) {
+      for (var i = 0; i < customDrops.length; i++) {
+        var d = customDrops[i];
+        if (d.field.id !== id) continue;
+        if (idx < 0 || idx >= d.opts.length) return 'bad-idx:' + d.opts.length;
+        var val = d.opts[idx][1];
+        closeAllDrops();
+        d.onPick(val);
+        return 'picked:' + id + ':' + idx;
+      }
+      return 'not-found:' + id;
+    };
+    // Index-based variants: customDrop()'s `field.id = id` assignment does not persist through to
+    // a readback (confirmed live -- every drop's field.id reads back '' regardless of the string
+    // passed to customDrop()), so the id-keyed hooks above can never find anything. Array position
+    // is stable across a build (creation order), so index into customDrops directly instead.
+    api.dbgToggleAt = function (i) { if (i < 0 || i >= customDrops.length) return 'oob'; toggleDrop(customDrops[i]); return 'toggled:' + i; };
+    // Atomic toggle+read (no netcon round-trip gap, so a same-frame revert can't hide behind
+    // the ~0.7s/dozens-of-frames gap between two separate netcon commands).
+    api.dbgToggleAndState = function (i) {
+      if (i < 0 || i >= customDrops.length) return 'oob';
+      var d = customDrops[i];
+      var beforeWasOpen = (openDrop === d);
+      var beforePopVis = !!d.pop.visible;
+      toggleDrop(d);
+      return JSON.stringify({
+        i: i, beforeWasOpen: beforeWasOpen, beforePopVis: beforePopVis,
+        afterPopVis: !!d.pop.visible, afterPopHt: !!d.pop.hittest, afterOpenIsThis: (openDrop === d), optCount: d.opts.length
+      });
+    };
+    api.dbgPickAt = function (i, idx) {
+      if (i < 0 || i >= customDrops.length) return 'oob';
+      var d = customDrops[i];
+      if (idx < 0 || idx >= d.opts.length) return 'bad-idx:' + d.opts.length;
+      var val = d.opts[idx][1];
+      closeAllDrops();
+      d.onPick(val);
+      return 'picked:' + i + ':' + idx;
+    };
     // Debug hooks for the gear settings fly-out (mirrors the previewInfo/previewCall pattern):
     //   mirv_filmmaker editor eval $.Msg($.CamEditor.toggleSettings()+String.fromCharCode(10));
     //   mirv_filmmaker editor eval $.Msg($.CamEditor.settingsGeom()+String.fromCharCode(10));
@@ -543,8 +607,8 @@ R"EDJS(
       mouseBtn.style.backgroundColor = cur ? S.btnOn : S.btnBg;
       mouseBtn.__lbl.style.color = cur ? S.accent : S.label;
 
-      // Game-UI visibility picker highlight (default 'hidden' = clean workspace).
-      var hv = st.hudView || 'hidden', hudName = 'Hide All';
+      // Game-UI visibility picker highlight (default 'full' = full game UI).
+      var hv = st.hudView || 'full', hudName = 'Show All';
       for (var hb = 0; hb < HUD_CYCLE.length; hb++) if (HUD_CYCLE[hb][0] === hv) hudName = HUD_CYCLE[hb][1];
       hudCycle.__lbl.text = 'Game UI: ' + hudName;
 
@@ -618,28 +682,24 @@ R"EDJS(
       var followMode = inspectorMode === 'follow';
       followSec.visible = followMode;
       for (var pm = 0; pm < pathPanels.length; pm++) pathPanels[pm].visible = !followMode;
-      followTab.style.backgroundColor = followMode ? S.btnOn : S.btnBg;
-      followTab.__lbl.style.color = followMode ? S.accent : S.value;
-      pathTab.style.backgroundColor = followMode ? S.btnBg : S.btnOn;
-      pathTab.__lbl.style.color = followMode ? S.value : S.accent;
+      styleTab(followTab, followMode);
+      styleTab(pathTab, !followMode);
       var bm = st.bottomMode || (st.graphExp ? 'graph' : 'native');
       curBottomMode = bm;
       var regularActive = (bm !== 'camera' && bm !== 'graph'); // 'native' (Regular Timeline)
-      timelineViewBtn.style.backgroundColor = bm === 'camera' ? S.btnOn : S.btnBg;
-      timelineViewBtn.__lbl.style.color = bm === 'camera' ? S.accent : S.value;
-      graphViewBtn.style.backgroundColor = bm === 'graph' ? S.btnOn : S.btnBg;
-      graphViewBtn.__lbl.style.color = bm === 'graph' ? S.accent : S.value;
-      regularViewBtn.style.backgroundColor = regularActive ? S.btnOn : S.btnBg;
-      regularViewBtn.__lbl.style.color = regularActive ? S.accent : S.value;
+      styleTab(timelineViewBtn, bm === 'camera');
+      styleTab(graphViewBtn, bm === 'graph');
+      styleTab(regularViewBtn, regularActive);
 )EDJS"
 R"EDJS(
       var f = st.follow || {};
       var liveBadge = !!(f.enabled || st.pathLive || (st.graphExp && st.graphDrive));
       tagLbl.text = liveBadge ? 'LIVE' : 'PREVIEW';
       var attachModeOn = (f.mode === 1);
-      // Camera-model toggle (one button; tap flips Lock-on <-> Attach).
+      // Camera-model toggle (one button; tap flips Lock-on <-> Attach). Raised-surface
+      // treatment, NOT gold: it's a mode switch, not the row's primary action.
       modeToggle.__lbl.text = (attachModeOn ? 'Camera Mode: Attach' : 'Camera Mode: Lock-on') + '   ⇄';
-      modeToggle.style.backgroundColor = S.btnOn; modeToggle.__lbl.style.color = S.accent;
+      modeToggle.style.backgroundColor = S.bgRaised; modeToggle.__lbl.style.color = S.value;
       modeHint.text = attachModeOn ? 'Rides the target (offset / rotation / FOV). Tap to switch.'
                                    : 'A placed camera rotates to track the target. Tap to switch.';
       if (attachModeOn) {
@@ -666,9 +726,11 @@ R"EDJS(
       followReposition.visible = true;
       followClear.visible = !attachModeOn;
       followPlace.__lbl.text = f.hasCamera ? 'Replace' : 'Place';
-      // Live = the preview toggle (short label so it never wraps).
+      // Live = the preview toggle (short label so it never wraps). Full gold fill while
+      // running so the active "you are live" state is unmistakable.
       followPreview.__lbl.text = f.enabled ? 'Stop' : 'Live';
-      followPreview.style.backgroundColor = f.enabled ? S.btnOn : S.btnBg;
+      followPreview.style.backgroundColor = f.enabled ? S.accent : S.btnBg;
+      followPreview.__lbl.style.color = f.enabled ? S.accentText : S.accent;
       var haveTarget = (f.targetIndex >= 0) || (f.type === 2 && f.weaponPlayerIndex >= 0);
       followStatus.text = haveTarget
         ? ((f.targetName || ('Entity #' + f.targetIndex)) + '  -  ' + (f.typeName || 'Player') + (attachModeOn ? ' (attach)' : ' (lock-on)'))
@@ -728,19 +790,25 @@ R"EDJS(
       // Framing sliders (offset / rotation / FOV).
       for (var xs = 0; xs < xformSliders.length; xs++) {
         var xr = xformSliders[xs], xv = num(xr.getVal(f));
-        xr.busy = true; xr.sl.value = clamp01((xv - xr.lo) / (xr.hi - xr.lo)); xr.busy = false;
+        var xfrac = clamp01((xv - xr.lo) / (xr.hi - xr.lo));
+        xr.busy = true; xr.sl.value = xfrac; xr.busy = false;
+        if (xr.setFill) xr.setFill(xfrac);
         xr.vl.text = xv.toFixed(xr.decimals);
       }
       // Advanced smoothing sliders (now getVal-based, same as Framing).
       for (var fs = 0; fs < followSliders.length; fs++) {
         var rec = followSliders[fs], value = num(rec.getVal(f));
-        rec.busy = true; rec.sl.value = clamp01((value - rec.lo) / (rec.hi - rec.lo)); rec.busy = false;
+        var ffrac = clamp01((value - rec.lo) / (rec.hi - rec.lo));
+        rec.busy = true; rec.sl.value = ffrac; rec.busy = false;
+        if (rec.setFill) rec.setFill(ffrac);
         rec.vl.text = value.toFixed(rec.decimals);
       }
       for (var fk in optionBtns) if (optionBtns.hasOwnProperty(fk)) {
-        optionBtns[fk].style.backgroundColor = f[fk] ? S.btnOn : S.btnBg;
-        optionBtns[fk].__lbl.style.color = f[fk] ? S.accent : S.value;
-        optionBtns[fk].__lbl.text = (f[fk] ? '[x] ' : '[ ] ') + optionBtns[fk].__base;
+        var togOn = !!f[fk];
+        optionBtns[fk].style.backgroundColor = togOn ? S.btnOn : S.btnBg;
+        optionBtns[fk].__lbl.style.color = togOn ? S.accent : S.value;
+        optionBtns[fk].__ind.style.backgroundColor = togOn ? S.accent : S.clear;
+        optionBtns[fk].__ind.style.border = '1px solid ' + (togOn ? S.accent : '#ffffff55');
       }
       // Aspect-ratio letterbox. Virtual px = actuallayout / uiscale (matches style px).
       // Measure from the ALREADY-laid-out HUD context panel when our fresh root still reports 0
@@ -890,6 +958,9 @@ R"EDJS(
       var has = (st.selected >= 0 && !!st.sel);
       selLbl.text = has ? ('Key #' + (st.selected + 1) + ' / ' + st.count) : (st.count > 0 ? '— / ' + st.count : 'no cameras');
       delBtn.visible = retimeBtn.visible = has;
+      // Path-tab empty state: only while the path has NO cameras (the pathPanels loop above
+      // already hid it on the Follow tab; this narrows it further on the Path tab).
+      pathEmpty.visible = !followMode && !(st.count > 0);
 
       // Transform readout: the selected key if any, else the live free cam.
       var src = has ? st.sel : (st.cam || null);

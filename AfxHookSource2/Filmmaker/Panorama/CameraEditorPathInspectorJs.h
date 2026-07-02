@@ -17,10 +17,10 @@ R"EDJS(
     selLbl.style.verticalAlign = 'center';
     btn(navRow, '▶', function () { cmd('mirv_filmmaker camtl selectdelta 1'); }, S.value);
     var actRow = row(selSec);
-    btn(actRow, '+ Add', function () { cmd('mirv_filmmaker camtl addkey'); }, S.accent);
+    btnPrimary(actRow, '+ Add', function () { cmd('mirv_filmmaker camtl addkey'); });
     var delBtn = btn(actRow, '− Delete', function () { if (st && st.selected >= 0) cmd('mirv_filmmaker camtl delkey ' + st.selected); }, S.value);
     var retimeBtn = btn(actRow, '⟲ Tick→Here', function () { if (st && st.selected >= 0) cmd('mirv_filmmaker camtl movekey ' + st.selected + ' ' + st.tick); }, S.value);
-    var clearAllBtn = btn(actRow, 'Clear All', function () { showClearConfirm(); }, S.danger);
+    var clearAllBtn = btnDanger(actRow, 'Clear All', function () { showClearConfirm(); });
     clearAllBtn.style.marginRight = '0px';
 
     // ===================== TRANSFORM (readout) ==========================
@@ -33,39 +33,42 @@ R"EDJS(
 R"EDJS(
     // ===================== LENS (FOV / ROLL sliders) ====================
     var sliders = [];
-    function valSlider(parent, name, channel, lo, hi) {
+    function valSlider(parent, name, channel, lo, hi, color) {
       var r = row(parent);
       var nl = lbl(r, name, S.label, 12); nl.style.width = '46px'; nl.style.verticalAlign = 'center';
-      var sl = $.CreatePanel('Slider', r, '', { direction: 'horizontal' }); sl.AddClass('HorizontalSlider');
-      sl.style.width = 'fill-parent-flow(1.0)'; sl.style.height = '16px'; sl.style.verticalAlign = 'center';
+      var ms = makeSlider(r, 16, color);
       var vl = lbl(r, '-', S.accent, 12); vl.style.width = '54px'; vl.style.textAlign = 'right';
       vl.style.verticalAlign = 'center'; vl.style.marginLeft = '8px'; vl.style.fontWeight = 'bold';
-      var rec = { sl: sl, vl: vl, lo: lo, hi: hi, ch: channel, drag: false };
-      $.RegisterEventHandler('SliderValueChanged', sl, function (p, v) {
+      var rec = { sl: ms.sl, vl: vl, setFill: ms.setFill, lo: lo, hi: hi, ch: channel, drag: false };
+      $.RegisterEventHandler('SliderValueChanged', ms.sl, function (p, v) {
         var value = lo + v * (hi - lo); vl.text = value.toFixed(1);
+        rec.setFill(v);
         if (st && st.selected >= 0) {
           if (!rec.drag) { rec.drag = true; cmd('mirv_filmmaker camtl editbegin'); }
           cmd('mirv_filmmaker camtl setvalpreview ' + st.selected + ' ' + channel + ' ' + value.toFixed(3));
         }
       });
-      $.RegisterEventHandler('SliderReleased', sl, function (p, v) {
+      $.RegisterEventHandler('SliderReleased', ms.sl, function (p, v) {
         if (rec.drag) { rec.drag = false; cmd('mirv_filmmaker camtl editend'); }
       });
       sliders.push(rec); return rec;
     }
     var lensSec = section(inspector, 'LENS');
     pathPanels.push(lensSec);
-    valSlider(lensSec, 'FOV', CH_FOV, 1, 170);
-    valSlider(lensSec, 'Roll', CH_ROLL, -180, 180);
+    valSlider(lensSec, 'FOV', CH_FOV, 1, 170, S.axis[6]);
+    valSlider(lensSec, 'Roll', CH_ROLL, -180, 180, S.axis[5]);
     var lensHint = lbl(lensSec, '', S.dim, 10); lensHint.style.marginTop = '4px';
 
     function syncSliders() {
       for (var i = 0; i < sliders.length; i++) {
         var s = sliders[i];
-        if (!st || !st.sel) { s.vl.text = '-'; s.vl.style.color = S.dim; continue; }
+        if (!st || !st.sel) { s.vl.text = '-'; s.vl.style.color = S.dim; s.setFill(0); continue; }
         s.vl.style.color = S.accent;
         var cur = num((s.ch === CH_FOV) ? st.sel.fov : st.sel.roll);
-        if (!s.sl.mousedown && !s.drag) s.sl.value = clamp01((cur - s.lo) / (s.hi - s.lo));
+        if (!s.sl.mousedown && !s.drag) {
+          var frac = clamp01((cur - s.lo) / (s.hi - s.lo));
+          s.sl.value = frac; s.setFill(frac);
+        }
         if (!s.drag) s.vl.text = cur.toFixed(1);
       }
     }
@@ -129,4 +132,24 @@ R"EDJS(
     pathPanels.push(playSec);
     lbl(playSec, 'Space  ▶ / ⏸     ←/→  ±15s', S.value, 12);
     lbl(playSec, 'Scrub + keyframes on the timeline below.', S.dim, 10);
+
+    // ===================== EMPTY STATE (0 cameras) ======================
+    // Intentional layout for the "no markers yet" case instead of a dead gap under Shortcuts:
+    // a centered call-to-action card restating the K hotkey and the + Add button. Registered in
+    // pathPanels for the Path/Follow switch; render() additionally hides it once st.count > 0.
+    var pathEmpty = mk('Panel', inspector);
+    pathPanels.push(pathEmpty);
+    pathEmpty.style.width = '100%'; pathEmpty.style.marginTop = '12px';
+    pathEmpty.style.flowChildren = 'down'; pathEmpty.style.borderRadius = '6px';
+    pathEmpty.style.border = '1px solid ' + S.cardBorder;
+    pathEmpty.style.backgroundColor = '#ffffff05';
+    pathEmpty.style.paddingTop = '26px'; pathEmpty.style.paddingBottom = '26px';
+    pathEmpty.style.paddingLeft = '18px'; pathEmpty.style.paddingRight = '18px';
+    var peGlyph = lbl(pathEmpty, '◈', S.accent, 26);
+    peGlyph.style.horizontalAlign = 'center';
+    var peTitle = lbl(pathEmpty, 'No cameras placed yet', S.value, 14);
+    peTitle.style.fontWeight = 'bold'; peTitle.style.horizontalAlign = 'center'; peTitle.style.marginTop = '10px';
+    var peBody = lbl(pathEmpty, 'Fly the free cam and press  K  to drop your first camera, or use  + Add  above. Place 2+ cameras to build a dolly path.', S.dim, 11);
+    peBody.style.horizontalAlign = 'center'; peBody.style.textAlign = 'center';
+    peBody.style.whiteSpace = 'normal'; peBody.style.width = '100%'; peBody.style.marginTop = '6px';
 )EDJS"

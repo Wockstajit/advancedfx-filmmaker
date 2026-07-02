@@ -229,20 +229,20 @@ R"TLJS(
         return -1;
       }
       var hosted = !!(st && st.hosted);
+      var cfgOpenBar = !!(st && st.configOpen);
       var oldMouse = host.FindChildTraverse && host.FindChildTraverse('CamCursorBtn');
       var oldEditor = host.FindChildTraverse && host.FindChildTraverse('CamEditorBtn');
-      // Camera Editor open: the whole native demo bar is hidden and the editor draws its own
-      // Camera Timeline / Graph tab bar at the bottom. Suppress our injected MOUSE / CAM EDITOR
-      // buttons entirely -- this also removes the CAM EDITOR toggle while the editor is open, so
-      // there is no way to accidentally flip back to the broken native-timeline state.
-      if (hosted) {
-        try { if (oldMouse) oldMouse.visible = false; } catch (hm) {}
-        try { if (oldEditor) oldEditor.visible = false; } catch (he) {}
-        return;
-      }
-      if ((!oldMouse && oldEditor) || (oldMouse && oldEditor && childIndex(oldMouse) > childIndex(oldEditor))) {
+      var oldConfig = host.FindChildTraverse && host.FindChildTraverse('ConfigBtn');
+      var oldSwap = host.FindChildTraverse && host.FindChildTraverse('ModeSwapBtn');
+      // Ordering guard (MOUSE -> CAM EDITOR -> CONFIG): if any of the three is missing while a
+      // later one exists, or any pair is out of order, delete them all and rebuild next frame.
+      var badOrder = (!oldMouse && (oldEditor || oldConfig)) || (!oldEditor && oldConfig)
+        || (oldMouse && oldEditor && childIndex(oldMouse) > childIndex(oldEditor))
+        || (oldEditor && oldConfig && childIndex(oldEditor) > childIndex(oldConfig));
+      if (badOrder) {
         try { if (oldMouse) oldMouse.DeleteAsync(0); } catch (orderErr1) {}
-        try { oldEditor.DeleteAsync(0); } catch (orderErr2) {}
+        try { if (oldEditor) oldEditor.DeleteAsync(0); } catch (orderErr2) {}
+        try { if (oldConfig) oldConfig.DeleteAsync(0); } catch (orderErr3) {}
         return;
       }
       function nativeBtn(id, text, onactivate) {
@@ -264,6 +264,26 @@ R"TLJS(
         b.__lbl.text = text;
         return b;
       }
+      // Workspace open (Camera Editor hosted OR Config): the standalone MOUSE / CAM EDITOR /
+      // CONFIG buttons collapse into ONE swap button that flips to the OTHER workspace --
+      // Config shows "CAM EDITOR" (gold), the editor's Regular Timeline shows "CONFIG" (blue).
+      // The workspaces provide their own mouse toggle (G / inspector button), so the injected
+      // MOUSE button must NOT appear in the bar while either is open.
+      if (hosted || cfgOpenBar) {
+        try { if (oldMouse) oldMouse.visible = false; } catch (hm) {}
+        try { if (oldEditor) oldEditor.visible = false; } catch (he) {}
+        try { if (oldConfig) oldConfig.visible = false; } catch (hc) {}
+        var sb = nativeBtn('ModeSwapBtn', cfgOpenBar ? 'CAM EDITOR' : 'CONFIG', function () {
+          // Read the CURRENT state at click time (one shared handler for both directions).
+          if (st && st.configOpen) cmd('mirv_filmmaker editor on');
+          else cmd('mirv_filmmaker config on');
+        });
+        sb.style.backgroundColor = cfgOpenBar ? '#f0b32333' : '#4aa3ff33';
+        sb.__lbl.style.color = cfgOpenBar ? S.accent : S.freeze;
+        sb.visible = true;
+        return;
+      }
+      try { if (oldSwap) oldSwap.visible = false; } catch (hsw) {}
       var mb = nativeBtn('CamCursorBtn', 'MOUSE (G)', function () { cmd('mirv_filmmaker camtl cursor toggle'); });
       var curOn = !!(st && st.cursor);
       mb.style.backgroundColor = curOn ? '#c92a2acc' : '#ffffff14';
@@ -273,6 +293,12 @@ R"TLJS(
       cb.style.backgroundColor = '#f0b32333';
       cb.__lbl.style.color = S.accent;
       cb.visible = true;
+      // CONFIG: the lightweight UI/display settings panel (ConfigHud), BLUE so the two
+      // workspaces read as distinct siblings.
+      var gb = nativeBtn('ConfigBtn', 'CONFIG', function () { cmd('mirv_filmmaker config toggle'); });
+      gb.style.backgroundColor = '#4aa3ff33';
+      gb.__lbl.style.color = S.freeze;
+      gb.visible = true;
     }
 
     // Legacy cleanup hook: if an older build hid native HUD siblings, restore them. The
@@ -282,7 +308,7 @@ R"TLJS(
     // also makes them direct ctx children like CamEditorRoot, so they must be whitelisted here too
     // or this "Hide All" sweep force-hides them the instant they open (no visible symptom besides
     // the popup silently vanishing -- it never goes through closeSettings(), so nothing logs it).
-    var OURS = { 'CamTimelineRoot': 1, 'MarkerHudRoot': 1, 'MovieHudRoot': 1, 'CamEditorRoot': 1, 'GraphExpRoot': 1, 'CamEditorConfirmRoot': 1, 'CamEditorSettingsRoot': 1 };
+    var OURS = { 'CamTimelineRoot': 1, 'MarkerHudRoot': 1, 'MovieHudRoot': 1, 'CamEditorRoot': 1, 'GraphExpRoot': 1, 'CamEditorConfirmRoot': 1, 'CamEditorSettingsRoot': 1, 'ConfigHudRoot': 1, 'ConfigSettingsRoot': 1 };
     var VIEWPORT_HUD_ROOTS = {
       'HudBottomGradient': 1,
       'HudInWorld': 1,
@@ -724,13 +750,15 @@ R"TLJS(
       // Editor's "Regular Timeline" bottom mode = hosted with neither the camera overlay (st.open)
       // nor the graph (st.graphExp) active. There the native CS2 demo bar IS the bottom editor.
       var nativeMode = hosted && !st.open && !st.graphExp;
-      // While hosted, the editor's UI-visibility picker chooses how much gameplay HUD shows
-      // (default 'hidden'); when not hosted the game HUD is fully restored.
-      applyHudView(hosted ? (st.hudView || 'hidden') : 'full');
+      // While hosted, the editor's UI-visibility picker chooses how much gameplay HUD shows;
+      // the lightweight Config panel (ConfigHud) shares the SAME picker state and wants it
+      // applied while it is open too. When neither is up the game HUD is fully restored.
+      var cfgOpen = !!st.configOpen;
+      applyHudView((hosted || cfgOpen) ? (st.hudView || 'full') : 'full');
       // Move the native CS2 gameplay HUD into the same preview rect as the rendered game.
       // This includes radar, score, player strip, health/ammo, inventory and death notices,
       // while excluding our editor/timeline chrome and the docked native demo bar.
-      applyGameHudViewport(hosted && !!st.hudScale && (st.hudView || 'hidden') !== 'hidden', st.previewRect);
+      applyGameHudViewport((hosted || cfgOpen) && !!st.hudScale && (st.hudView || 'full') !== 'hidden', st.previewRect);
       // Native demo bar visibility: SHOWN in Regular Timeline mode (and in normal play); hidden when
       // a camera/graph overlay is up, our standalone panel is open, or a clean preview frame is
       // needed. Done up here -- BEFORE the hosted-layout early-return below -- so it never flashes
@@ -775,7 +803,18 @@ R"TLJS(
         panel.style.border = '1px solid ' + S.panelBorder;
         panel.style.boxShadow = '#000000cc 0px 0px 12px 2px';
         applyLayout(LABELW + W_DEFAULT); // restore the standalone default width
-        nativeUndock(); // restore the native demo bar to full width / centre (pixel-perfect on exit)
+        // Config panel open (not hosted): dock the native demo bar to fit left of the Config
+        // inspector (same width as the editor's Regular Timeline mode); otherwise restore the
+        // native demo bar to full width / centre (pixel-perfect on exit).
+        if (cfgOpen) {
+          var crsx = root.actualuiscale_x || ctx.actualuiscale_x || 1;
+          var crawW = root.actuallayoutwidth || 0; if (crawW < 16) crawW = ctx.actuallayoutwidth || 0;
+          var crw = crawW / crsx;
+          var cBarW = (crw > EDITOR_INSPECTOR_W) ? Math.floor(crw - EDITOR_INSPECTOR_W) : 0;
+          if (cBarW > 0) nativeDock(cBarW);
+        } else {
+          nativeUndock();
+        }
       }
 
       var graphExp = !!st.graphExp;

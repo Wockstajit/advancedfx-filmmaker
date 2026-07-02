@@ -326,6 +326,9 @@ target_sources(${PROJECT_NAME} PRIVATE
     Filmmaker/Panorama/CameraTimelineJs.h
     Filmmaker/Panorama/CameraEditorHud.cpp
     Filmmaker/Panorama/CameraEditorHud.h
+    Filmmaker/Panorama/ConfigHud.cpp
+    Filmmaker/Panorama/ConfigHud.h
+    Filmmaker/Panorama/ConfigHudJs.h
     Filmmaker/Panorama/CameraEditorCustomizeState.cpp
     Filmmaker/Panorama/CameraEditorCustomizeState.h
     Filmmaker/Panorama/CameraEditorJs.h

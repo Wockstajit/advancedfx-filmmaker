@@ -28,6 +28,8 @@ inline const char* kGraphEditorJs = R"GEJS(
       grid: '#ffffff10', gridMid: '#ffffff20', label: '#9aa4b0ff', value: '#eef2f6ff',
       dim: '#6b7480ff', accent: '#f0b323ff', sel: '#ffffffff', playhead: '#ff5a5aee',
       btnBg: '#ffffff14', btnOn: '#f0b32333', handle: '#ffffffcc',
+      dangerBg: '#c92a2a26', dangerBorder: '#c92a2a66', // destructive-button tint (matches CameraEditorJs)
+      rowOn: '#ffffff0c',
       font: 'Stratum2, "Arial Unicode MS"'
     };
     var LEFTW = 236, HEADER_H = 64, RULER_H = 26, FOOTER_H = 26;
@@ -169,6 +171,8 @@ R"GEJS(
     var redoBtn = btn(rowBot, '↻ Redo', function () { cmd('redo'); }, S.value); redoBtn.style.verticalAlign = 'center';
     var delBtn = btn(rowBot, '✕ Delete Key', function () { if (st && st.selCount > 0) cmd('delsel'); }, S.playhead);
     delBtn.style.verticalAlign = 'center'; delBtn.style.marginRight = '0px';
+    // Destructive treatment: red-tinted fill + border, not just red text on the same gray pill.
+    delBtn.style.backgroundColor = S.dangerBg; delBtn.style.border = '1px solid ' + S.dangerBorder;
     // No "Exit Experiment" button: the graph editor is the default curve editor now, opened and
     // closed with the Camera Editor workspace (use the inspector's Exit). Standalone toggle is
     // still available via the `mirv_filmmaker grapheditor off` console command.
@@ -178,7 +182,7 @@ R"GEJS(
     // contents FLOW horizontally + center vertically -- so the swatch / name / value / eye always
     // share one line. (Positioning each element by absolute Y inside the tall column drifted the
     // labels out of their rows.)
-    var ROWS_Y0 = RULER_H + 24, ROW_H = 31, VALW = 64, EYEW = 24;
+    var ROWS_Y0 = RULER_H + 24, ROW_H = 34, VALW = 64, EYEW = 24;
     var EYE_X = LEFTW - 8 - EYEW, VAL_X = EYE_X - 6 - VALW;
     var left = mk('Panel', dock); left.style.position = '0px ' + HEADER_H + 'px 0px';
     left.style.width = LEFTW + 'px'; left.style.backgroundColor = S.panel;
@@ -198,8 +202,8 @@ R"GEJS(
       var hot = mk('Panel', rowP); hot.hittest = true; hot.style.flowChildren = 'right';
       hot.style.width = 'fill-parent-flow(1.0)'; hot.style.height = '100%'; hot.style.borderRadius = '3px';
       hot.SetPanelEvent('onactivate', function () { var m = chById(c); cmd('chan ' + c + ' ' + (m && m.solo ? 'unsolo' : 'solo')); });
-      var sw = mk('Panel', hot); sw.hittest = false; sw.style.width = '10px'; sw.style.height = '10px';
-      sw.style.verticalAlign = 'center'; sw.style.marginLeft = '2px'; sw.style.marginRight = '8px'; sw.style.borderRadius = '2px';
+      var sw = mk('Panel', hot); sw.hittest = false; sw.style.width = '12px'; sw.style.height = '12px';
+      sw.style.verticalAlign = 'center'; sw.style.marginLeft = '2px'; sw.style.marginRight = '9px'; sw.style.borderRadius = '3px';
       var nm = lbl(hot, '', S.value, 12); nm.hittest = false; nm.style.verticalAlign = 'center';
       var val = lbl(rowP, '-', S.accent, 12); val.hittest = false; val.style.width = VALW + 'px';
       val.style.textAlign = 'right'; val.style.verticalAlign = 'center'; val.style.fontWeight = 'bold'; val.style.marginRight = '6px';
@@ -621,7 +625,7 @@ R"GEJS(
         r.val.style.color = ch.edit ? S.accent : S.dim;
         r.eye.style.backgroundColor = ch.vis ? S.btnOn : S.btnBg;
         r.eyeL.style.color = ch.vis ? S.accent : S.dim;
-        r.hot.style.backgroundColor = (c === activeCh) ? '#ffffff0c' : 'rgba(0,0,0,0)';
+        r.hot.style.backgroundColor = (c === activeCh) ? S.rowOn : 'rgba(0,0,0,0)';
       }
     }
 

@@ -99,6 +99,8 @@ void CameraTimelineHud::Teardown() {
 bool GraphEditorExperiment_Enabled();
 const char* CameraEditor_HudViewName(); // declared in Filmmaker.cpp; game-HUD visibility while hosted
 bool CameraEditor_ScaledHud(float& x0, float& y0, float& x1, float& y1); // scaled-preview rect + active
+bool ConfigHud_Enabled(); // declared in ConfigHud.cpp; the Game UI picker also applies while Config is open
+bool ConfigHud_ScaledHud(float& x0, float& y0, float& x1, float& y1); // Config panel's scaled-preview rect
 
 std::string CameraTimelineHud::BuildStateJson() {
 	CameraPath& cp = CameraPathRef();
@@ -116,12 +118,17 @@ std::string CameraTimelineHud::BuildStateJson() {
 	o << "{";
 	o << "\"open\":" << (m_visible ? "true" : "false");
 	o << ",\"hosted\":" << (m_editorHosted ? "true" : "false");
+	o << ",\"configOpen\":" << (ConfigHud_Enabled() ? "true" : "false"); // Config panel wants the hudView applied too
 	o << ",\"hudView\":\"" << CameraEditor_HudViewName() << "\""; // game-HUD visibility while hosted
 	{
 		// Scaled-preview rect + active flag, so the JS scales the native game HUD into the same
-		// rect the world blit uses (HUD then lines up with the shrunk world preview).
+		// rect the world blit uses (HUD then lines up with the shrunk world preview). The
+		// Config panel publishes its own rect through the identical contract; the two panels
+		// are mutually exclusive so at most one of these is active.
 		float sx0 = 0, sy0 = 0, sx1 = 0, sy1 = 0;
-		const bool hudScale = CameraEditor_ScaledHud(sx0, sy0, sx1, sy1);
+		bool hudScale = CameraEditor_ScaledHud(sx0, sy0, sx1, sy1);
+		if (!hudScale)
+			hudScale = ConfigHud_ScaledHud(sx0, sy0, sx1, sy1);
 		o << ",\"hudScale\":" << (hudScale ? "true" : "false");
 		o << ",\"previewRect\":[" << sx0 << "," << sy0 << "," << sx1 << "," << sy1 << "]";
 	}

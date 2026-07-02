@@ -1913,8 +1913,14 @@ R"EDJS(
       publishCustomizeOpenState();
     }
     function closeCustomize() {
-      var wasOpen = custOverlay.visible; // closeCustomize() is also called every non-UI-mouse render()
-      // frame as a safety net (see render()'s `if (!cur)` branch) -- only log/act on a REAL close.
+      // closeCustomize() is also called EVERY frame as a safety net while the modal "shouldn't"
+      // be open (render()'s `if (!cur)` branch, and its `if (!onPlayer)` branch whenever the mirv
+      // free cam is on -- which stays on after a Follow "Live" preview stops, or after any camera
+      // path place/preview). When the modal is already closed this must be a TRUE no-op: the
+      // unconditional closeAllDrops() below was tearing down every OTHER customDrop popup (Follow
+      // inspector Type/Target/Attach/Source/Event) on the very frame it opened, which read as
+      // "the dropdowns stop working after leaving Live mode".
+      if (!custOverlay.visible) return;
       closeAllDrops();
       destroyPreview3d();
       custOverlay.visible = false;
@@ -1924,7 +1930,7 @@ R"EDJS(
       custTouched = { agent: false, primary: false, secondary: false, knife: false, gloves: false };
       custDirty = false;
       publishCustomizeOpenState();
-      if (wasOpen) previewLog('close');
+      previewLog('close'); // always a REAL close now (the early-return above filters no-ops)
     }
     var customizeDrops = { agent: agentDrop, primary: primaryDrop, secondary: secondaryDrop, knife: knifeDrop, gloves: glovesDrop };
 )EDJS"

@@ -3,6 +3,7 @@
 #include "CameraEditorJs.h"
 #include "CameraEditorCustomizeState.h"
 #include "CameraTimelineHud.h"
+#include "ConfigHud.h" // ConfigHud_Enabled: don't clear the shared viewport-scaler request while Config owns it
 #include "GraphEditorExperimentHud.h"
 #include "MovieHud.h"
 #include "../Movie/CameraPath.h"
@@ -170,8 +171,10 @@ void CameraEditorHud::OnExit() {
 	// purpose now (they follow the player through the whole demo). Closing the editor no longer
 	// clears them; use "mirv_filmmaker cosmetics clear" or the Customize modal to remove them.
 
-	// Drop any pending scaled-preview blit so the next full-screen frame renders normally.
-	AfxViewportScaler::SetRequest(false, 0, 0, 0, 0);
+	// Drop any pending scaled-preview blit so the next full-screen frame renders normally --
+	// unless the Config panel is taking over the viewport scaler (editor -> config switch).
+	if (!ConfigHud_Enabled())
+		AfxViewportScaler::SetRequest(false, 0, 0, 0, 0);
 
 	Teardown();
 }
@@ -301,7 +304,7 @@ void CameraEditorHud::RunFrame() {
 	// the gameplay HUD hidden or the timeline orphaned.
 	if (!hud) {
 		if (m_wasEnabled) { m_enabled = false; OnExit(); m_wasEnabled = false; }
-		else AfxViewportScaler::SetRequest(false, 0, 0, 0, 0);
+		else if (!ConfigHud_Enabled()) AfxViewportScaler::SetRequest(false, 0, 0, 0, 0);
 		m_built = false; m_root = nullptr; m_hudPanel = nullptr;
 		return;
 	}
@@ -313,19 +316,22 @@ void CameraEditorHud::RunFrame() {
 	else if (!m_enabled && m_wasEnabled) { OnExit(); m_wasEnabled = false; }
 
 	if (!m_enabled && !m_debugOverlay) {
-		AfxViewportScaler::SetRequest(false, 0, 0, 0, 0);
+		// ConfigHud (which ran earlier this frame) may own the scaler request now -- leave it.
+		if (!ConfigHud_Enabled())
+			AfxViewportScaler::SetRequest(false, 0, 0, 0, 0);
 		return;
 	}
 
 	if (!m_enabled && m_debugOverlay) {
+		const bool configOwnsScaler = ConfigHud_Enabled();
 		if (!BuildIfNeeded()) {
-			AfxViewportScaler::SetRequest(false, 0, 0, 0, 0);
+			if (!configOwnsScaler) AfxViewportScaler::SetRequest(false, 0, 0, 0, 0);
 			return;
 		}
 		m_root = FindRoot();
 		if (!m_root) {
 			m_built = false;
-			AfxViewportScaler::SetRequest(false, 0, 0, 0, 0);
+			if (!configOwnsScaler) AfxViewportScaler::SetRequest(false, 0, 0, 0, 0);
 			return;
 		}
 		std::string state = BuildStateJson();
@@ -334,7 +340,7 @@ void CameraEditorHud::RunFrame() {
 			m_lastState = state;
 		}
 		m_bridge.RunScript("$.CamEditor && $.CamEditor.render();");
-		AfxViewportScaler::SetRequest(false, 0, 0, 0, 0);
+		if (!configOwnsScaler) AfxViewportScaler::SetRequest(false, 0, 0, 0, 0);
 		return;
 	}
 
