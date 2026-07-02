@@ -28,10 +28,13 @@ namespace Filmmaker {
 //   53  CameraEditor root      (CameraEditorJs.h)        - editor chrome/backdrop (below timeline)
 //   55  CameraTimeline root    (CameraTimelineJs.h)      - timeline bar (sits on the editor backdrop)
 //   60  MarkerHud root         (MarkerHudJs.h)           - BO2-style marker-edit menu
-//   65  GraphEditor root       (GraphEditorJs.h)         - experimental graph overlay (always on top)
+//   65  GraphEditor root       (GraphEditorJs.h)         - experimental graph overlay
+//   220 CamEditorConfirmRoot   (CameraEditorJs.h)        - "clear all" confirm modal (above ALL HUD roots;
+//                                                          as a child of the z53 root it hid behind z55/z65)
+//   221 CamEditorSettingsRoot  (CameraEditorJs.h)        - gear settings fly-out (same reason)
 //
 // In-root local layers (children, scoped to their own root - do NOT collide cross-root):
-//   150 CameraEditor debug overlay,  200 CameraEditor "clear all" confirm modal,
+//   150 CameraEditor debug overlay,
 //   100 FilmmakerGui search popup (main-menu context, separate panel).
 // ===========================================================================
 

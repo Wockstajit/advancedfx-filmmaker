@@ -194,6 +194,12 @@ void initCosmeticsOffsets()
 	getOffset(&g_clientDllOffsets.C_CSPlayerPawn.m_hHudModelArms, "client.dll", "C_CSPlayerPawn", "m_hHudModelArms");
 	getOffset(&g_clientDllOffsets.C_CSPlayerPawn.m_nEconGlovesChanged, "client.dll", "C_CSPlayerPawn", "m_nEconGlovesChanged");
 	getOffset(&g_clientDllOffsets.C_CSPlayerPawn.m_flLastSpawnTimeIndex, "client.dll", "C_CSPlayerPawnBase", "m_flLastSpawnTimeIndex");
+	// Flashbang whiteout fields for the Customize-modal flash suppression. Optional/non-fatal;
+	// try the base class first, then the derived pawn class (schema moved fields before).
+	if (!getOffset(&g_clientDllOffsets.C_CSPlayerPawn.m_flFlashMaxAlpha, "client.dll", "C_CSPlayerPawnBase", "m_flFlashMaxAlpha"))
+		getOffset(&g_clientDllOffsets.C_CSPlayerPawn.m_flFlashMaxAlpha, "client.dll", "C_CSPlayerPawn", "m_flFlashMaxAlpha");
+	if (!getOffset(&g_clientDllOffsets.C_CSPlayerPawn.m_flFlashDuration, "client.dll", "C_CSPlayerPawnBase", "m_flFlashDuration"))
+		getOffset(&g_clientDllOffsets.C_CSPlayerPawn.m_flFlashDuration, "client.dll", "C_CSPlayerPawn", "m_flFlashDuration");
 	// Read-only model-state chain (agent/player-model display). Off the `ok` chain: a missing field
 	// just disables the agent read, not the whole skin-changer. Guarded by != 0 at the read site.
 	getOffset(&g_clientDllOffsets.ModelChain.m_CBodyComponent, "client.dll", "C_BaseEntity", "m_CBodyComponent");

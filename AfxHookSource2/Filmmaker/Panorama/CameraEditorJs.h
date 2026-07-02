@@ -42,7 +42,9 @@ inline const char* kCameraEditorJs = R"EDJS(
       font: 'Stratum2, "Arial Unicode MS"'
     };
     var INSPECTOR_W = 430, BOTTOM_H = 176, BOTTOM_LIFT = 28;
-    var TAB_BAR_H = 34, TAB_GAP = 4; // bottom-editor tab bar (DIVIDER above the active editor) height + gap
+    // 42px: the tab buttons are ~30px tall (14px bold text + 12px padding) and the bar has 8px of
+    // its own padding -- at the old 34px the button labels were clipped at the bottom.
+    var TAB_BAR_H = 42, TAB_GAP = 4; // bottom-editor tab bar (DIVIDER above the active editor) height + gap
     var NATIVE_BAR_H = 96;  // fallback height for CS2's native demo bar (measured at runtime when shown)
     var GRAPH_DOCK_H = 556; // experimental graph-editor dock height; when open it REPLACES the timeline
                             // and fills the whole bottom (keep in sync with GraphEditorJs DOCK_H).
@@ -61,8 +63,13 @@ R"EDJS(
     var root = $.CreatePanel('Panel', ctx, 'CamEditorRoot', {});
     root.hittest = false; root.style.width = '100%'; root.style.height = '100%'; root.style.zIndex = '53'; // z-layer map: PanoramaBridge.h
 
-    var confirmOverlay = mk('Panel', root); confirmOverlay.visible = false; confirmOverlay.hittest = true;
-    confirmOverlay.style.width = '100%'; confirmOverlay.style.height = '100%'; confirmOverlay.style.zIndex = '200';
+    // TOP-LEVEL root (sibling of CamEditorRoot, NOT a child): a child z-index is local to its
+    // parent, so as a z200 child of the z53 editor root this modal rendered BEHIND the Graph
+    // editor root (z65) and the timeline root (z55). Own root at z220 wins over every HUD root.
+    // Deleted alongside CamEditorRoot in CameraEditorHud::Teardown.
+    var confirmOverlay = $.CreatePanel('Panel', ctx, 'CamEditorConfirmRoot', {});
+    confirmOverlay.visible = false; confirmOverlay.hittest = true;
+    confirmOverlay.style.width = '100%'; confirmOverlay.style.height = '100%'; confirmOverlay.style.zIndex = '220';
     confirmOverlay.style.backgroundColor = 'rgba(0,0,0,0.72)';
     confirmOverlay.SetPanelEvent('onactivate', function () { hideClearConfirm(); });
     var confirmBox = mk('Panel', confirmOverlay); confirmBox.hittest = true;
@@ -188,9 +195,13 @@ R"EDJS(
     }
 )EDJS"
 R"EDJS(
-    var settingsOverlay = mk('Panel', root); settingsOverlay.visible = false; settingsOverlay.hittest = true;
-    settingsOverlay.style.width = '100%'; settingsOverlay.style.height = '100%'; settingsOverlay.style.zIndex = '210';
-    settingsOverlay.SetPanelEvent('onactivate', function () { closeSettings(); });
+    // TOP-LEVEL root for the same reason as confirmOverlay above: as a z210 child of the z53
+    // editor root it rendered behind the Graph (z65) / timeline (z55) roots, so the gear menu
+    // was covered whenever those bottom editors were open. Deleted in Teardown with the rest.
+    var settingsOverlay = $.CreatePanel('Panel', ctx, 'CamEditorSettingsRoot', {});
+    settingsOverlay.visible = false; settingsOverlay.hittest = true;
+    settingsOverlay.style.width = '100%'; settingsOverlay.style.height = '100%'; settingsOverlay.style.zIndex = '221';
+    settingsOverlay.SetPanelEvent('onactivate', function () { closeSettings('bgClick'); });
     var settingsCard = mk('Panel', settingsOverlay); settingsCard.hittest = true;
     settingsCard.style.width = '360px'; settingsCard.style.horizontalAlign = 'right'; settingsCard.style.verticalAlign = 'bottom';
     settingsCard.style.marginRight = '16px'; settingsCard.style.marginBottom = (BOTTOM_H + 16) + 'px';
@@ -252,9 +263,19 @@ R"EDJS(
       setToggle(doaTog, rdInt('cl_trueview_show_doa_predictions') !== 0, tvOn);
       setToggle(mismatchTog, predict >= 2, tvOn);
     }
-    function openSettings() { closeAllDrops(); refreshSettings(); settingsOverlay.visible = true; gearBtn.style.backgroundColor = S.btnOn; }
-    function closeSettings() { settingsOverlay.visible = false; gearBtn.style.backgroundColor = S.btnBg; }
-    function toggleSettings() { if (settingsOverlay.visible) closeSettings(); else openSettings(); }
+    function openSettings() {
+      closeAllDrops(); refreshSettings(); settingsOverlay.visible = true; gearBtn.style.backgroundColor = S.btnOn;
+      if (mvmDebugOn()) $.Msg('[camsettings] open\n');
+    }
+    function closeSettings(why) {
+      // Diagnostic for the "popup won't stay open" report: log WHICH call site closed it and the
+      // state at that instant, gated on mvm_debug so it's silent otherwise (see CameraEditorCustomizeJs.h
+      // previewLog for the same pattern). Only logs when it was actually open (skips no-op closes).
+      if (mvmDebugOn() && settingsOverlay.visible)
+        $.Msg('[camsettings] close why=' + (why || '?') + ' en=' + (st && st.enabled) + ' cur=' + (st && st.cursor) + '\n');
+      settingsOverlay.visible = false; gearBtn.style.backgroundColor = S.btnBg;
+    }
+    function toggleSettings() { if (settingsOverlay.visible) closeSettings('gearReclick'); else openSettings(); }
 )EDJS"
 #include "CameraEditorCustomizeJs.h"
 R"EDJS(
@@ -351,31 +372,10 @@ R"EDJS(
 #include "CameraEditorDebugJs.h"
 R"EDJS(
     // =====================================================================
-    // The native CS2 demo controller's "End Playback" button (#EndPlayback) stops the demo
-    // and dumps the user out -- unwanted while film-making. It lives in the same HUD tree we
-    // render into, so reach it with FindChildTraverse and force it hidden while the editor is
-    // open; restore it when the editor closes. Cached; re-resolved if the panel goes stale.
-    var nativeEndBtn = null, nativeGearBtn = null;
-    function setNativeEndHidden(hide) {
-      try {
-        if (!nativeEndBtn || !nativeEndBtn.IsValid || !nativeEndBtn.IsValid()) {
-          nativeEndBtn = ctx.FindChildTraverse ? ctx.FindChildTraverse('EndPlayback') : null;
-          nativeGearBtn = null;
-        }
-        if (nativeEndBtn) {
-          nativeEndBtn.visible = !hide;
-          // The native demo-bar gear (#SettingsButton) opens CS2's own X-Ray/True View panel,
-          // which our ⚙ menu now replaces -- hide it too. Scope the lookup to the demo
-          // controller's ControlRow (EndPlayback's parent) so we don't hit a same-named panel
-          // elsewhere in the HUD.
-          if (!nativeGearBtn || !nativeGearBtn.IsValid || !nativeGearBtn.IsValid()) {
-            var crow = nativeEndBtn.GetParent ? nativeEndBtn.GetParent() : null;
-            nativeGearBtn = (crow && crow.FindChildTraverse) ? crow.FindChildTraverse('SettingsButton') : null;
-          }
-          if (nativeGearBtn) nativeGearBtn.visible = !hide;
-        }
-      } catch (e) {}
-    }
+    // The native CS2 demo controller's "End Playback" button and its own gear (X-Ray/True View
+    // panel, replaced by our ⚙ menu) are hidden PERMANENTLY now -- not just while this editor is
+    // open -- see CameraTimelineJs.h patchNativeBar(), which runs every frame from demo start
+    // regardless of editor state (this workspace doesn't even exist until first opened).
 
     var st = null;
     var api = {};
@@ -402,11 +402,30 @@ R"EDJS(
     api.customizeOpenPicker = function (slot) { populateCustomize(); var d = customizeDrops[slot]; if (d && d.open) d.open(); return slot || ''; };
     api.customizeOpenWear = function (slot) { populateCustomize(); var d = wearDrops[slot]; if (d && d.open) d.open(); return slot || ''; };
     api.customizeSearch = function (slot, query) { populateCustomize(); var d = customizeDrops[slot]; if (d && d.setSearch) { d.setSearch(query || ''); d.open(); } return query || ''; };
+    // Captured-input pipe from CameraEditorHud (WndProc-thread wheel + WM_CHAR, forwarded on the main
+    // thread). custWheel/custChars are hoisted function declarations in CameraEditorCustomizeJs.h.
+    api.custWheel = function (n, x, y) { return custWheel(n, x, y); };
+    api.custChars = function (csv) { return custChars(csv); };
     api.customizeOptions = function (slot) {
       slot = (slot || '').toString().replace(/^\s+|\s+$/g, '');
       var arr = decoratedOptions(slot), sample = [];
       for (var i = 0; i < arr.length && i < 12; i++) sample.push({ label: arr[i][0], value: arr[i][1], meta: arr[i][2] || {} });
       return JSON.stringify({ slot: slot, count: arr.length, sample: sample });
+    };
+    api.customizePickFirst = function (slot) {
+      slot = (slot || '').toString().replace(/^\s+|\s+$/g, '');
+      var arr = decoratedOptions(slot), value = '';
+      for (var i = 0; i < arr.length; i++) {
+        var v = '' + arr[i][1];
+        if (!v || v === 'default' || v === 'ct_default' || v === 't_default') continue;
+        if ((slot === 'primary' || slot === 'secondary') && (v === '0' || /:0$/.test(v))) continue;
+        if ((slot === 'knife' || slot === 'gloves') && /:0$/.test(v)) continue;
+        value = v;
+        break;
+      }
+      if (!value && arr.length) value = '' + arr[0][1];
+      if (value) pickCosmetic(slot, value);
+      return JSON.stringify({ slot: slot, value: value, sel: custSel, wear: custWear, preview: previewState() });
     };
     // Apply/Cancel/Reset/Clear test hooks for the staged Finish/Wear/Agent/Gloves picks (see
     // markTouched/commitTouchedSlots in CameraEditorCustomizeJs.h) -- lets netcon automation drive the
@@ -419,11 +438,38 @@ R"EDJS(
         visible: !!custOverlay.visible, target: custTargetIndex, key: custTargetKey, name: custTargetName,
         team: normalizeTeamName(custTargetTeam), activeWeaponDef: custActiveWeaponDef, activeWeaponSlot: custActiveWeaponSlot,
         loadout: custLoadout, sel: custSel, wear: custWear, itemWear: custItemWear, preview: previewState(),
+        previewGeom: previewGeom(),
         touched: custTouched, dirty: custDirty, applyTarget: applyLabelTarget(),
-        pickup: { active: custActiveWeaponPickup, ownerSteamId: custActiveWeaponOwnerSteam, ownerName: custActiveWeaponOwnerName }
+        pickup: { active: custActiveWeaponPickup, ownerSteamId: custActiveWeaponOwnerSteam, ownerName: custActiveWeaponOwnerName },
+        // Slot-level pickup/warning state (entity ownership; survives grenade/knife switches).
+        pickupSlots: {
+          primary: { pickup: slotPickup('primary'), ownerSteamId: slotOwnerSteam('primary'), ownerName: slotOwnerName('primary') },
+          secondary: { pickup: slotPickup('secondary'), ownerSteamId: slotOwnerSteam('secondary'), ownerName: slotOwnerName('secondary') },
+          warned: pickupSlots(), banner: !!custPickupBanner.visible
+        }
       });
     };
     api.previewInfo = function () { return previewState(); };
+    // Debug hooks for the gear settings fly-out (mirrors the previewInfo/previewCall pattern):
+    //   mirv_filmmaker editor eval $.Msg($.CamEditor.toggleSettings()+String.fromCharCode(10));
+    //   mirv_filmmaker editor eval $.Msg($.CamEditor.settingsGeom()+String.fromCharCode(10));
+    api.toggleSettings = function () { toggleSettings(); return settingsOverlay.visible ? 'open' : 'closed'; };
+    api.settingsGeom = function () {
+      var p = settingsCard.GetPositionWithinWindow ? settingsCard.GetPositionWithinWindow() : null;
+      var gp = gearBtn.GetPositionWithinWindow ? gearBtn.GetPositionWithinWindow() : null;
+      return JSON.stringify({
+        ov: !!settingsOverlay.visible, cv: !!settingsCard.visible,
+        mb: settingsCard.style.marginBottom, mr: settingsCard.style.marginRight,
+        card: p ? { x: p.x, y: p.y, w: p.width, h: p.height } : null,
+        gear: gp ? { x: gp.x, y: gp.y, w: gp.width, h: gp.height } : null
+      });
+    };
+    api.previewFit = function (json) { return previewFit(json); };
+    // Click-and-drag preview repositioning (user-driven, live): drag inside the preview box to nudge
+    // the character, then call previewSave('start') while zoomed out or previewSave('zoom') while
+    // zoomed in to bake it; previewPanReset() discards an in-progress drag without saving.
+    api.previewSave = function (which) { return previewSavePosition(which); };
+    api.previewPanReset = function () { return previewPanReset(); };
     // Live A/B of the preview SCENE preset (0=match_mvp, 1=vanity, 2=loadout-grid) without a
     // rebuild, so the HUD-compatible scene can be confirmed by eye over netcon:
     //   mirv_filmmaker editor eval $.Msg($.CamEditor.previewTry(0)+String.fromCharCode(10));
@@ -458,10 +504,9 @@ R"EDJS(
       root.visible = !!(st.enabled || st.debug);
       if (!st.enabled) {
         closeAllDrops();
-        closeSettings();
+        closeSettings('notEnabled');
         closeCustomize();
         customizeBtn.visible = false;
-        setNativeEndHidden(false);
         confirmOverlay.visible = false;
         catcher.hittest = false;
         tag.visible = false;
@@ -481,13 +526,14 @@ R"EDJS(
       }
       inspector.visible = true;
       tabBar.visible = true;
-      setNativeEndHidden(true); // keep CS2's "End Playback" button suppressed while editing
 
       // UI-cursor gating: panels are only clickable in UI-mouse mode; in GAME mode the
       // mouse flies the free cam and Panorama receives no clicks anyway.
       var cur = !!st.cursor;
-      if (!cur) { closeAllDrops(); closeSettings(); closeCustomize(); } // can't click popups in GAME-mouse mode; don't leave them hanging
+      if (!cur) { closeAllDrops(); closeSettings('noCursor'); closeCustomize(); } // can't click popups in GAME-mouse mode; don't leave them hanging
       repositionOpenDrop(); // keep an open popup glued to its field while a scroll container moves it
+      custScrollMaintain();  // size + clamp the modal's manual-scroll viewports (right column + open dropdown)
+      previewUpdateDrag();   // click-and-drag preview panning (reads the live OS-cursor pipe in st.mx/my/lmb)
       publishCustomizeOpenState(); // safety net: covers visibility flips that skip open/closeCustomize
       catcher.hittest = cur;
       inspector.hittest = cur;
@@ -750,6 +796,20 @@ R"EDJS(
       tabBar.style.position = '0px 0px 0px';
       tabBar.style.marginTop = Math.floor(tabY) + 'px';
       tabBar.style.marginBottom = '0px';
+      // Keep the gear settings card glued right above the gear button: bottom edge just above the
+      // tab bar's top (which moves with whichever editor is docked below), right edge aligned to
+      // the bar's right end (the bar stops at the inspector, so a plain screen-right anchor would
+      // put the card over the inspector instead of over the gear).
+      // CLAMP to keep the whole card on-screen: the card is bottom-anchored and grows UPWARD, so when
+      // a tall editor is docked below (e.g. the graph editor) an unclamped "glue above the tab bar"
+      // marginBottom pushed the card's TOP off the top of the screen -- the gear toggled the overlay
+      // visible but nothing was on screen ("gear reacts but no panel appears"). Cap marginBottom so
+      // the card top stays within the viewport, using its real laid-out height when available.
+      var scMB = Math.max(0, rh - tabY) + 8;
+      var scH = (settingsCard.actuallayoutheight || 0) / rsy;
+      if (scH > 8 && rh > scH + 16) scMB = Math.min(scMB, rh - scH - 8);
+      settingsCard.style.marginBottom = Math.floor(Math.max(8, scMB)) + 'px';
+      settingsCard.style.marginRight = (INSPECTOR_W + 16) + 'px';
       // In Regular Timeline mode the native CS2 bar (a LOWER-z HUD root) is the editor: our opaque
       // backdrop (z53) would HIDE the bar if it covered it, and our full-screen catcher would eat the
       // bar's clicks -- so the catcher shrinks to the preview area (the scaler blacks the rest).

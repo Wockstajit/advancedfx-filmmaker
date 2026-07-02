@@ -16,4 +16,8 @@ std::string BuildCustomizeTargetJson(int pawnIndex);
 // { "<pawnIndex>": <BuildCustomizeTargetJson>, ... } for every currently valid player pawn.
 std::string BuildCustomizePlayersJson();
 
+// Zeroes every pawn's flashbang whiteout fields for this frame. Called per main-thread frame by
+// CameraEditorHud while the Customize modal is open so the flash overlay never covers the modal.
+void CustomizeSuppressFlashTick();
+
 } // namespace Filmmaker

@@ -9,6 +9,7 @@
 #include "../Movie/CameraBridge.h"
 #include "../Movie/FollowCamera.h"
 #include "../Cosmetics/CosmeticOverrideSystem.h"
+#include "../Cosmetics/CosmeticDebugLog.h" // Filmmaker::MvmDebugLog_Active (gates JS preview diagnostics)
 
 #include "../../DeathMsg.h" // AfxHookSource2_GetPanoramaHudPanel + PanoramaUIPanel offsets
 #include "../../ClientEntitySystem.h" // AfxGetLocalObserverState (spectator gating for Customize)
@@ -105,7 +106,8 @@ bool CameraEditorHud::BuildIfNeeded() {
 void CameraEditorHud::Teardown() {
 	if (m_built && m_hudPanel && m_bridge.ContextPanel()) {
 		m_bridge.RunScript(
-			"(function(){var e=$('#CamEditorRoot'); if(e) e.DeleteAsync(0); var d=$('#CamEditorDebugRoot'); if(d) d.DeleteAsync(0); $.CamEditor=null;})();");
+			"(function(){var e=$('#CamEditorRoot'); if(e) e.DeleteAsync(0); var d=$('#CamEditorDebugRoot'); if(d) d.DeleteAsync(0);"
+			" var c=$('#CamEditorConfirmRoot'); if(c) c.DeleteAsync(0); var s=$('#CamEditorSettingsRoot'); if(s) s.DeleteAsync(0); $.CamEditor=null;})();");
 	}
 	m_built = false;
 	m_root = nullptr;
@@ -223,6 +225,26 @@ std::string CameraEditorHud::BuildStateJson() {
 	o << ",\"cursor\":" << (tl.Cursor() ? "true" : "false");
 	o << ",\"tick\":" << curTick;
 	o << ",\"time\":" << r2(curTime);
+	bool paused = false;
+	if (g_pEngineToClient) {
+		if (auto pDemo = g_pEngineToClient->GetDemoFile())
+			paused = pDemo->IsDemoPaused();
+	}
+	o << ",\"paused\":" << (paused ? "true" : "false");
+	// So the Customize preview's JS-side diagnostics (previewLog, see CameraEditorCustomizeJs.h) only
+	// fire while `mvm_debug start` is active -- reuses the existing session log instead of adding a
+	// second debug toggle; running `mvm_debug start` while the modal is open now also captures rich
+	// preview state (selection, model paths, item ids, panel geometry) via the tier0 console capture.
+	o << ",\"mvmDebug\":" << (Filmmaker::MvmDebugLog_Active() ? "true" : "false");
+	// Live OS-cursor pipe (reused from the experimental graph editor's drag mechanism -- Panorama has
+	// no mouse-move event in this in-game HUD context, so CameraBridge_GetUiCursor polls GetCursorPos
+	// each frame + edge-captures button state from the WndProc; see main.cpp g_UiCursorProbe). Lets the
+	// Customize preview implement click-and-drag panning entirely in JS without any new C++ plumbing.
+	{
+		int cmx = 0, cmy = 0; bool clmb = false, crmb = false, cshift = false; unsigned cseq = 0;
+		CameraBridge_GetUiCursor(cmx, cmy, clmb, crmb, cshift, cseq);
+		o << ",\"mx\":" << cmx << ",\"my\":" << cmy << ",\"lmb\":" << (clmb ? "true" : "false") << ",\"mseq\":" << cseq;
+	}
 	o << ",\"count\":" << n;
 	o << ",\"selected\":" << sel;
 	o << ",\"interp\":\"" << cp.InterpName() << "\"";
@@ -354,10 +376,19 @@ void CameraEditorHud::RunFrame() {
 	// as the single source of truth shared with the D3D blit.
 	m_bridge.RunScript("$.CamEditor && $.CamEditor.render();");
 
+	// Feed any wheel/typed-character input captured off the WndProc thread into the modal JS (only
+	// does work while the modal is open + something is queued). Runs after render() so the panel it
+	// scrolls/filters is laid out for this frame.
+	DispatchCustomizeInput();
+
 	// TRUE scaled preview: forward the rect render() just published to the viewport scaler.
 	// The blit only actually runs engine-side when not recording (full-screen capture wins).
 	UpdateScaleRequest();
 	UpdateCustomizeModalState();
+	// While the Customize modal is up, keep the flashbang whiteout suppressed so it never washes
+	// out the modal UI or the 3D player preview (the flash post-effect covers Panorama too).
+	if (m_customizeOpen)
+		CustomizeSuppressFlashTick();
 }
 
 // Reads the "previewrect" fractions the editor JS published this frame and forwards them to
@@ -396,6 +427,44 @@ void CameraEditorHud::UpdateScaleRequest() {
 	}
 
 	AfxViewportScaler::SetRequest(active, x0, y0, x1, y1);
+}
+
+void CameraEditorHud::PushCustomizeWheel(int notches, int x, int y) {
+	if (notches == 0) return;
+	std::lock_guard<std::mutex> lk(m_custInputMutex);
+	if (m_custWheelEvents.size() < 128)
+		m_custWheelEvents.push_back({ notches, x, y });
+}
+
+void CameraEditorHud::PushCustomizeChar(unsigned charCode) {
+	std::lock_guard<std::mutex> lk(m_custInputMutex);
+	// Guard against a stuck/huge backlog if the modal ever stops draining (it drains every frame).
+	if (m_custChars.size() < 512) m_custChars.push_back(charCode);
+}
+
+// Main thread. Drain the wheel + typed-character queue captured off the WndProc thread and hand it
+// to the modal JS. Batches per frame: one custWheel(net) call and one custChars('c,c,...') call.
+void CameraEditorHud::DispatchCustomizeInput() {
+	std::vector<CustomizeWheelEvent> wheels;
+	std::vector<unsigned> chars;
+	{
+		std::lock_guard<std::mutex> lk(m_custInputMutex);
+		wheels.swap(m_custWheelEvents);
+		chars.swap(m_custChars);
+	}
+	if (!m_root) return;
+	for (const CustomizeWheelEvent& ev : wheels) {
+		std::ostringstream o;
+		o << "$.CamEditor && $.CamEditor.custWheel(" << ev.notches << "," << ev.x << "," << ev.y << ");";
+		m_bridge.RunScript(o.str().c_str());
+	}
+	if (!chars.empty()) {
+		std::ostringstream o;
+		o << "$.CamEditor && $.CamEditor.custChars('";
+		for (size_t i = 0; i < chars.size(); ++i) { if (i) o << ','; o << chars[i]; }
+		o << "');";
+		m_bridge.RunScript(o.str().c_str());
+	}
 }
 
 // Reads the "customizeopen" flag the Customize modal's openCustomize()/closeCustomize()/render()

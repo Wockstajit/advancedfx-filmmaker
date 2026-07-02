@@ -28,7 +28,7 @@ public:
 	// --- input taps (WndProc / input thread). Return true if consumed. ---
 	bool OnKey(int vkey, bool down);
 	bool OnMouseButton(int button, bool down); // 0 = left, 1 = right
-	bool OnMouseWheel(int delta, bool shiftDown, bool ctrlDown);
+	bool OnMouseWheel(int delta, bool shiftDown, bool ctrlDown, int x = -1, int y = -1);
 
 	// --- main thread ---
 	void FlushActions();

@@ -505,6 +505,15 @@ LRESULT CALLBACK new_Afx_WindowProc(
 		g_MirvInputEx.m_MirvInput->Supply_Focus(LOWORD(wParam) != 0);
 		break;
 	case WM_CHAR:
+		// Customize modal open: the in-game HUD does not hand a Panorama TextEntry real keyboard
+		// focus, so route the typed character straight into the modal's search JS and SWALLOW it so
+		// the game never acts on it (no bind, no console). This is what makes the dropdown search
+		// boxes typeable. WM_CHAR already carries control codes we care about (8 backspace, 13 enter,
+		// 27 escape) so the JS handles those too.
+		if(Filmmaker::CameraEditor_CustomizeModalOpen()) {
+			Filmmaker::CameraEditor_CustomizePushChar((unsigned)wParam);
+			return 0;
+		}
 		if(g_MirvInputEx.m_MirvInput->Supply_CharEvent(wParam, lParam))
 			return 0;
 		break;
@@ -525,8 +534,12 @@ LRESULT CALLBACK new_Afx_WindowProc(
 	case WM_MOUSEWHEEL:
 		// Plain scroll = camera-mode cycle; in free cam, Shift+scroll = cam speed
 		// (handled by the director); otherwise defer to MirvInput (FOV).
-		if(Filmmaker::MovieInput_OnMouseWheel(GET_WHEEL_DELTA_WPARAM(wParam), (GetKeyState(VK_SHIFT) & 0x8000) != 0, (GetKeyState(VK_CONTROL) & 0x8000) != 0))
-			return 0;
+		{
+			POINT pt = { (int)(short)LOWORD(lParam), (int)(short)HIWORD(lParam) };
+			ScreenToClient(hwnd, &pt);
+			if(Filmmaker::MovieInput_OnMouseWheel(GET_WHEEL_DELTA_WPARAM(wParam), (GetKeyState(VK_SHIFT) & 0x8000) != 0, (GetKeyState(VK_CONTROL) & 0x8000) != 0, pt.x, pt.y))
+				return 0;
+		}
 		if (g_MirvInputEx.m_MirvInput->Supply_MouseEvent(uMsg, wParam, lParam))
 			return 0;
 		break;

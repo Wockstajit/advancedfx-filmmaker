@@ -67,20 +67,24 @@ void MovieMode::EnqueueCmd(const std::string& c) {
 	m_cmdQueue.push_back(c);
 }
 
-bool MovieMode::OnMouseWheel(int delta, bool shiftDown, bool ctrlDown) {
+bool MovieMode::OnMouseWheel(int delta, bool shiftDown, bool ctrlDown, int x, int y) {
 	if (!IsDemoActive())
 		return false;
 	if (delta == 0)
 		return false;
 
-	// Customize modal open: CONSUME the wheel (return true) so it never reaches the game. Returning
-	// false let main.cpp's WndProc fall through to CallWindowProcW, where CS2's native demo
-	// spectator handler treats the wheel as "switch spectated player / cycle first-third person" --
-	// that is the "scrolling switches players & perspective behind the modal" bug. Consuming stops
-	// that dead. Scroll the modal's column by DRAGGING its scrollbar (a click-drag, which still
-	// reaches Panorama); the wheel is intentionally inert over the modal so it can't move the demo.
-	if (CameraEditor_CustomizeModalOpen())
+	// Customize modal open: the modal is an EXCLUSIVE surface, exactly like the editor's UI-mouse
+	// mode -- NOTHING may reach the game. In the in-game HUD, letting the wheel fall through to CS2
+	// still drives the demo spectator (switch player / cycle first-third person) even when a Panorama
+	// scroll container is under the cursor -- Panorama does not take the wheel away from the game
+	// here. So we CONSUME it (return true -> main.cpp `return 0` before CallWindowProcW) and forward
+	// the notch into the modal's JS, which scrolls its own right column / open dropdown list itself
+	// (manual transform-scroll, see CameraEditorCustomizeJs.h custWheel). Net: the list scrolls and
+	// the demo behind the modal never moves.
+	if (CameraEditor_CustomizeModalOpen()) {
+		CameraEditor_CustomizePushWheel(delta > 0 ? +1 : -1, x, y);
 		return true;
+	}
 
 	// In the director FREE CAM the wheel drives the camera when a modifier is held:
 	//   Ctrl+scroll  = FOV zoom -- up = zoom in (lower FOV), down = zoom out (higher FOV),
@@ -165,6 +169,8 @@ bool MovieMode::OnMouseButton(int button, bool down) {
 bool MovieMode::OnKey(int vkey, bool down) {
 	if (vkey == kVK_CONTROL) {
 		m_controlDown = down;
+		// Modal open: swallow Ctrl too so no game bind (duck, etc.) fires behind it.
+		if (IsDemoActive() && CameraEditor_CustomizeModalOpen()) return true;
 		return false;
 	}
 	// Track Shift for chord detection (Ctrl+Shift+Z = redo). Don't return -- Shift still drives
@@ -174,13 +180,13 @@ bool MovieMode::OnKey(int vkey, bool down) {
 	if (!IsDemoActive())
 		return false; // director keys only act while a demo plays
 
-	// Customize modal open: swallow ONLY the demo-TRANSPORT keys (Space pause/resume, Left/Right
-	// seek) so they can't move the demo behind the modal. Everything else falls through -- letters
-	// and digits must reach Panorama so the dropdown search boxes and the custom-float wear text
-	// entry keep working (a key consumed here `return 0`s in the WndProc before Panorama sees it,
-	// which would break typing). Consumed with NO action, so Space simply does nothing here.
-	if (CameraEditor_CustomizeModalOpen()
-		&& (vkey == kVK_SPACE || vkey == kVK_LEFT || vkey == kVK_RIGHT))
+	// Customize modal open: swallow EVERY key so NOTHING reaches the game -- no demo transport, no
+	// weapon/movement binds, no spectator change, no pause menu. The modal is an exclusive input
+	// surface like the editor's UI-mouse mode. Typed text is delivered separately: main.cpp forwards
+	// WM_CHAR to the modal JS (CameraEditor_CustomizePushChar), because CS2 does not give an in-game
+	// HUD Panorama TextEntry real keyboard focus -- so we drive the search boxes ourselves rather
+	// than hoping the keystroke reaches Panorama. Consumed with NO game action here.
+	if (CameraEditor_CustomizeModalOpen())
 		return true;
 
 	// Swallow OS keyboard AUTO-REPEAT for Space: held Space streams WM_KEYDOWN (down=true)

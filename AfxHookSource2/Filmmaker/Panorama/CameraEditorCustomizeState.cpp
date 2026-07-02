@@ -2,6 +2,7 @@
 
 #include "../../ClientEntitySystem.h"
 #include "../../SchemaSystem.h"
+#include "../Cosmetics/CosmeticDebugLog.h" // mvm_debug lines for flash suppression + pickup state
 
 #include "../../../deps/release/prop/AfxHookSource/SourceSdkShared.h"
 #include "../../../deps/release/prop/cs2/sdk_src/public/cdll_int.h"
@@ -74,7 +75,11 @@ struct CustomizeWeaponInfo {
 	int defIndex = 0;
 	int paintKit = 0;
 	float wear = 0.0f;
+	uint64_t ownerXuid = 0; // original owner (m_OriginalOwnerXuid*); 0 = unknown/unavailable
 };
+
+uint64_t ReadWeaponOwnerXuid(int weaponEntityIndex);
+const char* NameForSteamId(uint64_t steamId);
 
 constexpr int kPaintKitAttributeId = 6;
 constexpr int kPaintWearAttributeId = 8;
@@ -224,6 +229,7 @@ bool ReadWeaponInfo(int entityIndex, CustomizeWeaponInfo& out) {
 	out.defIndex = defIndex;
 	out.paintKit = ReadItemAttributeInt(itemView, kPaintKitAttributeId, *(int32_t*)(w + offsets.C_EconEntity.m_nFallbackPaintKit));
 	out.wear = ReadItemAttributeFloat(itemView, kPaintWearAttributeId, *(float*)(w + offsets.C_EconEntity.m_flFallbackWear));
+	out.ownerXuid = ReadWeaponOwnerXuid(entityIndex);
 	return true;
 }
 
@@ -293,18 +299,31 @@ bool ReadGloveInfo(CEntityInstance* pawn, CustomizeWeaponInfo& out) {
 	return true;
 }
 
-void WriteWeaponSlotJson(std::ostringstream& o, const char* name, const CustomizeWeaponInfo& info) {
-	o << ",\"" << name << "\":";
+// Emits one loadout slot's JSON body, including per-slot pickup ownership (only meaningful for
+// primary/secondary -- knives/gloves can't be picked up from another player, so allowPickup=false
+// keeps them permanently warning-free). pickup is derived from the WEAPON ENTITY's original-owner
+// xuid vs the HOLDER's steam id, so it stays correct regardless of which weapon is actively held.
+void WriteWeaponSlotBody(std::ostringstream& o, const CustomizeWeaponInfo& info, uint64_t holderSteamId, bool allowPickup) {
 	if (info.defIndex <= 0) {
 		o << "null";
 		return;
 	}
+	const bool pickup = allowPickup && holderSteamId != 0 && info.ownerXuid != 0 && info.ownerXuid != holderSteamId;
+	const char* ownerName = pickup ? NameForSteamId(info.ownerXuid) : nullptr;
 	o << "{";
 	o << "\"entityIndex\":" << info.entityIndex;
 	o << ",\"defIndex\":" << info.defIndex;
 	o << ",\"paintKit\":" << info.paintKit;
 	o << ",\"wear\":" << r2(info.wear);
+	o << ",\"pickup\":" << (pickup ? "true" : "false");
+	o << ",\"ownerSteamId\":\"" << (pickup ? std::to_string(info.ownerXuid) : "") << "\"";
+	o << ",\"ownerName\":\"" << JsonEscape(ownerName ? ownerName : "") << "\"";
 	o << "}";
+}
+
+void WriteWeaponSlotJson(std::ostringstream& o, const char* name, const CustomizeWeaponInfo& info, uint64_t holderSteamId, bool allowPickup) {
+	o << ",\"" << name << "\":";
+	WriteWeaponSlotBody(o, info, holderSteamId, allowPickup);
 }
 
 // Reads the player's agent/player-model path (read-only) via the model-state chain, for the modal's
@@ -422,14 +441,9 @@ std::string BuildCustomizeTargetJson(int pawnIndex) {
 	o << ",\"activeWeaponPickup\":" << (activeWeaponPickup ? "true" : "false");
 	o << ",\"weapons\":{";
 	o << "\"primary\":";
-	if (loadout[0].defIndex > 0) {
-		o << "{\"entityIndex\":" << loadout[0].entityIndex << ",\"defIndex\":" << loadout[0].defIndex
-			<< ",\"paintKit\":" << loadout[0].paintKit << ",\"wear\":" << r2(loadout[0].wear) << "}";
-	} else {
-		o << "null";
-	}
-	WriteWeaponSlotJson(o, "secondary", loadout[1]);
-	WriteWeaponSlotJson(o, "knife", loadout[2]);
+	WriteWeaponSlotBody(o, loadout[0], steamId, true);
+	WriteWeaponSlotJson(o, "secondary", loadout[1], steamId, true);
+	WriteWeaponSlotJson(o, "knife", loadout[2], steamId, false);
 	CustomizeWeaponInfo gloveInfo;
 	const bool hasGloves = ReadGloveInfo(pawn, gloveInfo);
 	o << ",\"gloves\":";
@@ -444,6 +458,37 @@ std::string BuildCustomizeTargetJson(int pawnIndex) {
 	o << ",\"agentModel\":\"" << JsonEscape(agentModel) << "\"";
 	o << "}";
 	return o.str();
+}
+
+// Zeroes the flashbang whiteout fields (m_flFlashMaxAlpha / m_flFlashDuration) on every player
+// pawn. Called once per main-thread frame by CameraEditorHud while the Customize modal is open, so
+// the flash post-effect never washes out the customizer UI or the 3D preview. Demo playback
+// re-networks these fields, so normal flash behavior resumes once the modal closes and playback
+// continues. Offsets are optional: unresolved fields (0) silently disable the suppression.
+void CustomizeSuppressFlashTick() {
+	const ClientDllOffsets_t& o = g_clientDllOffsets;
+	if (o.C_CSPlayerPawn.m_flFlashMaxAlpha == 0 && o.C_CSPlayerPawn.m_flFlashDuration == 0)
+		return;
+	const int highest = GetHighestEntityIndex();
+	for (int i = 0; i <= highest; ++i) {
+		CEntityInstance* pawn = EntityFromIndex(i);
+		if (!pawn || !pawn->IsPlayerPawn())
+			continue;
+		unsigned char* p = (unsigned char*)pawn;
+		__try {
+			bool zeroed = false;
+			if (o.C_CSPlayerPawn.m_flFlashMaxAlpha != 0) {
+				float* v = (float*)(p + o.C_CSPlayerPawn.m_flFlashMaxAlpha);
+				if (*v != 0.0f) { *v = 0.0f; zeroed = true; }
+			}
+			if (o.C_CSPlayerPawn.m_flFlashDuration != 0) {
+				float* v = (float*)(p + o.C_CSPlayerPawn.m_flFlashDuration);
+				if (*v != 0.0f) { *v = 0.0f; zeroed = true; }
+			}
+			if (zeroed)
+				MvmDebugLog_Linef("customize.flash", "suppressed flash on pawn %d (customize modal open)", i);
+		} __except (1) {}
+	}
 }
 
 std::string BuildCustomizePlayersJson() {

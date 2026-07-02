@@ -263,7 +263,7 @@ void Shutdown() {
 // --- Movie director input taps (forward to the MovieMode singleton) ---
 bool MovieInput_OnKey(int vkey, bool down) { return MovieModeRef().OnKey(vkey, down); }
 bool MovieInput_OnMouseButton(int button, bool down) { return MovieModeRef().OnMouseButton(button, down); }
-bool MovieInput_OnMouseWheel(int delta, bool shiftDown, bool ctrlDown) { return MovieModeRef().OnMouseWheel(delta, shiftDown, ctrlDown); }
+bool MovieInput_OnMouseWheel(int delta, bool shiftDown, bool ctrlDown, int x, int y) { return MovieModeRef().OnMouseWheel(delta, shiftDown, ctrlDown, x, y); }
 
 // --- HUD panel show/hide ---
 void MovieHud_Set(bool visible) { MovieHudRef().SetVisible(visible); }
@@ -326,6 +326,8 @@ bool CameraEditor_ScaledHud(float& x0, float& y0, float& x1, float& y1) {
 	return e.ScaledHudActive();
 }
 bool CameraEditor_CustomizeModalOpen() { return CameraEditorHudRef().CustomizeModalOpen(); }
+void CameraEditor_CustomizePushWheel(int notches, int x, int y) { CameraEditorHudRef().PushCustomizeWheel(notches, x, y); }
+void CameraEditor_CustomizePushChar(unsigned charCode) { CameraEditorHudRef().PushCustomizeChar(charCode); }
 
 // --- Camera-path preview: HUD masked (Tab) -> MovieHud hides itself this frame ---
 bool CameraPath_PreviewHudHidden() { return CameraPathRef().PreviewHudHidden(); }

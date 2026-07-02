@@ -59,6 +59,15 @@ R"EDJS(
       } catch (e) {}
       return '';
     }
+    // Item id for MapPlayerPreviewPanel equips. Prefer CS2's own faux-id builder, but keep the
+    // local high-bit faux-id fallback so staged catalog picks still drive the preview if the
+    // InventoryAPI helper is unavailable in the HUD context.
+    function previewEquipItemId(meta) {
+      var id = econItemId(meta);
+      if (id) return '' + id;
+      var faux = fauxFromMeta(meta);
+      return faux ? ('' + faux) : '';
+    }
 
     // Stub dataset: { key:value, ... } -> [label, value, {color, img}] options. Phase 2 swaps
     // this for a real JSON catalog generated from items_game.txt/csgo_english.txt. The shape is
@@ -112,6 +121,10 @@ R"EDJS(
     };
     var custItemWear = {};
     var custWearUpdating = false;
+    var custSearchDisplayGuard = false; // true while WE set a search TextEntry's .text (skip its change handler)
+    var custColScroll = { off: 0 };     // right control-column manual scroll offset (px), driven by custWheel
+    var CUST_DROP_VIEW_MAX = 300;       // max px height of a dropdown's scrollable row viewport
+    var CUST_SCROLL_STEP = 64;          // px scrolled per wheel notch
     var custTargetIndex = -1, custTargetName = 'Player', custTargetTeam = '';
     var custTargetKey = 'pawn:-1', custActiveWeaponDef = 0, custActiveWeaponSlot = '', custDisplayedLoadoutSig = '';
     var custActiveWeaponPickup = false, custActiveWeaponOwnerSteam = '', custActiveWeaponOwnerName = '';
@@ -202,13 +215,18 @@ R"EDJS(
       var pop = mk('Panel', root); pop.visible = false; pop.hittest = true;
       pop.style.position = '0px 0px 0px'; pop.style.zIndex = '420'; pop.style.flowChildren = 'down';
       pop.style.backgroundColor = '#0e1620fa'; pop.style.border = '1px solid ' + S.accent;
-      pop.style.borderRadius = '4px'; pop.style.overflow = 'squish scroll'; pop.style.maxHeight = '360px';
+      // overflow: clip (NOT native scroll). The wheel is consumed in C++ and routed here, so the row
+      // list scrolls MANUALLY -- rec.rows is translated inside rec.rowsView (a clipped viewport), sized
+      // every frame by sizeOpenDrop(). Native `overflow: scroll` wouldn't help: its scrollbar can't be
+      // driven from a C++-forwarded notch, and the raw wheel is blocked before Panorama sees it.
+      pop.style.overflow = 'clip';
+      pop.style.borderRadius = '4px';
       pop.style.boxShadow = '#000000d0 0px 4px 14px 2px';
       var rec = {
         field: field, disp: disp, caret: caret, pop: pop, onPick: onPick, opts: [], sig: '', img: img, swatch: swatch,
-        query: '', kind: kind, searchable: opts.searchable !== false
+        query: '', kind: kind, searchable: opts.searchable !== false, search: null, rows: null, rowsView: null, scrollOff: 0
       };
-      field.SetPanelEvent('onactivate', function () { if (opts.category) setActiveCategory(opts.category); toggleDrop(rec); });
+      field.SetPanelEvent('onactivate', function () { if (opts.category) setActiveCategory(opts.category); rec.scrollOff = 0; toggleDrop(rec); });
       customDrops.push(rec);
 )EDJS"
 R"EDJS(
@@ -264,36 +282,64 @@ R"EDJS(
         target.style.backgroundColor = (meta && meta.color) ? meta.color : '#0c0f14';
         target.style.border = '1px solid #ffffff14';
       }
+      // One popup ROW. Kept separate so the keystroke path (rebuildRows) can refill the list
+      // without touching the persistent search TextEntry.
+      function buildRow(o) {
+        if (rec.query && (o[0] || '').toLowerCase().indexOf(rec.query) < 0) return;
+        var meta = o[2] || {};
+        var prow = mk('Panel', rec.rows); prow.hittest = true; prow.style.width = '100%'; prow.style.flowChildren = 'right';
+        prow.style.paddingTop = '5px'; prow.style.paddingBottom = '5px'; prow.style.paddingLeft = '6px'; prow.style.paddingRight = '10px';
+        prow.style.verticalAlign = 'middle'; prow.style.borderLeft = '3px solid ' + (meta.color || '#00000000');
+        if (meta.selected) prow.style.backgroundColor = S.btnOn;
+        if (rec.kind !== 'wear') {
+          var sw = mk('Panel', prow); sw.hittest = false; sw.style.width = '46px'; sw.style.height = '30px'; sw.style.marginRight = '9px';
+          sw.style.verticalAlign = 'center'; sw.style.borderRadius = '3px'; sw.style.border = '1px solid #ffffff14';
+          applySwatch(sw, meta);
+        }
+        var t = lbl(prow, o[0], meta.color || '#e6eaef', 14); t.hittest = false; t.style.verticalAlign = 'center';
+        t.style.width = 'fill-parent-flow(1.0)'; t.style.whiteSpace = 'nowrap'; t.style.textOverflow = 'ellipsis'; t.style.fontWeight = 'bold';
+        prow.SetPanelEvent('onactivate', function () { closeAllDrops(); rec.onPick(o[1]); });
+      }
+      // Refill ONLY the rows container from the current query. Called on every keystroke, so it must
+      // NOT rebuild the popup (that would destroy the focused search box). The search TextEntry is
+      // left untouched, so focus + caret survive and typing flows continuously.
+      function rebuildRows() {
+        if (!rec.rows || !rec.rows.IsValid || !rec.rows.IsValid()) return;
+        rec.rows.RemoveAndDeleteChildren();
+        for (var i = 0; i < rec.opts.length; i++) buildRow(rec.opts[i]);
+      }
+      // FULL popup rebuild: lays out the persistent search box + an empty rows container ONCE, then
+      // fills the rows. Runs only when the option SET changes (see update()'s sig, which no longer
+      // includes rec.query) -- never per keystroke. The old code called this from ontextentrychange,
+      // which RemoveAndDeleteChildren'd the search TextEntry mid-edit: focus was lost and every
+      // character after the first was dropped, so the dropdown search was effectively unusable.
+      rec.rebuildRows = rebuildRows; // exposed so the C++-routed typing path (custChars) can refilter
       function rebuild() {
         rec.pop.RemoveAndDeleteChildren();
+        rec.search = null; rec.rows = null; rec.rowsView = null; rec.scrollOff = 0;
         if (rec.searchable) {
+          // Display-only box: it shows the query, but the CHARACTERS come from custChars() (C++ WM_CHAR
+          // route), not from Panorama keyboard focus. ontextentrychange is kept as a fallback for hosts
+          // that DO deliver keys, guarded so our own programmatic .text writes don't double-process.
           var search = $.CreatePanel('TextEntry', rec.pop, id + 'Search', { placeholder: 'Search' });
           search.style.width = '100%'; search.style.height = '34px'; search.style.marginBottom = '4px';
           search.style.backgroundColor = '#101823'; search.style.border = '1px solid #ffffff24';
           search.style.color = S.value; search.style.fontSize = '14px'; search.style.paddingLeft = '8px';
-          try { search.text = rec.query || ''; } catch (e) {}
+          try { custSearchDisplayGuard = true; search.text = rec.query || ''; custSearchDisplayGuard = false; } catch (e) {}
           search.SetPanelEvent('ontextentrychange', function () {
+            if (custSearchDisplayGuard) return;
             try { rec.query = (search.text || '').toLowerCase(); } catch (e) { rec.query = ''; }
-            rebuild();
-            try { search.SetFocus(); } catch (e2) {}
+            rebuildRows(); // refill rows only -- keep this TextEntry alive/focused
           });
+          rec.search = search;
         }
-        for (var i = 0; i < rec.opts.length; i++) (function (o) {
-          if (rec.query && (o[0] || '').toLowerCase().indexOf(rec.query) < 0) return;
-          var meta = o[2] || {};
-          var prow = mk('Panel', rec.pop); prow.hittest = true; prow.style.width = '100%'; prow.style.flowChildren = 'right';
-          prow.style.paddingTop = '5px'; prow.style.paddingBottom = '5px'; prow.style.paddingLeft = '6px'; prow.style.paddingRight = '10px';
-          prow.style.verticalAlign = 'middle'; prow.style.borderLeft = '3px solid ' + (meta.color || '#00000000');
-          if (meta.selected) prow.style.backgroundColor = S.btnOn;
-          if (rec.kind !== 'wear') {
-            var sw = mk('Panel', prow); sw.hittest = false; sw.style.width = '46px'; sw.style.height = '30px'; sw.style.marginRight = '9px';
-            sw.style.verticalAlign = 'center'; sw.style.borderRadius = '3px'; sw.style.border = '1px solid #ffffff14';
-            applySwatch(sw, meta);
-          }
-          var t = lbl(prow, o[0], meta.color || '#e6eaef', 14); t.hittest = false; t.style.verticalAlign = 'center';
-          t.style.width = 'fill-parent-flow(1.0)'; t.style.whiteSpace = 'nowrap'; t.style.textOverflow = 'ellipsis'; t.style.fontWeight = 'bold';
-          prow.SetPanelEvent('onactivate', function () { closeAllDrops(); rec.onPick(o[1]); });
-        })(rec.opts[i]);
+        // Clipped viewport (height sized to content up to a cap by sizeOpenDrop) holding the row list,
+        // which is transform-translated to scroll.
+        rec.rowsView = mk('Panel', rec.pop); rec.rowsView.hittest = true;
+        rec.rowsView.style.width = '100%'; rec.rowsView.style.overflow = 'clip'; rec.rowsView.style.flowChildren = 'down';
+        rec.rows = mk('Panel', rec.rowsView); rec.rows.hittest = true;
+        rec.rows.style.width = '100%'; rec.rows.style.flowChildren = 'down';
+        rebuildRows();
       }
       return {
         dd: field,
@@ -323,7 +369,10 @@ R"EDJS(
             rec.field.style.border = '1px solid ' + (meta.color || '#ffffff2e');
             applySwatch(rec.swatch, meta);
           }
-          var sig = ''; for (var k = 0; k < rec.opts.length; k++) sig += rec.opts[k][0] + '|'; sig += '#' + selValue + '#' + rec.query;
+          // The sig tracks the OPTION SET + selection only -- NOT rec.query. A query change filters
+          // rows via rebuildRows() (from the search box) and must never force a full rebuild(), or it
+          // would tear down the focused search TextEntry mid-typing.
+          var sig = ''; for (var k = 0; k < rec.opts.length; k++) sig += rec.opts[k][0] + '|'; sig += '#' + selValue;
           if (sig !== rec.sig) { rec.sig = sig; rebuild(); }
         },
         // 'wear' kind only: sets the value text + meter fill directly (update() above only feeds the
@@ -331,9 +380,17 @@ R"EDJS(
         updateWear: function (valueLabel, fraction, color) {
           if (kind !== 'wear') return;
           valueTxt.text = valueLabel;
-          meterFill.style.width = Math.round(clamp01(fraction) * 100) + '%';
-          meterFill.style.backgroundColor = color || S.accent;
-          field.style.border = '1px solid ' + (color || '#ffffff2e');
+          // Full-width smooth gradient: the skin's rarity color from the left up to the wear value,
+          // blending into black for the remainder (white washed out against light rarity colors).
+          // Factory New = a sliver of color then black; Battle-Scarred = mostly color with a little
+          // black. The blend band (+-10%) keeps the transition soft instead of a hard fill edge.
+          var f = clamp01(fraction);
+          var c = color || S.accent;
+          var lo = Math.max(0, f - 0.10), hi = Math.min(1, f + 0.10);
+          meterFill.style.width = '100%';
+          meterFill.style.backgroundColor = 'gradient( linear, 0% 0%, 100% 0%, from( ' + c + ' ), color-stop( '
+            + lo.toFixed(3) + ', ' + c + ' ), color-stop( ' + hi.toFixed(3) + ', #0c0f14 ), to( #0c0f14 ) )';
+          field.style.border = '1px solid ' + (c || '#ffffff2e');
         }
       };
     }
@@ -399,25 +456,236 @@ R"EDJS(
     prevWrap.style.backgroundColor = '#080a0e'; prevWrap.style.borderRadius = '6px'; prevWrap.style.border = '1px solid #ffffff14';
     prevWrap.style.flowChildren = 'down';
     prevWrap.style.overflow = 'clip';
-    // Stage holds the 3D/2D preview and fills all space above the Rotate/Zoom/Pan helper row (a
+    // Stage holds the 3D/2D preview and fills all space above the single wheel-zoom helper row (a
     // fixed-height sibling); fill-parent-flow(1.0) here is the same remaining-space pattern custBody
     // uses against custHead/custPickupBanner above. The near-black backdrop + inner border stand in
     // for a vignette -- Panorama has no CSS gradient support to verify here (see sigscan.py note).
     var prevStage = mk('Panel', prevWrap); prevStage.style.width = '100%'; prevStage.style.height = 'fill-parent-flow(1.0)';
     prevStage.style.flowChildren = 'down'; prevStage.style.overflow = 'clip';
+    // Single hint: the only preview interaction is wheel-to-zoom while hovering the character (no
+    // rotate/pan). The wheel is captured in C++ and routed to custWheel, which zooms when the cursor
+    // is over this stage (see overPreview/zoomPreview) instead of scrolling the control column.
     var prevHelperRow = mk('Panel', prevWrap); prevHelperRow.hittest = false;
     prevHelperRow.style.width = '100%'; prevHelperRow.style.height = '38px'; prevHelperRow.style.flowChildren = 'right';
     prevHelperRow.style.horizontalAlign = 'center'; prevHelperRow.style.verticalAlign = 'center';
     prevHelperRow.style.backgroundColor = '#00000055'; prevHelperRow.style.borderTop = '1px solid #ffffff14';
-    function prevHelperItem(icon, text) {
+    (function () {
       var it = mk('Panel', prevHelperRow); it.style.flowChildren = 'right'; it.style.verticalAlign = 'center';
-      it.style.marginLeft = '16px'; it.style.marginRight = '16px';
-      var ic = lbl(it, icon, S.dim, 13); ic.style.marginRight = '6px'; ic.style.verticalAlign = 'center';
-      var tx = lbl(it, text, S.dim, 12); tx.style.verticalAlign = 'center'; tx.style.letterSpacing = '1px';
-      return it;
+      var ic = lbl(it, '▣', S.dim, 13); ic.style.marginRight = '6px'; ic.style.verticalAlign = 'center';
+      var tx = lbl(it, 'Scroll to zoom', S.dim, 12); tx.style.verticalAlign = 'center'; tx.style.letterSpacing = '1px';
+    })();
+    var previewClip = null, preview3d = null, previewItem3d = null, preview3dTried = false, previewSerial = 0, previewModelKey = '';
+    // Wheel-zoom over the character (CSS scale on the composited panel -- no re-composite, so it keeps
+    // working while the demo is paused, unlike resizing the panel which would need a fresh scene tick).
+    var previewZoom = 1.0, PREVIEW_ZOOM_MIN = 0.6, PREVIEW_ZOOM_MAX = 1.6, PREVIEW_ZOOM_STEP = 0.16;
+    // Tuned for the cam_loadoutmenu_ct full-body camera (see PREVIEW_SCENES): 1.3 fills the preview
+    // box with the whole figure at zoom 1; zoom range 0.6..MAX then spans "small full body with
+    // breathing room" to "weapon close-up". (The old 0.74/-12/+22 fit was for the cropped vanity cam.)
+    // FIT_X/Y live-set 2026-07-01 by the user via click-and-drag + previewSave('start') at zoom 0.96.
+    var PREVIEW_FIT_SCALE = 1.3, PREVIEW_FIT_X = -25.2, PREVIEW_FIT_Y = 30.6;
+    var previewPlayerSeq = 0; // bumped each time a NEW player-preview panel is created (paused-composite nudge trigger)
+    var previewNudgedSeq = 0;
+    var previewNudgeArmed = false;
+    // Zoom-in TARGET framing (user-requested): zoomed all the way out = the full-body figure
+    // (PREVIEW_FIT_* above); zooming IN glides the view UP to chest height and a touch LEFT so the
+    // held weapon stays fully in frame at close-up. Implemented by interpolating the transform
+    // origin (and an extra x shift) with the zoom factor: origin at the chest means magnification
+    // grows around the chest, so the visible region rises as you zoom. Live-tunable via
+    // previewFit('{"ox":N,"oy":N,"sx":N,"sy":N}') or click-and-drag + previewSave('zoom').
+    // OX/OY tuned 2026-07-01 against screenshots (previewFit A/B at max zoom). SX/SY/ZOOM_MAX
+    // live-set the same day by the user via click-and-drag + previewSave('zoom') at zoom 1.6 --
+    // previewSave('zoom') sets ZOOM_MAX = whatever zoom you were at (so scrolling can never exceed
+    // where you stopped) and bakes the drag straight into SX/SY, since that makes t=1 exactly here.
+    var PREVIEW_ZOOMIN_OX = 60;   // transform-origin X% at max zoom (right of centre -> content drifts LEFT)
+    var PREVIEW_ZOOMIN_OY = 28;   // transform-origin Y% at max zoom (~chest height of the standing figure)
+    var PREVIEW_ZOOMIN_SX = -16.8; // extra x translate (px) blended in at max zoom (nudges the figure left)
+    var PREVIEW_ZOOMIN_SY = 62.1;  // extra y translate (px) blended in at max zoom (drag-savable, see previewSave)
+    // Click-and-drag pan: an ACCUMULATED, uncommitted offset (design px) added on top of the baked
+    // fit, live-updated while the user drags inside the preview box. Persists across separate drag
+    // gestures (release then drag again keeps nudging) until previewSave() bakes it into the START
+    // or ZOOM-IN constants above, or previewPanReset() discards it. See previewUpdateDrag().
+    var previewPanLive = { x: 0, y: 0 };
+    function applyPreviewZoom() {
+      // 0 at zoom<=1 (full-body framing untouched), 1 at max zoom (full chest-height migration).
+      var t = (previewZoom > 1.0) ? (previewZoom - 1.0) / (PREVIEW_ZOOM_MAX - 1.0) : 0;
+      if (t > 1) t = 1;
+      var ox = 50 + (PREVIEW_ZOOMIN_OX - 50) * t;
+      var oy = 50 + (PREVIEW_ZOOMIN_OY - 50) * t;
+      var tx = PREVIEW_FIT_X + PREVIEW_ZOOMIN_SX * t + previewPanLive.x;
+      var ty = PREVIEW_FIT_Y + PREVIEW_ZOOMIN_SY * t + previewPanLive.y;
+      var z = (previewZoom * PREVIEW_FIT_SCALE).toFixed(3);
+      var org = ox.toFixed(1) + '% ' + oy.toFixed(1) + '%';
+      var tr = 'translate3d(' + Math.round(tx) + 'px, ' + Math.round(ty) + 'px, 0px) scale3d(' + z + ', ' + z + ', 1)';
+      if (preview3d && preview3d.IsValid && preview3d.IsValid()) {
+        preview3d.style.transformOrigin = org; preview3d.style.transform = tr;
+      }
+      if (typeof preview2d !== 'undefined' && preview2d) { preview2d.style.transformOrigin = org; preview2d.style.transform = tr; }
     }
-    prevHelperItem('◈', 'Rotate'); prevHelperItem('▣', 'Zoom'); prevHelperItem('✥', 'Pan');
-    var preview3d = null, previewItem3d = null, preview3dTried = false, previewSerial = 0, previewModelKey = '';
+    // One frame of click-and-drag panning. Panorama has no mouse-move event in this in-game HUD
+    // context, so this reads the C++ cursor probe published each frame in st.mx/my/lmb (same pipe
+    // CameraEditorHud::BuildStateJson feeds from CameraBridge_GetUiCursor -- built for the
+    // experimental graph editor's drag tool, reused here as-is). A press must LAND on the preview
+    // stage to start a drag (so dragging elsewhere in the modal, e.g. a dropdown, is untouched);
+    // once started it tracks the whole modal area so a fast drag that slips outside the box edge
+    // doesn't drop the gesture. Delta is converted device-px -> design-px by the same /actualuiscale
+    // division positionPreview3d() uses, so drag speed matches the cursor 1:1 regardless of zoom.
+    var previewDragActive = false;
+    var previewDragAnchor = { x: 0, y: 0 };
+    var previewDragBase = { x: 0, y: 0 };
+    var previewDragLastLmb = false;
+    function previewUpdateDrag() {
+      if (!custOverlay.visible || !st) return;
+      var lmb = !!st.lmb, mx = st.mx, my = st.my;
+      if (lmb && !previewDragLastLmb && overPreview(mx, my)) {
+        previewDragActive = true;
+        previewDragAnchor.x = mx; previewDragAnchor.y = my;
+        previewDragBase.x = previewPanLive.x; previewDragBase.y = previewPanLive.y;
+        previewLog('dragStart', 'mx=' + mx + ' my=' + my);
+      } else if (!lmb) {
+        if (previewDragActive) previewLog('dragEnd', 'pan=' + previewPanLive.x.toFixed(1) + ',' + previewPanLive.y.toFixed(1));
+        previewDragActive = false;
+      }
+      if (previewDragActive && lmb) {
+        var sx = root.actualuiscale_x || ctx.actualuiscale_x || 1;
+        var sy = root.actualuiscale_y || ctx.actualuiscale_y || 1;
+        var nx = previewDragBase.x + (mx - previewDragAnchor.x) / sx;
+        var ny = previewDragBase.y + (my - previewDragAnchor.y) / sy;
+        if (nx !== previewPanLive.x || ny !== previewPanLive.y) {
+          previewPanLive.x = nx; previewPanLive.y = ny;
+          applyPreviewZoom();
+        }
+      }
+      previewDragLastLmb = lmb;
+    }
+    // Bakes the current dragged pan into the framing you asked to save, then clears the live offset
+    // so the NEXT drag starts fresh from zero again. 'start' = the zoomed-out/default framing
+    // (PREVIEW_FIT_X/Y); 'zoom' = the zoomed-in framing (PREVIEW_ZOOMIN_SX/SY, blended in at max
+    // zoom by applyPreviewZoom's t). Save whichever one matches the zoom level you were just at --
+    // e.g. drag at zoom 1, then previewSave('start'); zoom to max, drag again, previewSave('zoom').
+    function previewSavePosition(which) {
+      which = ('' + (which || '')).toLowerCase();
+      if (which === 'start') {
+        PREVIEW_FIT_X += previewPanLive.x; PREVIEW_FIT_Y += previewPanLive.y;
+        previewPanLive.x = 0; previewPanLive.y = 0;
+        applyPreviewZoom();
+        return 'saved start x=' + PREVIEW_FIT_X.toFixed(1) + ' y=' + PREVIEW_FIT_Y.toFixed(1);
+      }
+      if (which === 'zoom' || which === 'zoomin') {
+        // "Save zoom" means "wherever I stopped scrolling in IS the max zoom position" -- so the
+        // CURRENT zoom level becomes the new ceiling (PREVIEW_ZOOM_MAX), which makes the blend factor
+        // t = (zoom-1)/(ZOOM_MAX-1) equal exactly 1 right here, and the raw dragged pan can be baked
+        // straight into SX/SY with no projection needed (both are only ever evaluated at t=1 from
+        // now on, since scrolling can never exceed where you are right now).
+        if (previewZoom <= 1.001) {
+          return 'previewSave("zoom") needs the preview zoomed in past 1.0 (currently ' + previewZoom.toFixed(2) + ')';
+        }
+        PREVIEW_ZOOM_MAX = previewZoom;
+        PREVIEW_ZOOMIN_SX += previewPanLive.x; PREVIEW_ZOOMIN_SY += previewPanLive.y;
+        previewPanLive.x = 0; previewPanLive.y = 0;
+        applyPreviewZoom();
+        return 'saved zoom max=' + PREVIEW_ZOOM_MAX.toFixed(2) + ' sx=' + PREVIEW_ZOOMIN_SX.toFixed(1) + ' sy=' + PREVIEW_ZOOMIN_SY.toFixed(1);
+      }
+      return 'usage: previewSave("start"|"zoom")';
+    }
+    function previewPanReset() {
+      previewPanLive.x = 0; previewPanLive.y = 0;
+      applyPreviewZoom();
+      return 'pan reset';
+    }
+)EDJS"
+R"EDJS(
+    function zoomPreview(dir) {
+      var z = previewZoom + dir * PREVIEW_ZOOM_STEP;
+      if (z < PREVIEW_ZOOM_MIN) z = PREVIEW_ZOOM_MIN;
+      if (z > PREVIEW_ZOOM_MAX) z = PREVIEW_ZOOM_MAX;
+      if (z === previewZoom) return;
+      previewZoom = z; applyPreviewZoom();
+    }
+    // Live fit tuner (netcon): previewFit('{"scale":0.8,"x":-12,"y":22,"zoom":1}') adjusts the CSS
+    // fit transform without a panel rebuild, so the default framing can be dialed in against
+    // screenshots and then baked into the PREVIEW_FIT_* defaults above.
+    function previewFit(json) {
+      var o = null; try { o = json ? JSON.parse(json) : null; } catch (e) { return 'bad json'; }
+      if (o) {
+        if (typeof o.scale === 'number') PREVIEW_FIT_SCALE = o.scale;
+        if (typeof o.x === 'number') PREVIEW_FIT_X = o.x;
+        if (typeof o.y === 'number') PREVIEW_FIT_Y = o.y;
+        if (typeof o.zoom === 'number') previewZoom = o.zoom;
+        if (typeof o.ox === 'number') PREVIEW_ZOOMIN_OX = o.ox;
+        if (typeof o.oy === 'number') PREVIEW_ZOOMIN_OY = o.oy;
+        if (typeof o.sx === 'number') PREVIEW_ZOOMIN_SX = o.sx;
+        if (typeof o.sy === 'number') PREVIEW_ZOOMIN_SY = o.sy;
+      }
+      applyPreviewZoom();
+      return 'fit scale=' + PREVIEW_FIT_SCALE + ' x=' + PREVIEW_FIT_X + ' y=' + PREVIEW_FIT_Y + ' zoom=' + previewZoom +
+        ' zoomin ox=' + PREVIEW_ZOOMIN_OX + ' oy=' + PREVIEW_ZOOMIN_OY + ' sx=' + PREVIEW_ZOOMIN_SX + ' sy=' + PREVIEW_ZOOMIN_SY +
+        ' pan=' + previewPanLive.x.toFixed(1) + ',' + previewPanLive.y.toFixed(1);
+    }
+    function overPreview(x, y) {
+      if (typeof x !== 'number' || typeof y !== 'number') return false;
+      if (!prevStage || !prevStage.IsValid || !prevStage.IsValid()) return false;
+      var a = prevStage.GetPositionWithinWindow ? prevStage.GetPositionWithinWindow() : null;
+      if (!a) return false;
+      var w = prevStage.actuallayoutwidth || 0, h = prevStage.actuallayoutheight || 0;
+      return x >= a.x && x <= a.x + w && y >= a.y && y <= a.y + h;
+    }
+    // ---- Preview diagnostics (mvm_debug) -----------------------------------------------------
+    // Gated on st.mvmDebug, which CameraEditorHud::BuildStateJson publishes from
+    // Filmmaker::MvmDebugLog_Active() -- so `mvm_debug start` (the existing native session logger,
+    // see CosmeticDebugLog.cpp) transparently starts capturing preview state too: every $.Msg() call
+    // is mirrored into the tier0 logging listener the debug log taps, no separate toggle needed. When
+    // no log is running this is a single boolean check per call site, so it's cheap to leave in place.
+    // Prints go to the console (and therefore netcon), so keep them OFF (this guard) outside a
+    // debug session -- they would otherwise spam every wheel notch / frame.
+    function mvmDebugOn() { return !!(st && st.mvmDebug); }
+    // Raw rects for the preview stage vs the clip box that is supposed to contain it, plus the zoom
+    // scale -- the exact numbers needed to tell "clipped correctly but framed oddly" apart from
+    // "escaping its own clip box" when reading a log next to a screenshot.
+    function previewGeom() {
+      var stageA = (prevStage && prevStage.GetPositionWithinWindow) ? prevStage.GetPositionWithinWindow() : null;
+      var stageW = prevStage ? (prevStage.actuallayoutwidth || 0) : 0, stageH = prevStage ? (prevStage.actuallayoutheight || 0) : 0;
+      var clipA = (previewClip && previewClip.GetPositionWithinWindow) ? previewClip.GetPositionWithinWindow() : null;
+      var clipW = previewClip ? (previewClip.actuallayoutwidth || 0) : 0, clipH = previewClip ? (previewClip.actuallayoutheight || 0) : 0;
+      var p3dW = preview3d ? (preview3d.actuallayoutwidth || 0) : 0, p3dH = preview3d ? (preview3d.actuallayoutheight || 0) : 0;
+      return {
+        zoom: previewZoom, fitScale: PREVIEW_FIT_SCALE, effScale: previewZoom * PREVIEW_FIT_SCALE,
+        fitX: PREVIEW_FIT_X, fitY: PREVIEW_FIT_Y,
+        zoomin: { ox: PREVIEW_ZOOMIN_OX, oy: PREVIEW_ZOOMIN_OY, sx: PREVIEW_ZOOMIN_SX, sy: PREVIEW_ZOOMIN_SY },
+        pan: { x: previewPanLive.x, y: previewPanLive.y, dragging: previewDragActive },
+        stage: { x: stageA ? stageA.x : -1, y: stageA ? stageA.y : -1, w: stageW, h: stageH },
+        clip: { x: clipA ? clipA.x : -1, y: clipA ? clipA.y : -1, w: clipW, h: clipH },
+        p3d: { w: p3dW, h: p3dH }
+      };
+    }
+    var previewLogLastSig = ''; // last logged snapshot signature -- collapses identical per-frame calls
+    function previewLog(tag, extra) {
+      if (!mvmDebugOn()) return;
+      try {
+        var g = previewGeom();
+        var sig = tag + '|' + custTargetKey + '|' + custActiveCategory + '|' + previewModelKey + '|' +
+          g.zoom.toFixed(2) + '|' + (extra || '');
+        if (tag === 'frame' && sig === previewLogLastSig) return; // heartbeat-only tag may repeat every frame
+        previewLogLastSig = sig;
+        var p3dState = preview3d ? ((preview3d.IsValid && preview3d.IsValid()) ? 'valid' : 'invalid')
+          : (preview3dTried ? 'failed' : 'none');
+        var line = '[mvmpreview] ' + tag +
+          ' open=' + (custOverlay.visible ? 1 : 0) +
+          ' target=' + custTargetKey + '(' + custTargetName + ')' +
+          ' cat=' + custActiveCategory +
+          ' p3d=' + p3dState +
+          ' modelKey=' + previewModelKey +
+          ' zoom=' + g.zoom.toFixed(2) + ' effScale=' + g.effScale.toFixed(3) +
+          ' stage=' + g.stage.x + ',' + g.stage.y + ' ' + g.stage.w + 'x' + g.stage.h +
+          ' clip=' + g.clip.x + ',' + g.clip.y + ' ' + g.clip.w + 'x' + g.clip.h +
+          ' sel.agent=' + (custSel.agent || '') + ' sel.primary=' + (custSel.primary || '') +
+          ' sel.secondary=' + (custSel.secondary || '') + ' sel.knife=' + (custSel.knife || '') +
+          ' sel.gloves=' + (custSel.gloves || '');
+        if (extra) line += ' ' + extra;
+        $.Msg(line);
+      } catch (e) {}
+    }
+)EDJS"
+R"EDJS(
     // Native 3D MapPlayerPreviewPanel (vanity loadout scene). The make-or-break detail is TIMING:
     // the panel must be CREATED after the modal overlay is visible AND has a laid-out size, or it
     // instantiates but renders black. So creation is deferred via $.Schedule from openCustomize
@@ -504,13 +772,48 @@ R"EDJS(
     //     csm_split_plane0_distance_override: '250.0' });
     // So the vanity scene (proper lit loadout backdrop, not the flat grey mvp-banner fallback) is the
     // default again; match_mvp/loadoutmenu_ct stay for live A/B over `previewTry`.
+    // Scene 0 (default) uses cam_loadoutmenu_ct, NOT cam_vanityloadout: the vanity camera frames only
+    // the upper body and hard-crops at the thighs INSIDE the rendered texture (live-verified: CSS
+    // zoom-out to 0.6 showed the same thigh cut with black below -- the legs simply are not in the
+    // texture, and pin-fov horizontal made no difference). The loadout camera renders the full body
+    // head-to-boots, so zooming out actually reveals the whole character; PREVIEW_FIT_SCALE below is
+    // tuned for it (1.3 fills the box with the full figure at zoom 1).
     var PREVIEW_SCENES = [
-      { map: 'ui/buy_menu', camera: 'cam_vanityloadout', mode: 'buy-menu', pname: 'vanity_character', bg: 'true' },
+      { map: 'ui/buy_menu', camera: 'cam_loadoutmenu_ct', mode: 'buy-menu', pname: 'vanity_character', bg: 'true' },
       { map: 'ui/match_mvp', camera: 'camera', mode: 'mvp-banner', pname: 'mvp_char', bg: 'false' },
-      { map: 'ui/buy_menu', camera: 'cam_loadoutmenu_ct', mode: 'buy-menu', pname: 'vanity_character', bg: 'true' }
+      { map: 'ui/buy_menu', camera: 'cam_vanityloadout', mode: 'buy-menu', pname: 'vanity_character', bg: 'true' }
     ];
     var previewSceneIdx = 0;
     function currentScene() { return PREVIEW_SCENES[previewSceneIdx] || PREVIEW_SCENES[0]; }
+    function destroyPreview3d() {
+      try { if (previewClip && previewClip.DeleteAsync) previewClip.DeleteAsync(0); } catch (e0) {}
+      try { if (preview3d && preview3d.DeleteAsync) preview3d.DeleteAsync(0); } catch (e1) {}
+      previewClip = null; preview3d = null; preview3dTried = false; previewModelKey = '';
+      previewDragCatcher = null; // child of previewClip -- deleted along with it above
+    }
+    var previewDragCatcher = null; // transparent hit-test blocker over preview3d, see below
+    function ensurePreviewClip() {
+      if (previewClip && previewClip.IsValid && previewClip.IsValid()) return previewClip;
+      previewClip = mk('Panel', root);
+      previewClip.hittest = false;
+      previewClip.visible = false;
+      previewClip.style.overflow = 'clip';
+      previewClip.style.zIndex = '232';
+      previewClip.style.backgroundColor = 'rgba(0,0,0,0)';
+      // Sits ABOVE preview3d (zIndex 1 > preview3d's 0) and absorbs every click itself (hittest=true,
+      // fully transparent) so the native panel's own mouse_rotate/panzoom_enabled (kept true -- see
+      // createPreview3d comment -- because disabling them was a compositing risk we didn't want to
+      // retest) never receives a drag to fight our click-and-drag pan with. Our own pan tracking
+      // (previewUpdateDrag) reads the OS-cursor pipe directly and does not depend on this panel
+      // getting the hit -- it only needs to exist so nothing ELSE does.
+      previewDragCatcher = mk('Panel', previewClip);
+      previewDragCatcher.hittest = true;
+      previewDragCatcher.style.width = '100%'; previewDragCatcher.style.height = '100%';
+      previewDragCatcher.style.position = '0px 0px 0px';
+      previewDragCatcher.style.zIndex = '1';
+      previewDragCatcher.style.backgroundColor = 'rgba(0,0,0,0)';
+      return previewClip;
+    }
     // Create the native MapPlayerPreviewPanel with the current scene's attrs (optionally overridden,
     // for live tuning over netcon). Returns the panel or null.
     function createPreview3d(overrides) {
@@ -529,40 +832,114 @@ R"EDJS(
         // reason (show the model immediately, don't wait/cull). This is the panel property the
         // UnknownCheats thread warns about ("prevent panorama from culling them").
         hide_while_waiting_for_composite_materials: 'false',
-        // `hittest` was missing -- without it the panel never receives the mouse-drag that
-        // mouse_rotate needs (the ONE native MapPlayerPreviewPanel usage that sets mouse_rotate
-        // true, vanity-loadout.xml's id-loadout-agent, also sets hittest true; every other native
-        // instance sets rotate false AND omits hittest). panzoom_enabled/auto_recenter aren't part
-        // of that native recipe (only the item/knife-inspect MapItemPreviewPanel documents them) --
-        // trying them here anyway since both panel types share a base class; harmless no-op if the
-        // engine ignores them on this panel type.
-        hittest: 'true', panzoom_enabled: 'true', auto_recenter: 'true'
+        // These native interaction attrs are also part of the compositor path for this panel. We keep
+        // them enabled for rendering, then place a transparent blocker above the preview so user drags
+        // never reach the native rotate/pan handlers. Wheel is swallowed in C++ and routed to custWheel.
+        hittest: 'true', panzoom_enabled: 'true'
       };
       attrs.playermodel = (overrides && overrides.playermodel) ? overrides.playermodel : teamDefaultModel();
+      // Merge ANY other override keys verbatim (camera, map, pin-fov, animgraphcharactermode, ...) so
+      // previewRebuild('{"pin-fov":"horizontal"}') can live-A/B panel attrs over netcon without a
+      // rebuild -- the api comment always advertised map/camera overrides but only playermodel was
+      // actually honored.
+      if (overrides) { for (var ok in overrides) { if (ok !== 'playermodel') attrs[ok] = '' + overrides[ok]; } }
       var p = null;
       try {
-        p = $.CreatePanel('MapPlayerPreviewPanel', prevStage, texName, attrs);
+        // Create inside a root-level clipped viewport, not inside the styled/flowing preview frame.
+        // The clip panel prevents CSS zoom from drawing over the controls, while staying root-level
+        // avoids the blank composition target seen when the native preview was nested in prevStage.
+        var clip = ensurePreviewClip();
+        p = clip ? $.CreatePanel('MapPlayerPreviewPanel', clip, texName, attrs) : null;
         if (!(p && p.IsValid && p.IsValid())) p = null;
       } catch (e) { p = null; }
       if (p) {
-        // Full-panel sizing like the native win panel (the old 136%/-17% crop was for the vanity
-        // scene's off-centre character and can zero out the composition target).
+        previewPlayerSeq++;
         p.style.width = '100%';
         p.style.height = '100%';
         p.style.position = '0px 0px 0px';
+        p.style.zIndex = '0';
+        p.style.overflow = 'clip';
+        positionPreview3d();
       }
       return p;
+    }
+    function positionPreview3d() {
+      if (!previewClip || !previewClip.IsValid || !previewClip.IsValid()) return;
+      if (!custOverlay.visible || !prevStage || !prevStage.IsValid || !prevStage.IsValid()) {
+        previewClip.visible = false;
+        return;
+      }
+      var a = prevStage.GetPositionWithinWindow ? prevStage.GetPositionWithinWindow() : null;
+      var rawW = prevStage.actuallayoutwidth || 0, rawH = prevStage.actuallayoutheight || 0;
+      if (!a || rawW <= 0 || rawH <= 0) { previewClip.visible = false; return; }
+      // GetPositionWithinWindow()/actuallayoutwidth report ACTUAL (device) pixels, but previewClip is
+      // a ROOT-level panel whose style 'px' values are interpreted in DESIGN-space units (same space
+      // every other style declaration in this file uses) and then scaled up to device pixels by
+      // actualuiscale (measured live at 1.1111 = 1600x1200 device / 1440x1080 design). Assigning the
+      // raw device-px numbers straight into style.x/y/width/height skipped that conversion, so the
+      // clip box rendered ~11% too big and off-position relative to prevStage's real on-screen box --
+      // negligible-looking at zoom 1, but the error compounds with zoom and pushes the character
+      // outside the intended frame ("not locked to the box"). custMeasureH() below already divides by
+      // actualuiscale_y for the same reason (device px -> design px); mirror that here for x/y/w/h.
+      var sx = root.actualuiscale_x || ctx.actualuiscale_x || 1;
+      var sy = root.actualuiscale_y || ctx.actualuiscale_y || 1;
+      var w = Math.floor(rawW / sx);
+      var h = Math.floor(rawH / sy);
+      if (w <= 0 || h <= 0) { previewClip.visible = false; return; }
+      var x = Math.floor(a.x / sx), y = Math.floor(a.y / sy);
+      previewClip.visible = true;
+      previewClip.style.position = x + 'px ' + y + 'px 0px';
+      previewClip.style.x = x + 'px';
+      previewClip.style.y = y + 'px';
+      previewClip.style.width = w + 'px';
+      previewClip.style.height = h + 'px';
+      if (preview3d && preview3d.IsValid && preview3d.IsValid()) {
+        preview3d.visible = true;
+        preview3d.style.width = '100%';
+        preview3d.style.height = '100%';
+      }
+    }
+)EDJS"
+R"EDJS(
+    function nudgePreviewCompositeIfPaused() {
+      if (!preview3d || previewNudgedSeq === previewPlayerSeq) return;
+      if (!previewNudgeArmed) return;
+      previewNudgedSeq = previewPlayerSeq;
+      previewNudgeArmed = false;
+      refreshPreviewComposition();
+      // Live-confirmed (screenshots + mvm_debug): the Panorama-side SetReadyForDisplay toggle above is
+      // NOT enough by itself -- the native MapPlayerPreviewPanel composite stays fully black while the
+      // demo sits paused no matter how long you wait, close/reopen the modal, or re-pick items; only an
+      // actual demo_resume made it render (and it then STAYS rendered after re-pausing). Reuse the same
+      // briefly-resume-then-repause lever the cosmetics backend already relies on for third-person body
+      // swaps (CosmeticOverrideSystem::RequestApplyNudge/MaybeFireTickNudge) via a dedicated one-shot
+      // command, so the preview panel gets the live frames it needs without a real cosmetic mutation.
+      if (st && st.paused) {
+        previewLog('nativeNudge');
+        cmd('mirv_filmmaker cosmetics previewnudge');
+      }
+    }
+    function refreshPreviewComposition() {
+      if (!preview3d || !preview3d.IsValid || !preview3d.IsValid()) return;
+      // Keep this independent of demo playback: the preview is a Panorama scene, so refresh the
+      // composition layer through the panel lifecycle instead of seeking the demo timeline.
+      safeCall(preview3d, 'SetReadyForDisplay', false);
+      try {
+        $.Schedule(0.0, function () {
+          if (preview3d && preview3d.IsValid && preview3d.IsValid()) safeCall(preview3d, 'SetReadyForDisplay', true);
+        });
+      } catch (e) {
+        safeCall(preview3d, 'SetReadyForDisplay', true);
+      }
+    }
+    function schedulePreviewCompositeNudge() {
+      try { $.Schedule(0.85, nudgePreviewCompositeIfPaused); } catch (e) { nudgePreviewCompositeIfPaused(); }
     }
     function ensurePreview3d(model) {
       if (!USE_3D_PREVIEW) { preview2d.visible = true; return null; }
       model = model || teamDefaultModel();
-      if (preview3d && previewModelKey !== model) {
-        try { if (preview3d.DeleteAsync) preview3d.DeleteAsync(0); } catch (e) {}
-        preview3d = null; preview3dTried = false;
-      }
       if (preview3d || preview3dTried) return preview3d;
       preview3dTried = true;
-      previewModelKey = model;
       preview3d = createPreview3d({ playermodel: model });
       preview2d.visible = !preview3d;
       return preview3d;
@@ -597,9 +974,18 @@ R"EDJS(
     }
     function equipPlayerPreviewMeta(panel, meta) {
       if (!panel || !meta) return;
-      var itemId = econItemId(meta);
+      var itemId = previewEquipItemId(meta);
       if (!itemId) return;
       if (safeCall(panel, 'EquipPlayerWithItem', itemId) == null) safeCall(panel, 'EquipPlayerWithItem', itemId.toString());
+    }
+    function previewMetaId(meta) {
+      var id = previewEquipItemId(meta);
+      if (id) return '' + id;
+      if (!meta) return '0:0';
+      return [
+        parseInt(meta.def || 0, 10) || 0,
+        parseInt(meta.paint || meta.paintKit || 0, 10) || 0
+      ].join(':');
     }
     // Push the chosen agent (or the spectated player's team default) onto whichever preview exists.
     // The item the preview should show HELD right now: whichever slot is "active" (see
@@ -615,6 +1001,14 @@ R"EDJS(
       var slotDef = (cat === 'primary' || cat === 'secondary') ? effectiveSlotDef(cat) : 0;
       return (slotDef > 0) ? { def: slotDef, paint: 0, color: meta.color } : meta;
     }
+    function previewSceneKey(model, agentMeta, heldMeta, glovesMeta) {
+      return [
+        model || '',
+        previewMetaId(agentMeta),
+        previewMetaId(heldMeta),
+        previewMetaId(glovesMeta)
+      ].join('|');
+    }
     // Mirrors the native vanity-loadout recipe (panorama ref scripts/common/characteranims.js
     // PlayAnimsOnPanel): SetPlayerCharacterItemID + SetPlayerModel together give the composited
     // agent its real material (skin tone, team paint job); SetPlayerModel alone -- what this used to
@@ -625,19 +1019,41 @@ R"EDJS(
       var agent = selOpt('agent', custSel.agent), gloves = selOpt('gloves', custSel.gloves);
       var held = activeHeldItemMeta();
       var model = (agent && agent[2] && agent[2].model) ? agent[2].model : teamDefaultModel();
+      var agentMeta = agent ? agent[2] : null;
+      var glovesMeta = gloves ? gloves[2] : null;
+      var sceneKey = previewSceneKey(model, agentMeta, held, glovesMeta);
+      if (preview3d && preview3d.IsValid && !preview3d.IsValid()) {
+        destroyPreview3d();
+      }
       ensurePreview3d(model);
       if (preview3d) {
+        var changed = previewModelKey !== sceneKey;
+        previewModelKey = sceneKey;
         var sc = currentScene();
         if (sc.startCamera) safeCall(preview3d, 'TransitionToCamera', sc.startCamera, 0);
         safeCall(preview3d, 'SetActiveCharacter', 0); // char 0 = the single previewed agent
-        var agentItemId = econItemId(agent ? agent[2] : null);
+        var agentItemId = previewEquipItemId(agentMeta);
         if (agentItemId) safeCall(preview3d, 'SetPlayerCharacterItemID', agentItemId);
         safeCall(preview3d, 'SetPlayerModel', model);
         equipPlayerPreviewMeta(preview3d, held);
-        equipPlayerPreviewMeta(preview3d, gloves ? gloves[2] : null);
+        equipPlayerPreviewMeta(preview3d, glovesMeta);
         safeCall(preview3d, 'SetReadyForDisplay', true);
+        applyPreviewZoom();
+        if (changed) {
+          pokePreviewSoon(); refreshPreviewComposition();
+          previewLog('sceneChanged', 'model=' + model + ' agentItemId=' + (agentItemId || 0) +
+            ' heldId=' + previewMetaId(held) + ' glovesId=' + previewMetaId(glovesMeta));
+          // Paused demo: the preview scene only ticks on live frames, so an item/category change
+          // equips the new weapon but the character NEVER plays the pose transition -- the gun
+          // floats in mid-air in the old stance (user-reported: pick Tec-9 while a rifle pose is
+          // held). Request the same brief resume/re-pause the modal-open path uses so the animgraph
+          // gets real ticks to settle into the new hold pose. Backend-debounced (8 frames), so a
+          // rapid pick burst coalesces into one nudge.
+          if (st && st.paused) { previewLog('poseNudge'); cmd('mirv_filmmaker cosmetics previewnudge'); }
+        }
       } else {
         renderLoadoutCard();
+        previewLog('fallback2d');
       }
     }
 
@@ -647,7 +1063,8 @@ R"EDJS(
     // after the modal was already up. So we make the overlay visible first, then re-assert the
     // preview for a few frames from render() (layout settles a frame or two after visible flips).
     var previewPokeFrames = 0;
-    function pokePreviewSoon() { previewPokeFrames = 16; }
+    var previewHealTries = 0; // bounded retries for maintainPreview's self-heal when the panel is missing
+    function pokePreviewSoon() { previewPokeFrames = 16; previewHealTries = 8; }
 )EDJS"
 R"EDJS(
     function maintainPreview() {
@@ -656,8 +1073,25 @@ R"EDJS(
       // this continuous (cheap, idempotent) re-assert the scene composites once and then lapses to
       // black after the initial settle burst -- the "appears then disappears" bug. The heavier
       // re-equip/re-model (applyPreview) only runs during the post-open settle frames.
-      if (preview3d && preview3d.IsValid && preview3d.IsValid())
+      if (preview3d && preview3d.IsValid && preview3d.IsValid()) {
+        positionPreview3d();
         safeCall(preview3d, 'SetReadyForDisplay', true);
+      }
+      // Same idempotent re-assert for the optional held-item/viewmodel preview when one exists, so a
+      // paused demo (no game frames driving the composite) can't let it lapse to black either.
+      if (previewItem3d && previewItem3d.IsValid && previewItem3d.IsValid())
+        safeCall(previewItem3d, 'SetReadyForDisplay', true);
+      // Self-heal: if the panel failed to create while the modal is up, retry a FRESH create -- on a
+      // PAUSED demo the one-shot post-open schedule may land before layout settles, leaving no panel.
+      // Reset preview3dTried so ensurePreview3d (inside applyPreview) actually re-attempts; bounded by
+      // previewHealTries so a genuinely unavailable scene falls back to the 2D card instead of
+      // rebuilding forever. Uses applyPreview (not recreatePreview, which would re-arm this counter).
+      if (USE_3D_PREVIEW && !preview3d && previewHealTries > 0) {
+        previewHealTries--;
+        previewLog('selfHeal', 'triesLeft=' + previewHealTries);
+        preview3dTried = false; previewModelKey = '';
+        applyPreview();
+      }
       if (previewPokeFrames > 0) { previewPokeFrames--; applyPreview(); }
     }
     // Destroy + rebuild the 3D preview from scratch. Must run when the modal is already visible and
@@ -666,10 +1100,11 @@ R"EDJS(
     function recreatePreview() {
       if (!custOverlay.visible) return;
       if (!USE_3D_PREVIEW) { preview2d.visible = true; renderLoadoutCard(); return; }
-      try { if (preview3d && preview3d.DeleteAsync) preview3d.DeleteAsync(0); } catch (e) {}
-      preview3d = null; preview3dTried = false; previewModelKey = '';
+      previewLog('recreate');
+      destroyPreview3d();
       applyPreview();      // creates the panel + equips + SetReadyForDisplay
       pokePreviewSoon();   // re-assert SetReadyForDisplay for the frames after the new panel lays out
+      if (previewNudgeArmed) schedulePreviewCompositeNudge();
     }
 
 )EDJS"
@@ -686,8 +1121,28 @@ R"EDJS(
         entityIndex: parseInt(w.entityIndex || -1, 10),
         defIndex: parseInt(w.defIndex || 0, 10) || 0,
         paintKit: parseInt(w.paintKit || 0, 10) || 0,
-        wear: num(w.wear)
+        wear: num(w.wear),
+        // Per-slot pickup ownership (C++ derives it from the weapon ENTITY's original-owner xuid,
+        // so it is independent of which weapon the player currently has out).
+        pickup: !!w.pickup,
+        ownerSteamId: w.ownerSteamId ? ('' + w.ownerSteamId) : '',
+        ownerName: w.ownerName ? ('' + w.ownerName) : ''
       };
+    }
+    // Slot-level pickup state: TRUE when the weapon sitting in this loadout slot originally belongs
+    // to another player. Unlike custActiveWeaponPickup this does NOT flicker off when the player
+    // switches to a grenade/knife/bomb -- the slot keeps its entity-derived ownership until the
+    // weapon is actually dropped, the player changes, or a seek rebuilds the loadout.
+    function slotPickup(slot) {
+      if (slot !== 'primary' && slot !== 'secondary') return false;
+      var w = custLoadout[slot];
+      return !!(w && w.pickup && w.ownerSteamId);
+    }
+    function slotOwnerSteam(slot) { var w = custLoadout[slot]; return (w && w.ownerSteamId) || ''; }
+    function slotOwnerName(slot) {
+      var w = custLoadout[slot];
+      if (!w || !w.ownerSteamId) return '';
+      return w.ownerName || ('Player ' + w.ownerSteamId);
     }
     function collectPanelText(panel, out, depth) {
       if (!panel || depth > 24) return;
@@ -800,27 +1255,91 @@ R"EDJS(
       }
       return 'Weapon ' + def;
     }
+    // Route finish edits to the ORIGINAL owner when the slot's held weapon is a pickup and the
+    // dropdown is editing that exact weapon. Keyed off the SLOT's entity-derived ownership
+    // (slotPickup), with the legacy active-weapon fields kept only as a fallback, so switching to a
+    // grenade/knife mid-edit no longer flips the routing (or the warning) on and off.
     function shouldRoutePickupToOwner(slot) {
       if (slot !== 'primary' && slot !== 'secondary') return false;
+      var held = (custLoadout[slot] && parseInt(custLoadout[slot].defIndex || 0, 10)) || 0;
+      if (slotPickup(slot)) return held > 0 && effectiveSlotDef(slot) === held;
       if (!custActiveWeaponPickup || !custActiveWeaponOwnerSteam || custActiveWeaponDef <= 0) return false;
       if (custActiveWeaponSlot !== slot) return false;
       return effectiveSlotDef(slot) === custActiveWeaponDef;
     }
+    function pickupOwnerSteam(slot) {
+      if (slotPickup(slot)) return slotOwnerSteam(slot);
+      return custActiveWeaponOwnerSteam;
+    }
+    function pickupOwnerName(slot) {
+      if (slotPickup(slot)) return slotOwnerName(slot);
+      return custActiveWeaponOwnerName || (custActiveWeaponOwnerSteam ? ('Player ' + custActiveWeaponOwnerSteam) : '');
+    }
     function resolveCosmeticTarget(slot) {
       var target = (custTargetKey && custTargetKey.indexOf('steam:') === 0)
         ? custTargetKey.substring(6) : 'current';
-      if (shouldRoutePickupToOwner(slot)) return custActiveWeaponOwnerSteam;
+      if (shouldRoutePickupToOwner(slot)) return pickupOwnerSteam(slot) || target;
       return target;
     }
+    // The banner + per-slot "!" badges are driven by SLOT ownership, so they stay up while the
+    // player waves a grenade/knife around and only clear when the pickup is actually gone.
+    function pickupSlots() {
+      var out = [];
+      if (slotPickup('primary')) out.push('primary');
+      if (slotPickup('secondary')) out.push('secondary');
+      return out;
+    }
+    // slot -> { row, lbl } warning badges; created alongside the PRIMARY/SECONDARY blocks below
+    // (pickupWarnRow), updated here every time the loadout state refreshes.
+    var custPickupBadges = {};
+    function updatePickupBadges() {
+      var slots = ['primary', 'secondary'];
+      for (var i = 0; i < slots.length; i++) {
+        var s = slots[i], b = custPickupBadges[s];
+        if (!b || !b.row || !b.row.IsValid || !b.row.IsValid()) continue;
+        var on = slotPickup(s);
+        b.row.visible = on;
+        if (on) b.lbl.text = 'Picked up from ' + slotOwnerName(s) + ' - finish edits apply to their loadout.';
+      }
+    }
     function updatePickupBanner() {
-      if (!custActiveWeaponPickup || !custActiveWeaponOwnerSteam) {
+      var slots = pickupSlots();
+      if (!slots.length) {
         custPickupBanner.visible = false;
+        updatePickupBadges();
+        logPickupState('banner');
         return;
       }
-      var wn = weaponLabelForDef(custActiveWeaponDef);
-      var on = custActiveWeaponOwnerName || ('Player ' + custActiveWeaponOwnerSteam);
-      custPickupLbl.text = 'Holding ' + on + '\'s ' + wn + ' (picked up). Finish changes apply to ' + on + '\'s ' + wn + ' loadout, not ' + (custTargetName || 'this player') + '.';
+      var parts = [];
+      for (var i = 0; i < slots.length; i++) {
+        var s = slots[i];
+        var wn = weaponLabelForDef((custLoadout[s] && custLoadout[s].defIndex) || 0);
+        parts.push(slotOwnerName(s) + '\'s ' + wn);
+      }
+      custPickupLbl.text = 'Carrying ' + parts.join(' and ') + ' (picked up). Finish changes apply to the original owner\'s loadout, not ' + (custTargetName || 'this player') + '.';
       custPickupBanner.visible = true;
+      updatePickupBadges();
+      logPickupState('banner');
+    }
+    // Temporary debug: one console line whenever the pickup/warning state changes, so netcon +
+    // mvm_debug can verify behavior across weapon switches, player switches, and seeks.
+    var lastPickupLogSig = '';
+    function logPickupState(tag) {
+      try {
+        function slotDbg(s) {
+          var w = custLoadout[s];
+          if (!w) return s + '=none';
+          return s + '=def' + w.defIndex + (w.pickup ? (' PICKUP owner=' + w.ownerSteamId + '(' + (w.ownerName || '?') + ')') : ' owned');
+        }
+        var sig = '[mvmpickup] target=' + custTargetKey + '(' + custTargetName + ')' +
+          ' activeDef=' + custActiveWeaponDef + ' activeSlot=' + (custActiveWeaponSlot || '-') +
+          ' activePickup=' + (custActiveWeaponPickup ? 1 : 0) +
+          ' ' + slotDbg('primary') + ' ' + slotDbg('secondary') +
+          ' warn=[' + pickupSlots().join(',') + '] banner=' + (custPickupBanner.visible ? 1 : 0);
+        if (sig === lastPickupLogSig) return;
+        lastPickupLogSig = sig;
+        $.Msg(sig + ' (' + tag + ')');
+      } catch (e) {}
     }
     function filteredOptions(slot) {
       var arr = COSMETICS[slot] || [];
@@ -1018,8 +1537,12 @@ R"EDJS(
     // RIGHT: final loadout-style controls. No arms/viewmodel override and no CT/T glove split.
 )EDJS"
 R"EDJS(
+    // Right column is a clipped VIEWPORT; its content lives in ctrlColInner, which is transform-scrolled
+    // by custWheel (the wheel is consumed in C++ and routed in, so native `overflow: scroll` can't be
+    // used -- Panorama never sees the raw wheel). sizeColScroll() clamps the offset every frame.
     var ctrlCol = mk('Panel', custBody); ctrlCol.style.width = 'fill-parent-flow(1.0)'; ctrlCol.style.height = '100%';
-    ctrlCol.style.flowChildren = 'down'; ctrlCol.style.overflow = 'squish scroll';
+    ctrlCol.style.overflow = 'clip'; ctrlCol.hittest = true;
+    var ctrlColInner = mk('Panel', ctrlCol); ctrlColInner.style.width = '100%'; ctrlColInner.style.flowChildren = 'down';
     // Wear picker: a labeled 'wear' kind itemDrop (value text + meter bar, click opens the preset
     // popup) plus the custom-float TextEntry (shown only for the 'custom' preset). No mouse-move drag
     // here -- the meter is a read-only indicator; changing wear stays dropdown/text-entry driven, per
@@ -1028,36 +1551,59 @@ R"EDJS(
       var wrap = mk('Panel', parent); wrap.style.width = '100%'; wrap.style.flowChildren = 'down';
       var preset = itemDrop(wrap, 'CustWear' + slot, function (v) { setWear(slot, v, null); },
         { rowLabel: 'Wear', kind: 'wear', searchable: false, category: category });
-      var custom = $.CreatePanel('TextEntry', wrap, 'CustWearFloat' + slot, { placeholder: '0.00 - 1.00' });
-      custom.style.width = '100%'; custom.style.height = '32px'; custom.style.marginBottom = '8px';
+      // The float box is DISPLAY-ONLY as far as Panorama focus is concerned: typed characters come
+      // from the C++ WM_CHAR route (custChar -> activeWearFloat), never from TextEntry keyboard
+      // focus. hittest=false keeps clicks from ever focusing the TextEntry -- focusing it made the
+      // engine restyle/collapse the field ("the box shrinks when you type"). A transparent cover
+      // panel takes the click instead: it selects this slot as the typing target and arms
+      // fresh-typing (next digit REPLACES the stamped value instead of appending to it).
+      var box = mk('Panel', wrap); box.style.width = '100%'; box.style.height = '32px'; box.style.marginBottom = '8px';
+      var custom = $.CreatePanel('TextEntry', box, 'CustWearFloat' + slot, { placeholder: '0.00 - 1.00' });
+      custom.hittest = false;
+      custom.style.width = '100%'; custom.style.height = '100%';
       custom.style.backgroundColor = '#101823'; custom.style.border = '1px solid #ffffff24';
       custom.style.color = S.value; custom.style.fontSize = '14px'; custom.style.paddingLeft = '8px';
-      custom.SetPanelEvent('ontextentrychange', function () {
-        if (custWearUpdating) return;
+      custom.__box = box;
+      var cover = mk('Panel', box); cover.hittest = true; cover.style.width = '100%'; cover.style.height = '100%';
+      cover.SetPanelEvent('onactivate', function () {
         if (category) setActiveCategory(category);
-        var v = parseFloat(custom.text || '0');
-        if (!isFinite(v)) v = 0;
-        setWear(slot, 'custom', v);
+        custom.__fresh = true;
       });
       return { preset: preset, custom: custom };
     }
     // Agent: a single prominent row, no label cell and no wear (agents aren't skinned) -- matches the
     // reference mock's top agent card. Everything else groups into a titled card via the shared
     // section() helper (CameraEditorWidgetsJs.h), reusing the same chrome the rest of the editor uses.
-    var agentDrop = itemDrop(ctrlCol, 'CustAgent', function (v) { pickCosmetic('agent', v); }, { height: '58px' });
+    var agentDrop = itemDrop(ctrlColInner, 'CustAgent', function (v) { pickCosmetic('agent', v); }, { height: '58px' });
     agentDrop.dd.style.marginBottom = '18px';
-    var primaryBlock = section(ctrlCol, 'PRIMARY');
+    // Per-slot "picked up" warning: a small circled "!" + owner note right under the slot's Weapon
+    // row. Driven by slotPickup() (entity ownership), NOT the active weapon, so it stays visible
+    // while the player has a grenade/knife/bomb out and only clears when the pickup is gone.
+    function pickupWarnRow(parent) {
+      var row = mk('Panel', parent); row.visible = false; row.hittest = false;
+      row.style.width = '100%'; row.style.flowChildren = 'right'; row.style.marginTop = '5px';
+      var ic = mk('Panel', row); ic.hittest = false; ic.style.width = '16px'; ic.style.height = '16px';
+      ic.style.borderRadius = '8px'; ic.style.backgroundColor = S.accent; ic.style.verticalAlign = 'center'; ic.style.marginRight = '8px';
+      var il = lbl(ic, '!', '#241a06ff', 11); il.hittest = false; il.style.fontWeight = 'bold';
+      il.style.width = '100%'; il.style.textAlign = 'center'; il.style.verticalAlign = 'center';
+      var tx = lbl(row, '', '#ffdba6', 11); tx.hittest = false; tx.style.width = 'fill-parent-flow(1.0)';
+      tx.style.whiteSpace = 'normal'; tx.style.verticalAlign = 'center';
+      return { row: row, lbl: tx };
+    }
+    var primaryBlock = section(ctrlColInner, 'PRIMARY');
     var primaryWeaponDrop = itemDrop(primaryBlock, 'CustPrimaryWeapon', function (v) { pickWeapon('primary', v); }, { rowLabel: 'Weapon', category: 'primary' });
+    custPickupBadges.primary = pickupWarnRow(primaryBlock);
     var primaryDrop = itemDrop(primaryBlock, 'CustPrimary', function (v) { pickCosmetic('primary', v); }, { rowLabel: 'Finish', showWearTag: true, category: 'primary' });
     var primaryWear = wearBlock(primaryBlock, 'primary', 'primary');
-    var secondaryBlock = section(ctrlCol, 'SECONDARY');
+    var secondaryBlock = section(ctrlColInner, 'SECONDARY');
     var secondaryWeaponDrop = itemDrop(secondaryBlock, 'CustSecondaryWeapon', function (v) { pickWeapon('secondary', v); }, { rowLabel: 'Weapon', category: 'secondary' });
+    custPickupBadges.secondary = pickupWarnRow(secondaryBlock);
     var secondaryDrop = itemDrop(secondaryBlock, 'CustSecondary', function (v) { pickCosmetic('secondary', v); }, { rowLabel: 'Finish', showWearTag: true, category: 'secondary' });
     var secondaryWear = wearBlock(secondaryBlock, 'secondary', 'secondary');
-    var knifeBlock = section(ctrlCol, 'MELEE / KNIFE');
+    var knifeBlock = section(ctrlColInner, 'MELEE / KNIFE');
     var knifeDrop = itemDrop(knifeBlock, 'CustKnife', function (v) { pickCosmetic('knife', v); }, { rowLabel: 'Weapon', showWearTag: true, category: 'knife' });
     var knifeWear = wearBlock(knifeBlock, 'knife', 'knife');
-    var glovesBlock = section(ctrlCol, 'GLOVES');
+    var glovesBlock = section(ctrlColInner, 'GLOVES');
     var glovesDrop = itemDrop(glovesBlock, 'CustGloves', function (v) { pickCosmetic('gloves', v); }, { rowLabel: 'Gloves' });
     var glovesWear = wearBlock(glovesBlock, 'gloves');
     var wearControls = { primary: primaryWear, secondary: secondaryWear, knife: knifeWear, gloves: glovesWear };
@@ -1087,11 +1633,22 @@ R"EDJS(
       var wc = wearControls[slot]; if (!wc) return;
       var w = custWear[slot] || (custWear[slot] = { preset: 'fn', custom: 0.01 });
       wc.preset.update(WEAR_OPTIONS, w.preset);
-      wc.custom.visible = w.preset === 'custom';
-      custWearUpdating = true;
-      wc.custom.text = wearValue(slot).toFixed(2);
-      custWearUpdating = false;
-      var val = wearValue(slot), opt = selOpt(slot, custSel[slot]), meta = opt ? (opt[2] || {}) : {};
+      var showFloat = w.preset === 'custom';
+      if (wc.custom.__box) wc.custom.__box.visible = showFloat; else wc.custom.visible = showFloat;
+      var val = wearValue(slot);
+      // Only rewrite the custom-float box when the number it shows actually differs from the target
+      // AND the user is not mid-typing (__fresh === false means keystrokes arrived since the last
+      // programmatic stamp -- re-stamping the clamped value between keystrokes made typing "0.4"
+      // impossible). The COMMANDED wear is always the clamped wearValue(); the box display catches
+      // up on the next preset/slot action.
+      var curNum = parseFloat(wc.custom.text);
+      if (wc.custom.__fresh !== false && (!isFinite(curNum) || Math.abs(curNum - val) > 0.001)) {
+        custWearUpdating = true;
+        wc.custom.text = val.toFixed(2);
+        custWearUpdating = false;
+        wc.custom.__fresh = true;
+      }
+      var opt = selOpt(slot, custSel[slot]), meta = opt ? (opt[2] || {}) : {};
       var lo = (typeof meta.wearMin === 'number') ? meta.wearMin : 0.0;
       var hi = (typeof meta.wearMax === 'number') ? meta.wearMax : 1.0;
       var frac = (hi > lo) ? ((val - lo) / (hi - lo)) : val;
@@ -1101,6 +1658,10 @@ R"EDJS(
       if (!custWear[slot]) custWear[slot] = { preset: 'fn', custom: 0.01 };
       if (preset) custWear[slot].preset = preset;
       if (customValue !== null && customValue !== undefined) custWear[slot].custom = clamp01(customValue);
+      // A preset picked from the dropdown (no explicit custom value) re-arms the float box for a
+      // fresh programmatic stamp; a typed custom value must NOT (the user is mid-edit).
+      if ((customValue === null || customValue === undefined) && wearControls && wearControls[slot])
+        wearControls[slot].custom.__fresh = true;
       saveActiveItemWear(slot);
       markTouched(slot);
       populateCustomize();
@@ -1130,7 +1691,7 @@ R"EDJS(
       // break the console-command tokenizer; the native "uilog" handler joins the tokens back.
       var label = (opt && opt[0]) ? ('' + opt[0]) : '(unknown)';
       var safeLabel = label.replace(/["';\r\n]+/g, ' ').replace(/\s+/g, ' ');
-      var routeNote = routedPickup ? (' [owner ' + custActiveWeaponOwnerSteam + ']') : '';
+      var routeNote = routedPickup ? (' [owner ' + pickupOwnerSteam(slot) + ']') : '';
       cmd('mirv_filmmaker cosmetics uilog [' + slot + '] ' + safeLabel + routeNote + ' (def ' + def + ' paint ' + pk + ' wear ' + wear + ')');
       var sent = false;
       var command = '';
@@ -1165,6 +1726,7 @@ R"EDJS(
       markTouched(slot);
       populateCustomize();
       updatePreview();
+      previewLog('pick', 'slot=' + slot + ' value=' + value);
     }
     // Re-target which weapon a primary/secondary block edits (the weapon selector). Resets the finish
     // dropdown to that weapon's vanilla default and repopulates; does NOT stage a pending change on its
@@ -1180,6 +1742,7 @@ R"EDJS(
       loadActiveItemWear(slot);
       populateCustomize();
       updatePreview();
+      previewLog('pickWeapon', 'slot=' + slot + ' def=' + def);
     }
     function populateCustomize() {
       coerceSelection('agent');
@@ -1206,6 +1769,122 @@ R"EDJS(
       updatePickupBanner();
       updateActionBar();
     }
+)EDJS"
+R"EDJS(
+    // ---- Manual scroll + C++-routed typing --------------------------------------------------
+    // The modal is an EXCLUSIVE input surface: MovieMode/main.cpp swallow the raw wheel + typed keys
+    // from the game (so nothing leaks to the demo behind the modal) and forward them here via
+    // $.CamEditor.custWheel / custChars. Because Panorama never sees the raw wheel, scrolling is done
+    // by translating the content inside a clipped viewport; because CS2 doesn't give the in-game HUD
+    // TextEntry real keyboard focus, the search string is built from the forwarded characters.
+    function custMeasureH(panel) {
+      if (!panel || !panel.IsValid || !panel.IsValid()) return 0;
+      var sy = root.actualuiscale_y || ctx.actualuiscale_y || 1;
+      return (panel.actuallayoutheight || 0) / (sy || 1);
+    }
+    // Apply a style value only when it changed, so per-frame maintenance doesn't thrash layout.
+    function setStyleIf(panel, key, prop, value) {
+      if (panel['__' + key] === value) return;
+      panel['__' + key] = value;
+      panel.style[prop] = value;
+    }
+    function sizeColScroll() {
+      if (!custOverlay.visible || !ctrlColInner || !ctrlColInner.IsValid || !ctrlColInner.IsValid()) return;
+      var viewH = custMeasureH(ctrlCol), contentH = custMeasureH(ctrlColInner);
+      var maxOff = Math.max(0, contentH - viewH);
+      if (custColScroll.off > maxOff) custColScroll.off = maxOff;
+      if (custColScroll.off < 0) custColScroll.off = 0;
+      setStyleIf(ctrlColInner, 'sy', 'transform', 'translateY(' + (-Math.round(custColScroll.off)) + 'px)');
+    }
+    function sizeOpenDrop() {
+      var rec = openDrop;
+      if (!rec || !rec.pop || !rec.pop.visible || !rec.rowsView || !rec.rows) return;
+      var contentH = custMeasureH(rec.rows);
+      var viewH = (contentH > 0) ? Math.min(CUST_DROP_VIEW_MAX, contentH) : CUST_DROP_VIEW_MAX;
+      setStyleIf(rec.rowsView, 'vh', 'height', Math.round(viewH) + 'px');
+      var maxOff = Math.max(0, contentH - viewH);
+      if (rec.scrollOff > maxOff) rec.scrollOff = maxOff;
+      if (rec.scrollOff < 0) rec.scrollOff = 0;
+      setStyleIf(rec.rows, 'sy', 'transform', 'translateY(' + (-Math.round(rec.scrollOff)) + 'px)');
+    }
+    // Every render() frame while the editor is up: keep the manual-scroll viewports sized to their
+    // (possibly changed) content and re-clamp offsets. Cheap no-op when the modal is closed.
+    function custScrollMaintain() {
+      if (!custOverlay.visible) return;
+      sizeColScroll();
+      sizeOpenDrop();
+    }
+    // Wheel notch forwarded from C++ (MovieMode swallowed the raw wheel). +1 = up, -1 = down. Over
+    // the character preview it zooms; otherwise it scrolls the open dropdown or right control column.
+    function custWheel(notches, x, y) {
+      if (!custOverlay.visible) return 'closed';
+      var n = parseInt(notches, 10) || 0;
+      if (!n) return 'ok';
+      if (overPreview(parseFloat(x), parseFloat(y))) {
+        zoomPreview(n > 0 ? +1 : -1);
+        previewLog('zoom', 'notches=' + n + ' cursor=' + x + ',' + y);
+        return 'zoom';
+      }
+      var d = -n * CUST_SCROLL_STEP; // n>0 (wheel up) -> toward top -> smaller offset; scales with notch count
+      var rec = (openDrop && openDrop.pop && openDrop.pop.visible && openDrop.rowsView) ? openDrop : null;
+      if (rec) { rec.scrollOff += d; sizeOpenDrop(); }
+      else { custColScroll.off += d; sizeColScroll(); }
+      return 'ok';
+    }
+    // The custom-float wear box of the slot currently being edited, when it's on screen -- the target
+    // for typed numbers while no dropdown is open (agents/skins are picked from dropdowns; only wear
+    // is free-typed). Returns null if there's nothing to type into.
+    function activeWearFloat() {
+      var wc = wearControls && wearControls[custActiveCategory];
+      if (!wc || !wc.custom || !wc.custom.IsValid || !wc.custom.IsValid()) return null;
+      var shown = wc.custom.__box ? wc.custom.__box.visible : wc.custom.visible;
+      if (shown) return { slot: custActiveCategory, panel: wc.custom };
+      return null;
+    }
+    // One forwarded character (WM_CHAR code). A searchable OPEN dropdown takes text; otherwise a
+    // visible custom-float wear box takes digits. Escape backs out (close dropdown, else close modal)
+    // so the user is never trapped with keys captured.
+    function custChar(code) {
+      if (code === 27) { if (openDrop) closeAllDrops(); else closeCustomize(); return; }
+      var rec = (openDrop && openDrop.searchable) ? openDrop : null;
+      if (rec) {
+        if (code === 8) { rec.query = (rec.query || '').slice(0, -1); }
+        else if (code === 13) { return; }
+        else if (code >= 32 && code !== 127) { rec.query = (rec.query || '') + String.fromCharCode(code).toLowerCase(); }
+        else { return; }
+        if (rec.search && rec.search.IsValid && rec.search.IsValid()) {
+          try { custSearchDisplayGuard = true; rec.search.text = rec.query; custSearchDisplayGuard = false; } catch (e) {}
+        }
+        if (rec.rebuildRows) rec.rebuildRows();
+        rec.scrollOff = 0; sizeOpenDrop();
+        return;
+      }
+      var f = activeWearFloat();
+      if (!f) return;
+      var t = '';
+      try { t = f.panel.text || ''; } catch (e) { t = ''; }
+      if (code === 8) t = t.slice(0, -1);
+      else if ((code >= 48 && code <= 57) || code === 46) { // 0-9 and '.'
+        // Fresh-typing: the first character after a programmatic stamp (preset switch, clamp,
+        // slot change, clicking the box) REPLACES the shown value -- appending to "0.40" gave
+        // nonsense like "0.40.5".
+        if (f.panel.__fresh !== false) t = '';
+        t = t + String.fromCharCode(code);
+      }
+      else return;
+      f.panel.__fresh = false;
+      custWearUpdating = true; try { f.panel.text = t; } catch (e2) {} custWearUpdating = false;
+      var v = parseFloat(t);
+      if (isFinite(v)) setWear(f.slot, 'custom', v);
+    }
+    function custChars(csv) {
+      if (!custOverlay.visible || csv == null) return 'closed';
+      var parts = ('' + csv).split(',');
+      for (var i = 0; i < parts.length; i++) { var code = parseInt(parts[i], 10); if (code >= 0) custChar(code); }
+      return 'ok';
+    }
+)EDJS"
+R"EDJS(
     // Tells the C++ side (CameraEditorHud::UpdateCustomizeModalState, "customizeopen" attribute)
     // whether the modal is open, so MovieMode/GetSuspendMirvInput can treat it as an exclusive
     // input surface (swallow Space/clicks/wheel, suspend free-cam mouse-look) -- see Filmmaker.h
@@ -1224,14 +1903,20 @@ R"EDJS(
       populateCustomize();
       custDisplayedLoadoutSig = customizeLoadoutSignature();
       custOverlay.visible = true; // visible BEFORE building the 3D preview so its scene composites
-      updatePreview();
-      pokePreviewSoon();          // re-assert the scene over the next frames once layout settles
-      // CREATE the 3D panel only AFTER the overlay is visible AND laid out (next layout passes).
-      try { $.Schedule(0.08, recreatePreview); $.Schedule(0.30, recreatePreview); } catch (e) { recreatePreview(); }
+      previewNudgeArmed = true;
+      previewLog('open');
+      // CREATE the 3D panel only AFTER the overlay is visible AND laid out (next layout passes). Do
+      // not call updatePreview() eagerly here: that creates a throwaway panel, then the delayed
+      // recreate replaces it and can leave the final render target black. One delayed create gets
+      // one Panorama-only composition refresh.
+      try { $.Schedule(0.18, recreatePreview); } catch (e) { recreatePreview(); }
       publishCustomizeOpenState();
     }
     function closeCustomize() {
+      var wasOpen = custOverlay.visible; // closeCustomize() is also called every non-UI-mouse render()
+      // frame as a safety net (see render()'s `if (!cur)` branch) -- only log/act on a REAL close.
       closeAllDrops();
+      destroyPreview3d();
       custOverlay.visible = false;
       custResetConfirm.visible = false;
       // Closing (X / click-outside / Cancel) always discards whatever hasn't been committed via
@@ -1239,6 +1924,7 @@ R"EDJS(
       custTouched = { agent: false, primary: false, secondary: false, knife: false, gloves: false };
       custDirty = false;
       publishCustomizeOpenState();
+      if (wasOpen) previewLog('close');
     }
     var customizeDrops = { agent: agentDrop, primary: primaryDrop, secondary: secondaryDrop, knife: knifeDrop, gloves: glovesDrop };
 )EDJS"
@@ -1281,6 +1967,8 @@ R"EDJS(
     // Who Apply would actually write to -- mirrors the pickup-banner logic (updatePickupBanner) so the
     // button label and the warning banner never disagree about the target.
     function applyLabelTarget() {
+      var ps = pickupSlots();
+      if (ps.length) return slotOwnerName(ps[0]);
       if (custActiveWeaponPickup && custActiveWeaponOwnerSteam) return custActiveWeaponOwnerName || ('Player ' + custActiveWeaponOwnerSteam);
       return custTargetName || 'Player';
     }

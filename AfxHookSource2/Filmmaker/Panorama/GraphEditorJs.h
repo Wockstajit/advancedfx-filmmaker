@@ -115,7 +115,9 @@ R"GEJS(
     root.style.fontFamily = S.font;
     var dock = mk('Panel', root); dock.hittest = false;
     dock.style.horizontalAlign = 'left'; dock.style.verticalAlign = 'bottom';
-    dock.style.backgroundColor = S.panel; dock.style.borderTop = '1px solid ' + S.accent;
+    // No borderTop: the camera editor's tab bar sits directly above with its own accent
+    // borderBottom, so a top border here drew a SECOND separator line 4px under it.
+    dock.style.backgroundColor = S.panel;
     var catcher = mk('Panel', dock); catcher.hittest = true; catcher.style.width = '100%'; catcher.style.height = '100%';
     catcher.style.position = '0px 0px 0px';
     catcher.SetPanelEvent('onactivate', function () { /* swallow stray clicks; pipe owns logic */ });

@@ -51,7 +51,7 @@ std::wstring PlayingDemoPath();
 // was consumed (the caller should then swallow it). Safe no-ops if unused.
 bool MovieInput_OnKey(int vkey, bool down);
 bool MovieInput_OnMouseButton(int button, bool down); // 0 = left, 1 = right
-bool MovieInput_OnMouseWheel(int delta, bool shiftDown, bool ctrlDown);
+bool MovieInput_OnMouseWheel(int delta, bool shiftDown, bool ctrlDown, int x = -1, int y = -1);
 
 // HUD panel show/hide (driven by the mirv_filmmaker hud console command).
 void MovieHud_Set(bool visible);
@@ -130,6 +130,16 @@ bool CameraEditor_ScaledHud(float& x0, float& y0, float& x1, float& y1);
 // unconditionally while this is true, and main.cpp's GetSuspendMirvInput() ORs it in so free-cam
 // mouse-look can't compete with dragging/scrolling inside the modal.
 bool CameraEditor_CustomizeModalOpen();
+
+// Route captured input into the Customize modal's Panorama JS. In the in-game HUD context CS2 keeps
+// keyboard/wheel priority (a Panorama TextEntry never gets real focus, and the wheel still drives
+// the demo spectator), so the modal cannot rely on native input the way a main-menu popup can.
+// Instead MovieMode/main.cpp SWALLOW the raw wheel + typed characters from the game while the modal
+// is open and forward them here; CameraEditorHud drains these on the main thread and dispatches them
+// to $.CamEditor.custWheel/custChars so the modal scrolls + its search boxes type -- with nothing
+// leaking to the demo behind it. Thread-safe (called from the WndProc/input thread).
+void CameraEditor_CustomizePushWheel(int notches, int x, int y); // +1 = wheel up, -1 = wheel down; client coords
+void CameraEditor_CustomizePushChar(unsigned charCode); // WM_CHAR code unit (incl. 8 backspace, 27 esc)
 
 // --- Experimental After-Effects-style graph editor (isolated, opt-in overlay) ---
 // Default OFF; toggled by the "Experiment" button or "mirv_filmmaker grapheditor on|off|

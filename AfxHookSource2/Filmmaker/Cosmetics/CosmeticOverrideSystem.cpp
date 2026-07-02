@@ -711,6 +711,14 @@ void CosmeticOverrideSystem::RunFrame() {
 	// (which empties the store) and so the clock advances every frame regardless of apply state.
 	++m_frameCounter;
 	if (m_vmMirrorSettleFrames > 0) --m_vmMirrorSettleFrames;
+	// Decay unconditionally (regardless of the enabled/armed/profiles/demo gate below): this used to
+	// live only in the SEEK-SAFETY GATE further down, which the empty-profile early-return skips
+	// entirely -- so with zero cosmetic profiles set (e.g. a fresh session, or the Customize preview's
+	// one-shot previewnudge with no profile yet), a seek anywhere in the session left this stuck at its
+	// post-seek value FOREVER, and MaybeFireTickNudge() (called below, BEFORE that gate) permanently
+	// deferred every pending nudge as a result (confirmed live: mvm_debug showed seekSettle stuck at
+	// 152 for 2000+ consecutive frames, never decrementing, previewnudge silently doing nothing).
+	if (m_seekSettleFrames > 0) --m_seekSettleFrames;
 	// Cosmetic state is scoped to one uninterrupted demo run: clear ONLY when the demo PATH changes (a
 	// different demo loaded, or the demo closed). Overrides are keyed by owner XUID and the apply loop
 	// re-discovers entities every frame, so they intentionally PERSIST across scrubs in BOTH directions
@@ -748,8 +756,9 @@ void CosmeticOverrideSystem::RunFrame() {
 	}
 
 	// SEEK-SAFETY GATE: skip apply while entities rebuild after a demo seek (see DetectDemoSeekEarly).
+	// Decrement now happens unconditionally at the top of RunFrame (see comment there); this only
+	// decides whether to skip the apply loop this frame.
 	if (m_seekSettleFrames > 0) {
-		--m_seekSettleFrames;
 		UpdatePaintkitBridge();
 		return;
 	}
@@ -1128,6 +1137,13 @@ void CosmeticOverrideSystem::MaybeFireTickNudge() {
 
 	if (!m_pendingNudge)
 		return;
+	// Throttled (not per-frame): framesSinceReq changes every call so MvmDebugLog_Linef's dedup can't
+	// collapse it: this diagnosed the m_seekSettleFrames-stuck-forever bug above via 2000+ lines/3s.
+	if (MvmDebugLog_Active() && (m_frameCounter % 16) == 0)
+		MvmDebugLog_Linef("cosmetics.nudge.gate",
+			"pending=1 seekSettle=%d tickNudge=%d framesSinceReq=%llu inDemo=%d",
+			m_seekSettleFrames, m_tickNudge ? 1 : 0,
+			(unsigned long long)(m_frameCounter - m_nudgeRequestFrame), InDemoContext() ? 1 : 0);
 	if (m_seekSettleFrames > 0)
 		return; // defer until entity list settles after a seek
 	if (!m_tickNudge) { m_pendingNudge = false; return; } // disabled: drop the request
@@ -1138,8 +1154,11 @@ void CosmeticOverrideSystem::MaybeFireTickNudge() {
 	if (!InDemoContext())
 		return; // keep pending; fire once a demo is actually playing
 	int tick = 0;
-	if (!g_MirvTime.GetCurrentDemoTick(tick))
+	if (!g_MirvTime.GetCurrentDemoTick(tick)) {
+		if (MvmDebugLog_Active())
+			MvmDebugLog_Linef("cosmetics.nudge.gate", "tick unreadable, deferring");
 		return; // tick not readable yet (mid-seek) -- retry next frame
+	}
 	m_pendingNudge = false;
 
 	// If the demo is already PLAYING, live frames already re-evaluate the renderable -- the swaps

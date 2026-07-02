@@ -90,13 +90,14 @@ void PrintUsage(const char* cmd) {
 			"  %s cosmetics precache [0|1]   (blocking-load the knife/agent model before SetModel; default on)\n"
 			"  %s cosmetics animfix [0|1]   (detour client.dll anim builder; empty-list for null out-param; THE knife-crash fix; default on)\n"
 			"  %s cosmetics ticknudge [on|off|<ticks>]   (briefly play the demo after a change so body swaps re-render)\n"
+			"  %s cosmetics previewnudge   (one-shot resume/re-pause so the Customize 3D preview panel composites while paused)\n"
 			"  %s cosmetics debuglog [start|stop]   (timestamped debug log; alias: mvm_debug start|stop)\n"
 			"  %s cosmetics uilog <text>   (echo a verbatim UI label to the console + debug log; sent by the Customize panel)\n"
 			"  %s cosmetics mesh [auto|modern|legacy | masks <m> <l>]   (legacy-vs-CS2 weapon mesh selection)\n"
 			"  %s cosmetics recompose [0|1]   (force material re-composite after writes)\n"
 			"  %s cosmetics vtidx <comp> <sec>   (tune UpdateComposite vtable indices, -1=skip)\n"
 			"  %s cosmetics vtprobe <idx>   (bisect OnDataChanged: call weapon vtable[idx](this,0) now)\n",
-		cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd);
+		cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd, cmd);
 }
 
 // Parses ORDER-INDEPENDENT key/value tokens of the form "key=value" (or "key value", to be lenient)
@@ -438,6 +439,20 @@ void DoTickNudge(int argc, advancedfx::ICommandArgs* args, const char* cmd) {
 		CosmeticsRef().TickNudgeTicks(), (unsigned long long)CosmeticsRef().TotalNudges());
 }
 
+// Fires the SAME briefly-resume-then-repause nudge as RequestApplyNudge/MaybeFireTickNudge, but
+// WITHOUT requiring an actual cosmetic mutation first. The Customize UI's native 3D preview panel
+// (CameraEditorCustomizeJs.h MapPlayerPreviewPanel) needs at least one live-ticking demo frame to
+// composite -- confirmed live: SetReadyForDisplay toggling and panel recreate do nothing while the
+// demo sits paused, but a brief demo_resume/demo_pause makes it render every time. The panel is a
+// separate Panorama scene from the spectated player's own body, so it doesn't go through
+// AfterMutation()'s per-command nudge; this gives the JS side a one-shot lever to request the same
+// resume/re-pause dance whenever the preview needs to (re)composite while paused.
+void DoPreviewNudge(int argc, advancedfx::ICommandArgs* args, const char* cmd) {
+	(void)argc; (void)args;
+	CosmeticsRef().RequestApplyNudge();
+	advancedfx::Message("%s cosmetics: previewnudge requested (ticks=%d).\n", cmd, CosmeticsRef().TickNudgeTicks());
+}
+
 void DoModelSwap(int argc, advancedfx::ICommandArgs* args, const char* cmd) {
 	if (argc >= 4) {
 		if (TokenIs(args->ArgV(3), "knife")) {
@@ -763,6 +778,8 @@ void Cosmetics_RunCommand(int argc, advancedfx::ICommandArgs* args, const char* 
 		DoAnimFix(argc, args, cmd);
 	} else if (TokenIs(sub, "ticknudge")) {
 		DoTickNudge(argc, args, cmd);
+	} else if (TokenIs(sub, "previewnudge")) {
+		DoPreviewNudge(argc, args, cmd);
 	} else if (TokenIs(sub, "debuglog")) {
 		DoDebugLog(argc, args, cmd);
 	} else if (TokenIs(sub, "uilog")) {

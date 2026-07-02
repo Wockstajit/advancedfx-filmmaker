@@ -167,6 +167,11 @@ struct ClientDllOffsets_t {
 		ptrdiff_t m_hHudModelArms = 0;        // CHandle< C_CS2HudModelArms >
 		ptrdiff_t m_nEconGlovesChanged = 0;   // uint8 (OnEconGlovesChanged); bump to signal visual refresh
 		ptrdiff_t m_flLastSpawnTimeIndex = 0; // float (GameTime_t), resolved on C_CSPlayerPawnBase
+		// Flashbang whiteout fields (resolved on C_CSPlayerPawnBase). The Customize modal zeroes
+		// these each frame while open so the flash overlay never covers the customizer UI/preview.
+		// Optional/non-fatal: 0 = unresolved, suppression silently skipped.
+		ptrdiff_t m_flFlashMaxAlpha = 0; // float32
+		ptrdiff_t m_flFlashDuration = 0; // float32
 	} C_CSPlayerPawn;
 
 	// READ-ONLY model-state chain for showing which agent/player-model a spectated player wears

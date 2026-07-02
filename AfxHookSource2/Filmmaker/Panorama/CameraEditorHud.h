@@ -35,6 +35,7 @@
 
 #include "PanoramaBridge.h"
 
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -104,6 +105,13 @@ public:
 	// exclusive surface: no click/key/scroll should leak to the game while it's up.
 	bool CustomizeModalOpen() const { return m_customizeOpen; }
 
+	// Captured-input pipe for the Customize modal (see Filmmaker.h CameraEditor_CustomizePush*).
+	// Called from the WndProc/input thread; enqueues under a lock. Drained + dispatched to the JS
+	// on the main thread in RunFrame (DispatchCustomizeInput). Wheel events keep their coordinates so
+	// JS can decide whether to zoom the preview or scroll the controls; typed characters keep order.
+	void PushCustomizeWheel(int notches, int x, int y);
+	void PushCustomizeChar(unsigned charCode);
+
 private:
 	void* FindRoot();
 	bool BuildIfNeeded();
@@ -113,6 +121,7 @@ private:
 	void OnExit();  // one-shot: un-host the timeline, restore MovieHud, stop scrub
 	void UpdateScaleRequest(); // publish the preview rect to the render-layer viewport scaler
 	void UpdateCustomizeModalState(); // reads the "customizeopen" attribute JS published this frame
+	void DispatchCustomizeInput();    // main thread: drain the captured-input queue -> RunScript into the modal JS
 
 	PanoramaBridge m_bridge;
 	void* m_hudPanel = nullptr; // HUD context we built against (rebuild if it changes)
@@ -122,6 +131,11 @@ private:
 	short m_symDebugPanels = -1; // "debugpanels" -- JS publishes measured HUD/editor rects
 	short m_symCustomizeOpen = -1; // "customizeopen" -- JS publishes custOverlay.visible ("0"/"1")
 	bool m_customizeOpen = false;
+	// Captured-input queue for the modal (WndProc thread -> main thread). Guarded by m_custInputMutex.
+	std::mutex m_custInputMutex;
+	struct CustomizeWheelEvent { int notches; int x; int y; };
+	std::vector<CustomizeWheelEvent> m_custWheelEvents; // ordered wheel events; coords decide preview zoom vs scroll
+	std::vector<unsigned> m_custChars;   // ordered typed character codes pending
 	bool m_built = false;
 	bool m_enabled = false;     // Camera Editor Mode on/off
 	bool m_scaleEnabled = false; // true scaled-preview viewport (render-layer blit)

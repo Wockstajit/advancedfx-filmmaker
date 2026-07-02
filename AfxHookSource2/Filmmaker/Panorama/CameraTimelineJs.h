@@ -118,6 +118,9 @@ inline const char* kCameraTimelineJs = R"TLJS(
       nativeContents.style.backgroundColor = S.bgSolid;
       if (nativeRoot && nativeRoot.style) { nativeRoot.style.width = w + 'px'; nativeRoot.style.horizontalAlign = 'left'; nativeRoot.style.backgroundColor = S.bgSolid; }
       nativeBgOn = true;
+      rescaleMarkers('RoundMarkers', true, true);
+      rescaleMarkers('HighlightMarkers', true, false);
+      rescaleMarkers('HighlightIcons', false, false);
     }
     function nativeUndock() {
       if (!ensureNative()) return;
@@ -132,8 +135,70 @@ inline const char* kCameraTimelineJs = R"TLJS(
         if (nativeRoot && nativeRoot.style) nativeRoot.style.backgroundColor = 'rgba(0,0,0,0)';
         nativeBgOn = false;
       }
+      // Refresh the round/highlight marker basis geometry while we're at the bar's TRUE native
+      // width (see rescaleMarkers below) -- cheap, and self-heals if the native script recreates
+      // the markers (round data changed, spectated player switched) while undocked.
+      captureMarkerBasis('RoundMarkers');
+      captureMarkerBasis('HighlightMarkers');
+      captureMarkerBasis('HighlightIcons');
     }
-
+    // ---- Round/kill marker rescale -----------------------------------------------------------
+    // CS2's own huddemocontroller.js positions the round-shade bars (#RoundMarkers), the
+    // highlight-reel intervals (#HighlightMarkers) and the kill/death icons (#HighlightIcons) as
+    // ABSOLUTE PIXEL children, computed ONCE against the bar's width at that moment: RoundMarkers
+    // is guarded by an internal one-shot flag that never fires again, and the other two are only
+    // recomputed when the spectated player changes. Docking the bar narrower for the editor's
+    // Regular Timeline mode resizes Contents/Root (and RoundMarkers/HighlightMarkers/HighlightIcons
+    // correctly cascade to 100% of that via native CSS -- verified live: container 1578px->1099px),
+    // but the existing marker children keep their STALE full-width geometry (verified live: a
+    // marker's actuallayoutwidth read 71px in BOTH states) -- they don't shrink with their parent,
+    // so the round-shade boundaries / kill icons no longer line up with the (correctly rescaled)
+    // slider thumb: the playhead ends up visually inside the wrong round's shading.
+    // Fix: capture each marker's left offset + width while UNDOCKED (the bar's true native width
+    // == the basis the native script computed against), then reapply those figures scaled to the
+    // CURRENT container width every time we dock. Must read the BASIS ONCE and always scale FROM
+    // it (not from the live value) -- rescaling from an already-rescaled live read would compound
+    // the scale factor every frame.
+    var markerBasis = {}; // id -> { w: container width at capture (device px), items: [{left,width}] }
+    function captureMarkerBasis(id) {
+      var p = findNative(id);
+      if (!p || !p.GetChildCount) return;
+      var n = p.GetChildCount();
+      if (n === 0) { delete markerBasis[id]; return; }
+      var items = [];
+      for (var i = 0; i < n; i++) {
+        var c = p.GetChild(i);
+        items.push({ left: c.actualxoffset || 0, width: c.actuallayoutwidth || 0 });
+      }
+      markerBasis[id] = { w: p.actuallayoutwidth || 0, items: items };
+    }
+    // scaleWidth=false for HighlightIcons: those are fixed-size (22px) CSS icons -- rescale their
+    // left offset only, don't stretch/squish the icon itself. usePosition matches whichever
+    // property the NATIVE script used to place that element, so we don't change its layout
+    // behavior: RoundMarkers children use style.position (no flow-children on the parent, so the
+    // CSS margin-top:30px combines with our y=0); HighlightMarkers/HighlightIcons children use
+    // style.marginLeft (switching those to style.position would drop HighlightIcons' CSS
+    // vertical-align:center, since position sets an explicit y and takes the child out of flow).
+    function rescaleMarkers(id, scaleWidth, usePosition) {
+      var basis = markerBasis[id];
+      var p = findNative(id);
+      if (!basis || !basis.w || !p || !p.GetChildCount) return;
+      var n = p.GetChildCount();
+      if (n !== basis.items.length) return; // native script is mid-rebuild (count changed); wait for the next undocked capture
+      var curW = p.actuallayoutwidth || 0;
+      var scale = curW / basis.w;
+      if (!isFinite(scale) || scale <= 0) return;
+      var uiscale = p.actualuiscale_x || ctx.actualuiscale_x || 1;
+      for (var i = 0; i < n; i++) {
+        var c = p.GetChild(i), it = basis.items[i];
+        var leftPx = ((it.left * scale) / uiscale).toFixed(1);
+        if (usePosition) c.style.position = leftPx + 'px 0px 0px';
+        else c.style.marginLeft = leftPx + 'px';
+        if (scaleWidth) c.style.width = ((it.width * scale) / uiscale).toFixed(1) + 'px';
+      }
+    }
+)TLJS"
+R"TLJS(
     // Patch the LIVE native demo bar (CSGOHudDemoController): remove the
     // next-camera / next-player / mouse-cursor hotkey hints, and inject our
     // "MOUSE" + "CAM EDITOR" buttons into it (idempotent; re-adds if the bar is recreated).
@@ -145,6 +210,16 @@ inline const char* kCameraTimelineJs = R"TLJS(
     function patchNativeBar() {
       var ids = ['HotKey_Next_Camera', 'HotKey_Player_Next', 'HotKey_Toggle_Mouse_Cursor'];
       for (var i = 0; i < ids.length; i++) { var p = findNative(ids[i]); if (p) p.visible = false; }
+      // "End Playback" and the native gear (opens CS2's own X-Ray/True View panel, which our Camera
+      // Editor's own ⚙ menu replaces) are suppressed PERMANENTLY from the moment a demo starts --
+      // not just while the Camera Editor is open. This runs every frame regardless of editor state
+      // (patchNativeBar is called unconditionally from CameraTimelineHud, which is always active
+      // during demo playback), so unlike the editor-only CameraEditorJs.h version this doesn't
+      // reappear when the editor is closed or before it's ever opened.
+      var endBtn = findNative('EndPlayback');
+      if (endBtn) endBtn.visible = false;
+      var gearBtn = findNative('SettingsButton');
+      if (gearBtn) gearBtn.visible = false;
       var host = findNative('HotKeyLabels') || findNative('ControlRow');
       if (!host) return;
       function childIndex(p) {
@@ -202,7 +277,12 @@ inline const char* kCameraTimelineJs = R"TLJS(
 
     // Legacy cleanup hook: if an older build hid native HUD siblings, restore them. The
     // camera timeline HUD toggle is disabled; this must not hide anything anymore.
-    var OURS = { 'CamTimelineRoot': 1, 'MarkerHudRoot': 1, 'MovieHudRoot': 1, 'CamEditorRoot': 1, 'GraphExpRoot': 1 };
+    // CamEditorConfirmRoot/CamEditorSettingsRoot: promoted to TOP-LEVEL siblings of CamEditorRoot
+    // (see CameraEditorJs.h z-layer map) so their z-index beats the Graph/Timeline roots -- which
+    // also makes them direct ctx children like CamEditorRoot, so they must be whitelisted here too
+    // or this "Hide All" sweep force-hides them the instant they open (no visible symptom besides
+    // the popup silently vanishing -- it never goes through closeSettings(), so nothing logs it).
+    var OURS = { 'CamTimelineRoot': 1, 'MarkerHudRoot': 1, 'MovieHudRoot': 1, 'CamEditorRoot': 1, 'GraphExpRoot': 1, 'CamEditorConfirmRoot': 1, 'CamEditorSettingsRoot': 1 };
     var VIEWPORT_HUD_ROOTS = {
       'HudBottomGradient': 1,
       'HudInWorld': 1,
